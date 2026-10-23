@@ -1,22 +1,25 @@
 //! Set reconciliation over one QUIC stream; gossip's safety net.
 //!
 //! ```text
-//! A → B  Hello { space, root, token }      root: hash of all day buckets
+//! A → B  Hello { space, root, token, devices }   root: hash of day buckets
 //! B → A  None (same) | Some(B's buckets)    (unknown space: stream closed)
 //! A → B  A's ids for every day that differs
 //! B → A  ids B wants, then the items A lacks, then an empty frame
-//! A → B  the items B wants, then an empty frame
+//! A → B  the items B wants, then an empty frame; B finishes, A closes
 //! ```
 //! Items are opaque envelopes, so peers that cannot read a space (storage
 //! nodes) reconcile it too. Fingerprints hash sorted ids, never XOR them.
+//! Lists arrive as maps and sets: whatever a peer repeats counts once.
 
 use crate::Id;
 use crate::node::{Node, Space};
 use anyhow::{Result, anyhow};
+use iroh::EndpointId;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 pub const ALPN: &[u8] = b"irch/sync/1";
 const MAX_FRAME: usize = 64 << 20;
@@ -27,6 +30,8 @@ pub struct Hello {
     pub space: Id,
     root: [u8; 32],
     pub token: Option<[u8; 16]>,
+    // With the token: the devices a storage node may take this space from.
+    pub devices: Vec<EndpointId>,
 }
 
 pub fn root(b: &[Bucket]) -> [u8; 32] {
@@ -42,7 +47,9 @@ pub async fn initiate(
 ) -> Result<usize> {
     let (mut tx, mut rx) = c.open_bi().await?;
     let mine = sp.buckets();
-    write(&mut tx, &Hello { space: sp.id, root: root(&mine), token }).await?;
+    let devices = token.map(|_| sp.devices()).unwrap_or_default();
+    let hello = Hello { space: sp.id, root: root(&mine), token, devices };
+    write(&mut tx, &hello).await?;
     let Some(theirs) = read::<Option<Vec<Bucket>>>(&mut rx).await? else {
         return Ok(0);
     };
@@ -51,17 +58,25 @@ pub async fn initiate(
     mine.into_iter().for_each(|b| days.entry(b.0).or_default().0 = Some(b));
     theirs.into_iter().for_each(|b| days.entry(b.0).or_default().1 = Some(b));
     let diff = days.into_iter().filter(|(_, (a, b))| a != b).map(|(d, _)| d);
-    let ids: Vec<(u32, Vec<Id>)> = diff.map(|d| (d, sp.ids(d))).collect();
+    let ids: BTreeMap<u32, Vec<Id>> = diff.map(|d| (d, sp.ids(d))).collect();
     write(&mut tx, &ids).await?;
-    let want: Vec<Id> = read(&mut rx).await?;
+    let want: BTreeSet<Id> = read(&mut rx).await?;
     let got = take(n, sp, &mut rx).await?;
-    give(sp, &mut tx, &want).await?;
+    give(sp, &mut tx, &want.into_iter().collect::<Vec<_>>()).await?;
     tx.finish()?;
+    // Closing now could drop what is still in flight: wait for B's end.
+    let _ = rx.read_to_end(0).await;
     Ok(got)
 }
 
-/// Serve one session.
+/// Serve one session, then let its last bytes land before we go.
 pub async fn respond(n: &Arc<Node>, c: &Connection) -> Result<()> {
+    session(n, c).await?;
+    let _ = tokio::time::timeout(Duration::from_secs(5), c.closed()).await;
+    Ok(())
+}
+
+async fn session(n: &Arc<Node>, c: &Connection) -> Result<()> {
     let (mut tx, mut rx) = c.accept_bi().await?;
     let hello: Hello = read(&mut rx).await?;
     let sp = n
@@ -73,21 +88,20 @@ pub async fn respond(n: &Arc<Node>, c: &Connection) -> Result<()> {
         return Ok(tx.finish()?);
     }
     write(&mut tx, &Some(mine)).await?;
+    let keep = n.takes(&sp, &c.remote_id());
     let (mut want, mut have): (Vec<Id>, Vec<Id>) = (vec![], vec![]);
-    for (day, theirs) in read::<Vec<(u32, Vec<Id>)>>(&mut rx).await? {
+    for (day, theirs) in read::<BTreeMap<u32, BTreeSet<Id>>>(&mut rx).await? {
         let ours = sp.ids(day);
-        want.extend(theirs.iter().filter(|i| ours.binary_search(i).is_err()));
-        have.extend(
-            ours.into_iter().filter(|i| theirs.binary_search(i).is_err()),
-        );
+        let new = theirs.iter().filter(|i| ours.binary_search(i).is_err());
+        want.extend(new.filter(|_| keep));
+        have.extend(ours.into_iter().filter(|i| !theirs.contains(i)));
     }
     write(&mut tx, &want).await?;
     give(&sp, &mut tx, &have).await?;
-    take(n, &sp, &mut rx).await?;
-    tx.finish()?;
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), c.closed())
-        .await;
-    Ok(())
+    if keep {
+        take(n, &sp, &mut rx).await?;
+    }
+    Ok(tx.finish()?)
 }
 
 async fn give(sp: &Space, tx: &mut SendStream, ids: &[Id]) -> Result<()> {

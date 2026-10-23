@@ -1,9 +1,9 @@
 //! One iroh endpoint carries gossip (live) and sync (catch-up) for every
-//! space. Every op, local or remote, takes the same path: append to the
-//! space's log, open with a known epoch key, fold, notify.
+//! space. Every op, local or remote, takes the same path: open with a
+//! known epoch key, check, append to the space's log, fold, notify.
 
 use crate::crypto::{Key, Me, kem_open, kem_seal, rand};
-use crate::op::{self, Env, File, Invite, Op, Role, code, tag, uncode};
+use crate::op::{self, Env, File, Invite, Op, Role, Signed, code, tag, uncode};
 use crate::state::{Message, State};
 use crate::store::{self, Log};
 use crate::sync::{self, Bucket, Hello};
@@ -37,6 +37,8 @@ pub const MAX_TEXT: usize = 4000;
 pub const MAX_NAME: usize = 64;
 pub const MAX_FILE: usize = 25 << 20;
 const BLOB: &[u8] = b"irch/blob/1";
+const PARKED: usize = 32 << 20;
+const LOCKED: &str = "keys changed without you: ask for a new invite";
 
 /// How to reach peers beyond the LAN.
 #[derive(Clone, Debug, Default)]
@@ -90,6 +92,7 @@ pub struct Space {
     tx: Mutex<Option<GossipSender>>,
     nbrs: Mutex<HashSet<EndpointId>>,
     seen: Mutex<HashMap<Id, Instant>>,
+    busy: Mutex<HashSet<EndpointId>>,
     task: OnceLock<AbortOnDropHandle<()>>,
 }
 
@@ -98,9 +101,21 @@ struct Book {
     idx: BTreeMap<u32, BTreeSet<Id>>,
     at: HashMap<Id, (u64, u32)>,
     keys: HashMap<[u8; 8], Key>,
-    pending: HashMap<[u8; 8], Vec<(u64, bool, Env)>>,
+    // What no key we hold opens yet, in memory only: past `PARKED` bytes
+    // from the network it is dropped, and sync brings it again.
+    pending: HashMap<Id, (Env, Src)>,
+    parked: usize,
+    // Per epoch, the older keys its holders learn through `Back`.
+    backs: HashMap<[u8; 8], Vec<[u8; 8]>>,
     st: State,
     knocks: Vec<Invite>,
+}
+
+/// Where an envelope is: in the log (checked once, or not yet), or only
+/// in memory until it opens and checks out (ours need no check).
+enum Src {
+    Log(bool),
+    Net(Vec<u8>, bool),
 }
 
 fn named(n: &str) -> Result<&str> {
@@ -118,17 +133,63 @@ fn rekey_aad(space: &Id, epoch: &[u8; 8]) -> Vec<u8> {
 }
 
 impl Book {
-    /// Open what known keys open; keys learned on the way open more.
-    fn fold(&mut self, sp: &Id, me: &Me, mut work: Vec<(u64, bool, Env)>) {
-        let mut ops = vec![];
-        while let Some((at, checked, e)) = work.pop() {
-            let Some(key) = self.keys.get(&e.epoch) else {
-                self.pending.entry(e.epoch).or_default().push((at, checked, e));
+    fn new(log: Log, st: State) -> Self {
+        let (idx, at, keys) = (BTreeMap::new(), HashMap::new(), HashMap::new());
+        let (pending, backs, knocks) = (HashMap::new(), HashMap::new(), vec![]);
+        Self { log, idx, at, keys, pending, parked: 0, backs, st, knocks }
+    }
+
+    fn has(&self, i: &Id) -> bool {
+        self.at.contains_key(i) || self.pending.contains_key(i)
+    }
+
+    fn index(&mut self, i: Id, ts: u64, at: u64, len: usize) {
+        self.at.insert(i, (at, len as u32));
+        self.idx.entry((ts / DAY) as u32).or_default().insert(i);
+    }
+
+    /// Append to the log (flushed to disk, for ours), and to the day
+    /// index that sync compares.
+    fn store(
+        &mut self,
+        i: Id,
+        ts: u64,
+        raw: &[u8],
+        checked: bool,
+        flush: bool,
+    ) -> bool {
+        if self.at.contains_key(&i) {
+            return false;
+        }
+        let at = self.log.append(checked, raw, flush);
+        let Ok(at) = at.inspect_err(|e| warn!("log: {e}")) else {
+            return false;
+        };
+        self.index(i, ts, at, raw.len());
+        true
+    }
+
+    /// Open what known keys open, keeping what is new once it checks out;
+    /// keys learned on the way open more. Returns how many were kept.
+    fn fold(
+        &mut self,
+        sp: &Id,
+        me: &Me,
+        mut work: Vec<(Id, Env, Src)>,
+    ) -> usize {
+        let (mut ops, mut kept) = (vec![], 0);
+        while let Some((i, e, src)) = work.pop() {
+            let Some(&key) = self.keys.get(&e.epoch) else {
+                self.park(i, e, src);
                 continue;
             };
-            let Some(s) = op::open(sp, key, &e, !checked) else { continue };
-            if !checked && let Err(e) = self.log.check(at) {
-                warn!("log: {e}");
+            let trusted = matches!(src, Src::Log(true) | Src::Net(_, true));
+            let Some(s) = op::open(sp, &key, &e, !trusted) else { continue };
+            if let Src::Net(raw, ours) = &src {
+                if !self.store(i, e.ts, raw, true, *ours) {
+                    continue;
+                }
+                kept += 1;
             }
             let key = match &s.op {
                 Op::Rekey { epoch, boxes } => boxes
@@ -139,7 +200,10 @@ impl Book {
                     })
                     .and_then(|k| Key::try_from(k).ok())
                     .filter(|k| tag(k) == *epoch),
-                Op::Back { key } => Some(*key),
+                Op::Back { key } => {
+                    self.backs.entry(e.epoch).or_default().push(tag(key));
+                    Some(*key)
+                }
                 Op::Knock { sealed } => {
                     let inv = kem_open(&me.kem, &sp.0, sealed);
                     let inv = inv
@@ -154,27 +218,71 @@ impl Book {
             if let Some(k) = key
                 && self.keys.insert(tag(&k), k).is_none()
             {
-                work.extend(
-                    self.pending.remove(&tag(&k)).into_iter().flatten(),
-                );
+                work.extend(self.unpark(&tag(&k)));
             }
             ops.push(s);
         }
         self.st.extend(ops);
+        kept
     }
 
-    /// The key to seal with: the newest valid epoch, never one older than
-    /// the invite's. `Err` if keys moved on without us.
-    fn key(&self, inv: &Invite) -> Result<Key> {
-        let valid = self.st.epochs();
-        let newest =
-            valid.last().filter(|_| valid.iter().any(|e| e.0 == tag(&inv.key)));
-        match newest {
-            None => Ok(inv.key),
-            Some((t, _)) => self.keys.get(t).copied().ok_or_else(|| {
-                anyhow!("keys changed without you: ask for a new invite")
-            }),
+    fn park(&mut self, i: Id, e: Env, src: Src) {
+        if let Src::Net(raw, _) = &src {
+            if self.parked > PARKED {
+                self.pending.retain(|_, (_, s)| matches!(s, Src::Log(_)));
+                self.parked = 0;
+            }
+            self.parked += raw.len();
         }
+        self.pending.insert(i, (e, src));
+    }
+
+    fn unpark(&mut self, t: &[u8; 8]) -> Vec<(Id, Env, Src)> {
+        let out = self.pending.extract_if(|_, (e, _)| e.epoch == *t);
+        let v: Vec<_> = out.map(|(i, (e, s))| (i, e, s)).collect();
+        for (_, _, s) in &v {
+            if let Src::Net(raw, _) = s {
+                self.parked -= raw.len();
+            }
+        }
+        v
+    }
+
+    /// A key from outside the log (a fresh invite): open what waited.
+    fn learn(&mut self, sp: &Id, me: &Me, k: Key) -> bool {
+        let new = self.keys.insert(tag(&k), k).is_none();
+        if new {
+            let w = self.unpark(&tag(&k));
+            self.fold(sp, me, w);
+        }
+        new
+    }
+
+    /// The key to seal with, and whether a newer epoch left us out (then
+    /// the newest we hold). Never an epoch older than our invite's: until
+    /// that one shows up, the invite's key.
+    fn key(&self, inv: &Invite) -> (Key, bool) {
+        let st = &self.st;
+        if !st.epochs().iter().any(|e| e.tag == tag(&inv.key)) {
+            return (inv.key, false);
+        }
+        let newest = st.epoch().map(|e| e.tag);
+        let held =
+            st.live().find_map(|e| Some((e.tag, *self.keys.get(&e.tag)?)));
+        held.map_or((inv.key, true), |(t, k)| (k, Some(t) != newest))
+    }
+
+    /// Keys of valid epochs that holders of the current one cannot reach
+    /// through `Back`: a lost rekey race, a demoted admin's epoch.
+    fn orphans(&self) -> Vec<Key> {
+        let Some(cur) = self.st.epoch() else { return vec![] };
+        let (mut seen, mut todo) = (HashSet::from([cur.tag]), vec![cur.tag]);
+        while let Some(t) = todo.pop() {
+            let older = self.backs.get(&t).into_iter().flatten().copied();
+            todo.extend(older.filter(|b| seen.insert(*b)));
+        }
+        let lost = self.st.epochs().iter().filter(|e| !seen.contains(&e.tag));
+        lost.filter_map(|e| self.keys.get(&e.tag).copied()).collect()
     }
 }
 
@@ -201,6 +309,11 @@ impl Space {
         let at: Vec<_> =
             ids.iter().filter_map(|i| b.at.get(i).copied()).collect();
         at.into_iter().filter_map(|(o, l)| b.log.read(o, l).ok()).collect()
+    }
+
+    /// Devices of members not banned: whom a storage node may take from.
+    pub fn devices(&self) -> Vec<EndpointId> {
+        lock(&self.book).st.devices(usize::MAX)
     }
 
     fn tx(&self) -> Option<GossipSender> {
@@ -372,11 +485,8 @@ impl Node {
         if serve.is_some() {
             let hosted = lock(&n.local).hosted.clone();
             for (id, peers) in hosted {
-                n.open(
-                    None,
-                    id,
-                    peers.into_iter().map(EndpointAddr::new).collect(),
-                )?;
+                let peers = peers.into_iter().take(16).map(EndpointAddr::new);
+                n.open(None, id, peers.collect())?;
             }
         } else {
             let own = n.open(Some(own_inv), n.own, vec![])?;
@@ -410,12 +520,18 @@ impl Node {
 
     /// Catch up with `peer` in the background.
     fn sync(self: &Arc<Self>, sp: &Arc<Space>, peer: impl Into<EndpointAddr>) {
-        tokio::spawn(self.clone().sync_with(sp.clone(), peer.into(), None));
+        tokio::spawn(self.clone().sync_with(sp.clone(), peer.into()));
     }
 
-    fn seal(&self, sp: &Space, key: &Key, op: Op) -> (op::Signed, Vec<u8>) {
+    fn seal(
+        &self,
+        sp: &Space,
+        key: &Key,
+        ts: u64,
+        op: Op,
+    ) -> (Signed, Vec<u8>) {
         let (me, dev) = (&self.me.user, self.ep.id());
-        op::seal(&sp.id, key, me, dev, self.tick(), op)
+        op::seal(&sp.id, key, me, dev, ts, op)
     }
 
     fn persist(&self) {
@@ -463,7 +579,7 @@ impl Node {
     pub fn locked(&self, id: &Id) -> bool {
         let Ok(sp) = self.get(id) else { return false };
         let Some(inv) = &sp.inv else { return false };
-        lock(&sp.book).key(inv).is_err()
+        lock(&sp.book).key(inv).1
     }
 
     pub fn peers(&self, id: &Id) -> usize {
@@ -543,16 +659,13 @@ impl Node {
         }
         let (log, recs) = Log::open(&self.log(&id))?;
         let st = inv.as_ref().map(State::new).unwrap_or_default();
-        let (keys, pending, knocks) = (HashMap::new(), HashMap::new(), vec![]);
-        let (idx, at) = (BTreeMap::new(), HashMap::new());
-        let mut b = Book { log, idx, at, keys, pending, st, knocks };
+        let mut b = Book::new(log, st);
         let mut work = vec![];
         for (o, checked, raw) in recs {
             let Ok(e) = postcard::from_bytes::<Env>(&raw) else { continue };
             let i = Id(blake3::hash(&raw).into());
-            b.at.insert(i, (o, raw.len() as u32));
-            b.idx.entry((e.ts / DAY) as u32).or_default().insert(i);
-            work.push((o, checked, e));
+            b.index(i, e.ts, o, raw.len());
+            work.push((i, e, Src::Log(checked)));
         }
         if let Some(i) = &inv {
             b.keys.insert(tag(&i.key), i.key);
@@ -570,6 +683,7 @@ impl Node {
             tx,
             nbrs,
             seen: Mutex::default(),
+            busy: Mutex::default(),
             task: OnceLock::new(),
         });
         {
@@ -612,14 +726,16 @@ impl Node {
         let mut v: Vec<_> = hosts.into_iter().map(|a| a.id).collect();
         v.extend(b.st.devices(16));
         v.extend(sp.inv.iter().flat_map(|i| i.peers.iter().map(|a| a.id)));
-        v.extend(lock(&self.local).hosted.get(&sp.id).into_iter().flatten());
+        let l = lock(&self.local);
+        v.extend(l.hosted.get(&sp.id).into_iter().flatten().take(16));
+        drop(l);
         let me = self.ep.id();
         let mut seen = HashSet::new();
         v.retain(|p| *p != me && seen.insert(*p));
         v
     }
 
-    /// Store, open and fold envelopes; returns how many were new.
+    /// Open, check, store and fold envelopes; returns how many were new.
     pub(crate) fn ingest(
         self: &Arc<Self>,
         sp: &Arc<Space>,
@@ -628,26 +744,27 @@ impl Node {
     ) -> usize {
         let new = {
             let mut b = lock(&sp.book);
-            let mut new = vec![];
+            let mut fresh = vec![];
             for raw in raws {
                 let Ok(e) = postcard::from_bytes::<Env>(&raw) else { continue };
                 let i = Id(blake3::hash(&raw).into());
-                if e.live || e.ts > now() + DAY || b.at.contains_key(&i) {
-                    continue;
+                if !e.live && e.ts <= now() + DAY && !b.has(&i) {
+                    fresh.push((i, e, raw));
                 }
-                let at = b.log.append(mine, &raw, mine);
-                let Ok(at) = at.inspect_err(|e| warn!("log: {e}")) else {
-                    continue;
-                };
-                b.at.insert(i, (at, raw.len() as u32));
-                b.idx.entry((e.ts / DAY) as u32).or_default().insert(i);
-                new.push((at, mine, e));
             }
-            let n = new.len();
-            if sp.inv.is_some() && n > 0 {
-                b.fold(&sp.id, &self.me, new);
+            match sp.inv {
+                // A storage node keeps, unopened, what vouched devices send.
+                None => fresh
+                    .into_iter()
+                    .filter(|(i, e, r)| b.store(*i, e.ts, r, false, false))
+                    .count(),
+                Some(_) => {
+                    let w = fresh
+                        .into_iter()
+                        .map(|(i, e, r)| (i, e, Src::Net(r, mine)));
+                    b.fold(&sp.id, &self.me, w.collect())
+                }
             }
-            n
         };
         if new > 0 {
             self.emit(Event::Changed { space: sp.id });
@@ -657,15 +774,15 @@ impl Node {
     }
 
     /// What ingesting may require: DMs to accept, spaces to open or close
-    /// for our other devices, a leaking epoch to replace.
+    /// for our other devices, a leaking epoch to replace, keys to hand on.
     async fn effects(self: Arc<Self>, sp: Arc<Space>) {
-        let (knocks, leaks) = {
+        let (knocks, fix) = {
             let mut b = lock(&sp.book);
             let admin = b.st.role(&self.id()) == Role::Admin;
-            (
-                std::mem::take(&mut b.knocks),
-                admin && b.st.leaks() && b.st.dm.is_none(),
-            )
+            let locked = sp.inv.as_ref().is_none_or(|i| b.key(i).1);
+            let lost = !locked && !b.orphans().is_empty();
+            let fix = admin && b.st.dm.is_none() && (b.st.leaks() || lost);
+            (std::mem::take(&mut b.knocks), fix)
         };
         for inv in knocks {
             let known =
@@ -679,15 +796,38 @@ impl Node {
         if sp.id == self.own {
             self.reconcile().await;
         }
-        if leaks {
+        if fix {
             // Admins may race to fix it; a little jitter keeps that rare.
             let wait = 1000 + u16::from_le_bytes(rand()) as u64 % 9000;
             tokio::time::sleep(Duration::from_millis(wait)).await;
-            if self.view(&sp.id, |s| s.leaks()) == Some(true)
-                && let Err(e) = self.rekey(&sp.id).await
-            {
+            if let Err(e) = self.repair(&sp).await {
                 warn!("rekey: {e}");
             }
+        }
+    }
+
+    /// Replace an epoch someone banned may hold; else hand on, under the
+    /// current one, keys it cut off.
+    async fn repair(self: &Arc<Self>, sp: &Arc<Space>) -> Result<()> {
+        let (leaks, lost) = {
+            let b = lock(&sp.book);
+            (b.st.leaks(), b.orphans())
+        };
+        if leaks {
+            return self.rekey(&sp.id).await;
+        }
+        for key in lost {
+            self.post(sp, Op::Back { key }).await?;
+        }
+        Ok(())
+    }
+
+    /// As an admin, rekey now if someone banned may hold the current key.
+    async fn secure(self: &Arc<Self>, id: &Id) -> Result<()> {
+        let me = self.id();
+        match self.view(id, |s| s.leaks() && s.role(&me) == Role::Admin) {
+            Some(true) => self.rekey(id).await,
+            _ => Ok(()),
         }
     }
 
@@ -721,8 +861,17 @@ impl Node {
     /// Seal, store, fold and broadcast an op.
     async fn post(self: &Arc<Self>, sp: &Arc<Space>, op: Op) -> Result<Id> {
         let inv = sp.inv.as_ref().ok_or_else(|| anyhow!("only hosted here"))?;
-        let key = lock(&sp.book).key(inv)?;
-        let (s, raw) = self.seal(sp, &key, op);
+        let (key, ts) = {
+            let b = lock(&sp.book);
+            let (key, locked) = b.key(inv);
+            // Left out of a newer epoch, an admin can still ban and rekey.
+            // Both date after what they must supersede, however far ahead.
+            let fix = matches!(op, Op::Role { .. } | Op::Rekey { .. });
+            ensure!(!locked || fix, LOCKED);
+            let after = if fix { b.st.horizon() + 1 } else { 0 };
+            (key, self.tick().max(after))
+        };
+        let (s, raw) = self.seal(sp, &key, ts, op);
         self.ingest(sp, vec![raw.clone()], true);
         match sp.tx().filter(|_| raw.len() <= GOSSIP_MAX) {
             Some(tx) => drop(tx.broadcast(raw.into()).await),
@@ -750,7 +899,14 @@ impl Node {
         };
         ensure!(ok, "that cannot be sent (empty, too long, or not allowed)");
         ensure!(*id != self.own, "not a space");
-        self.post(&self.get(id)?, op).await
+        let role = matches!(op, Op::Role { .. });
+        let r = self.post(&self.get(id)?, op).await?;
+        // Demoting whoever set the current epoch can bring back an older
+        // one: replace it now, not after a jittered while.
+        if role {
+            self.secure(id).await?;
+        }
+        Ok(r)
     }
 
     async fn enter(self: &Arc<Self>, inv: Invite) -> Result<Id> {
@@ -765,8 +921,8 @@ impl Node {
         let (name, kem) = (self.name(), self.me.pk());
         self.post(&sp, Op::Profile { name, kem }).await?;
         let stores = self.view(&self.own, |s| s.storage()).unwrap_or_default();
-        for (addr, token) in stores {
-            self.host(&sp, addr, token).await;
+        for (addr, _) in stores {
+            self.host(&sp, addr).await;
         }
         Ok(id)
     }
@@ -787,10 +943,20 @@ impl Node {
 
     pub async fn join(self: &Arc<Self>, code: &str) -> Result<Id> {
         let inv = Invite::decode(code)?;
-        if let Ok(sp) = self.get(&inv.id()) {
-            return Ok(sp.id);
+        let Ok(sp) = self.get(&inv.id()) else { return self.enter(inv).await };
+        // Already in: a fresh invite carries the key a rekey left us out of.
+        if lock(&sp.book).learn(&sp.id, &self.me, inv.key) {
+            let mut mine = inv.clone();
+            mine.peers.insert(0, self.ep.addr());
+            self.post(&self.get(&self.own)?, Op::Joined { invite: mine })
+                .await?;
+            for a in inv.peers {
+                self.lookup.add_endpoint_info(a.clone());
+                self.sync(&sp, a);
+            }
+            self.emit(Event::Changed { space: sp.id });
         }
-        self.enter(inv).await
+        Ok(sp.id)
     }
 
     /// Our address once we have one (a relay, or else an IP), for codes.
@@ -817,7 +983,9 @@ impl Node {
         let mut inv =
             sp.inv.clone().ok_or_else(|| anyhow!("only hosted here"))?;
         let me = self.addr().await;
-        inv.key = lock(&sp.book).key(&inv)?;
+        let (key, locked) = lock(&sp.book).key(&inv);
+        ensure!(!locked, LOCKED);
+        inv.key = key;
         inv.name = self.view(id, |s| s.name().to_string()).unwrap_or_default();
         let hosts = self.view(id, |s| s.hosts()).unwrap_or_default();
         let others = self.bootstrap(&sp).into_iter().map(EndpointAddr::new);
@@ -844,10 +1012,7 @@ impl Node {
     ) -> Result<()> {
         let role = if on { Role::Banned } else { Role::Member };
         self.post(&self.get(id)?, Op::Role { user: *user, role }).await?;
-        if on {
-            self.rekey(id).await?;
-        }
-        Ok(())
+        self.secure(id).await
     }
 
     /// A fresh epoch key for everyone not banned. Old invites stop
@@ -858,7 +1023,7 @@ impl Node {
         let (new, old, boxes) = {
             let b = lock(&sp.book);
             ensure!(b.st.role(&self.id()) == Role::Admin, "only admins rekey");
-            let (new, old): (Key, Key) = (rand(), b.key(inv)?);
+            let (new, old): (Key, Key) = (rand(), b.key(inv).0);
             let aad = rekey_aad(id, &tag(&new));
             let to = b.st.members().into_iter().filter_map(|m| {
                 Some((m.id, kem_seal(b.st.kem(&m.id)?, &aad, &new)?))
@@ -915,12 +1080,13 @@ impl Node {
 
     async fn signal(&self, sp: &Space, op: Op) {
         let Some(inv) = &sp.inv else { return };
-        let Ok(key) = lock(&sp.book).key(inv) else { return };
-        if self.invisible() {
+        let (key, locked) = lock(&sp.book).key(inv);
+        if locked || self.invisible() {
             return;
         }
         if let Some(tx) = sp.tx() {
-            let _ = tx.broadcast(self.seal(sp, &key, op).1.into()).await;
+            let raw = self.seal(sp, &key, self.tick(), op).1;
+            let _ = tx.broadcast(raw.into()).await;
         }
     }
 
@@ -944,17 +1110,12 @@ impl Node {
         let op = Op::Storage { addr: addr.clone(), token, on: true };
         self.post(&own, op).await?;
         for sp in self.all() {
-            self.host(&sp, addr.clone(), token).await;
+            self.host(&sp, addr.clone()).await;
         }
         Ok(())
     }
 
-    async fn host(
-        self: &Arc<Self>,
-        sp: &Arc<Space>,
-        addr: EndpointAddr,
-        token: [u8; 16],
-    ) {
+    async fn host(self: &Arc<Self>, sp: &Arc<Space>, addr: EndpointAddr) {
         self.lookup.add_endpoint_info(addr.clone());
         let listed =
             self.view(&sp.id, |s| s.hosts().iter().any(|h| h.id == addr.id));
@@ -963,7 +1124,7 @@ impl Node {
                 self.post(sp, Op::Host { node: addr.clone(), on: true }).await;
         }
         let id = addr.id;
-        tokio::spawn(self.clone().sync_with(sp.clone(), addr, Some(token)));
+        self.sync(sp, addr);
         if let Some(tx) = sp.tx() {
             let _ = tx.join_peers(vec![id]).await;
         }
@@ -1092,36 +1253,54 @@ impl Node {
         Ok(())
     }
 
-    /// Serve a sync session: a space we have, or, for a storage node, one
-    /// its owner asks it to keep.
+    /// The space a sync session asks for. Anyone may read one we have; a
+    /// storage node's owner (its token) has it keep a new one, and names
+    /// the devices it may take that one from.
     pub(crate) fn find(
         self: &Arc<Self>,
         h: &Hello,
         from: EndpointId,
     ) -> Option<Arc<Space>> {
-        if let Ok(sp) = self.get(&h.space) {
-            return Some(sp);
+        let sp = self.get(&h.space).ok();
+        if !self.serve.is_some_and(|t| h.token == Some(t)) {
+            return sp;
         }
-        self.serve.filter(|t| h.token == Some(*t))?;
-        lock(&self.local).hosted.insert(h.space, vec![from]);
-        self.persist();
-        self.open(None, h.space, vec![from.into()]).ok()
+        let ok: Vec<_> =
+            std::iter::once(from).chain(h.devices.clone()).collect();
+        let mut l = lock(&self.local);
+        if l.hosted.get(&h.space) != Some(&ok) {
+            l.hosted.insert(h.space, ok);
+            drop(l);
+            self.persist();
+        }
+        sp.or_else(|| self.open(None, h.space, vec![from.into()]).ok())
     }
 
-    async fn sync_with(
-        self: Arc<Self>,
-        sp: Arc<Space>,
-        peer: EndpointAddr,
-        token: Option<[u8; 16]>,
-    ) {
+    /// Whether `sp` takes ops from `peer`. Members check every op; a
+    /// storage node cannot, so it takes only from devices vouched for.
+    pub(crate) fn takes(&self, sp: &Space, peer: &EndpointId) -> bool {
+        let l = lock(&self.local);
+        sp.inv.is_some()
+            || l.hosted.get(&sp.id).is_some_and(|v| v.contains(peer))
+    }
+
+    async fn sync_with(self: Arc<Self>, sp: Arc<Space>, peer: EndpointAddr) {
         let id = peer.id;
+        if !self.takes(&sp, &id) || !lock(&sp.busy).insert(id) {
+            return;
+        }
+        // Our own storage nodes get their token, and whom to take from.
+        let stores = self.view(&self.own, |s| s.storage()).unwrap_or_default();
+        let token = stores.into_iter().find(|s| s.0.id == id).map(|s| s.1);
         let r = async {
             let c = self.ep.connect(peer, sync::ALPN).await?;
             let n = sync::initiate(&self, &sp, &c, token).await;
             c.close(0u32.into(), b"done");
             n
         };
-        match r.await {
+        let r = r.await;
+        lock(&sp.busy).remove(&id);
+        match r {
             Ok(0) => {}
             Ok(count) => self.emit(Event::Synced { space: sp.id, count }),
             Err(e) => debug!("sync with {}: {e:#}", id.fmt_short()),
@@ -1137,22 +1316,16 @@ impl Node {
         let (n, sp) = (self.clone(), sp.clone());
         tokio::spawn(async move {
             // Twice: ops broadcast while we were joining reach neither side.
-            n.clone().sync_with(sp.clone(), peer.into(), None).await;
+            n.clone().sync_with(sp.clone(), peer.into()).await;
             n.signal(&sp, Op::Here).await;
             tokio::time::sleep(Duration::from_secs(5)).await;
-            n.clone().sync_with(sp.clone(), peer.into(), None).await;
+            n.clone().sync_with(sp.clone(), peer.into()).await;
             let Some(info) = n.ep.remote_info(peer).await else { return };
             let a = EndpointAddr::from_parts(
                 peer,
                 info.into_addrs().map(|a| a.into_addr()),
             );
             let mut l = lock(&n.local);
-            if let Some(h) =
-                l.hosted.get_mut(&sp.id).filter(|h| !h.contains(&peer))
-            {
-                h.push(peer);
-                h.drain(..h.len().saturating_sub(16));
-            }
             if !a.is_empty() && l.peers.len() < 512 {
                 l.peers.insert(peer, a);
             }
@@ -1161,8 +1334,22 @@ impl Node {
         });
     }
 
-    fn signaled(self: &Arc<Self>, sp: &Arc<Space>, raw: &[u8]) {
+    fn signaled(
+        self: &Arc<Self>,
+        sp: &Arc<Space>,
+        raw: &[u8],
+        from: EndpointId,
+    ) {
         let Ok(e) = postcard::from_bytes::<Env>(raw) else { return };
+        if sp.inv.is_none() {
+            // A storage node takes nothing from gossip, which it cannot
+            // check: it fetches what it lacks from whoever passed it on.
+            let i = Id(blake3::hash(raw).into());
+            if !e.live && !lock(&sp.book).has(&i) {
+                self.sync(sp, from);
+            }
+            return;
+        }
         if !e.live {
             self.ingest(sp, vec![raw.to_vec()], false);
             return;
@@ -1223,7 +1410,7 @@ async fn pump(n: Arc<Node>, sp: Weak<Space>, boot: Vec<EndpointId>) {
             match ev {
                 Ok(Gossiped::Received(m)) => {
                     n.neighbor(&s, m.delivered_from);
-                    n.signaled(&s, &m.content);
+                    n.signaled(&s, &m.content, m.delivered_from);
                 }
                 Ok(Gossiped::NeighborUp(p)) => n.neighbor(&s, p),
                 Ok(Gossiped::NeighborDown(p)) => {
@@ -1263,5 +1450,58 @@ async fn heartbeat(n: Weak<Node>) {
             n.signal(&sp, Op::Here).await;
             n.emit(Event::Presence { space: sp.id });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn book(name: &str, owner: Id) -> (Book, PathBuf) {
+        let p = std::env::temp_dir().join(format!("irch-{name}-{}", now()));
+        let st = State::new(&Invite::new(owner, "", None));
+        (Book::new(Log::open(&p).unwrap().0, st), p)
+    }
+
+    #[test]
+    fn what_no_key_opens_stays_off_disk_and_bounded() {
+        let (mut b, p) = book("park", Id([1; 32]));
+        let me = Me::new(rand());
+        for n in 0..40 {
+            let e =
+                Env { epoch: [n; 8], ts: 0, live: false, ct: vec![n; 1 << 20] };
+            let raw = postcard::to_allocvec(&e).unwrap();
+            b.fold(
+                &Id([2; 32]),
+                &me,
+                vec![(Id([n; 32]), e, Src::Net(raw, false))],
+            );
+        }
+        assert!(b.parked <= PARKED + (2 << 20) && b.at.is_empty());
+        assert_eq!(std::fs::metadata(&p).unwrap().len(), 0);
+        std::fs::remove_file(p).unwrap();
+    }
+
+    #[test]
+    fn keys_a_rekey_race_cut_off_are_handed_on() {
+        let o = Id([1; 32]);
+        let (mut b, p) = book("race", o);
+        let k: [Key; 3] = [rand(), rand(), rand()];
+        let device = SecretKey::from_bytes(&[1; 32]).public();
+        b.st.extend((0..3).map(|n| Signed {
+            id: Id([n as u8; 32]),
+            author: o,
+            device,
+            ts: n as u64,
+            op: Op::Rekey { epoch: tag(&k[n]), boxes: vec![] },
+        }));
+        b.keys.extend(k.map(|k| (tag(&k), k)));
+        // Both rekeys replaced the first key; the second lost the race.
+        b.backs.insert(tag(&k[1]), vec![tag(&k[0])]);
+        b.backs.insert(tag(&k[2]), vec![tag(&k[0])]);
+        assert_eq!(b.orphans(), [k[1]]);
+        b.backs.get_mut(&tag(&k[2])).unwrap().push(tag(&k[1]));
+        assert!(b.orphans().is_empty());
+        std::fs::remove_file(p).unwrap();
     }
 }

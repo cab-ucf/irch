@@ -42,8 +42,12 @@ disk   : one append-only log of envs per space; nothing else to migrate
   history stays readable for members, including the ones who join later.
 - **Authority is a fold.** Control ops are re-folded in `(time, id)`
   order, so "promote, then ban" resolves the same on every replica in any
-  delivery order. If concurrent rekeys leave the newest key with someone
-  banned, any admin online rekeys again.
+  delivery order. Authors pick their own times, so the key that counts is
+  the newest set by someone who is an admin now: a demoted admin's rekeys
+  stop counting however they were dated, and bans and rekeys date after
+  whatever they supersede. If concurrent rekeys leave the key with someone
+  banned, any admin online rekeys again; keys a race cut off are handed
+  on under the winner.
 - **One seed is you, on every device.** Your signing and KEM keys derive
   from a 32-byte seed; every device keeps its own network key. A private
   space only you can read records what you joined and left, so linked
@@ -53,7 +57,8 @@ disk   : one append-only log of envs per space; nothing else to migrate
   or a VPS prints a code; give it to irch (`/store`, or My Account) and it
   keeps every space you are in, your private one included, so messages
   wait there while everyone else is offline, and a new device can link
-  while your others are off. It cannot read any of it.
+  while your others are off. It cannot read any of it, so it takes
+  envelopes only from your devices and the member devices they vouch for.
 - **DMs** are two-person spaces, announced by a `Knock` that only the
   recipient's key opens.
 - **Files** (up to 25 MiB) are sealed under a fresh key that travels only
@@ -63,6 +68,8 @@ disk   : one append-only log of envs per space; nothing else to migrate
 Sync sends per-day bucket fingerprints (BLAKE3 of the sorted ids, so
 colliding sets cannot be crafted), then ids of the days that differ, then
 only missing envelopes; an unchanged space costs one small round trip.
+Nothing reaches disk before it is opened and checked; what no key opens
+yet waits in memory, a bounded amount of it.
 
 ## Networks
 
@@ -100,9 +107,14 @@ push server to wake a peer-to-peer app).
 - Authentication is Ed25519 (classical); confidentiality of what is
   stored is post-quantum, the QUIC transport is not.
 - Metadata: peers learn each other's addresses when connecting directly;
-  relays see endpoint ids and traffic; storage nodes see sizes and times.
-- Author clocks order messages; ops dated a day ahead are refused.
-- Members are trusted not to flood. Unaudited.
+  relays see endpoint ids and traffic; storage nodes see sizes, times and
+  members' devices. Anyone who knows a space's id (every invite has it)
+  can fetch its ciphertext from members.
+- Authors date their own ops, at most a day ahead. Whoever ever held an
+  epoch's key can still add ops dated inside it: a banned member's stay
+  hidden, but a demoted admin's backdated bans and renames stand.
+- A storage code is a password: whoever has it can make the node store
+  anything. Members are trusted not to flood. Unaudited.
 
 ## Prior art
 

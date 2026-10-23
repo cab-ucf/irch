@@ -1,6 +1,6 @@
 //! Several nodes on this machine, talking over real QUIC.
 
-use irch_core::{Ch, Config, Event, Id, Net, Node, Op};
+use irch_core::{Ch, Config, Event, Id, Invite, Net, Node, Op};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -157,6 +157,36 @@ async fn ban_rekeys_and_history_survives() {
     until("d sees all", || texts(&d, &id, &ch) == ["before", "after"]).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(texts(&b, &id, &ch), ["before"], "b never reads the new epoch");
+
+    a.ban(&id, &b.id(), false).await.unwrap();
+    assert!(b.locked(&id), "unbanned, b still lacks the key");
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    assert!(!b.locked(&id), "a fresh invite carries it");
+    until("b reads on", || texts(&b, &id, &ch) == ["before", "after"]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_space_id_alone_gets_nothing_stored() {
+    let s = start(&dir("s"), "s", None, true).await;
+    let a = node("a").await;
+    let id = a.create("home").await.unwrap();
+    say(&a, &id, general(&a, &id), "kept").await;
+    let code = s.storage_code().await.unwrap();
+    a.add_storage(&code).await.unwrap();
+    let held =
+        |n: &Node| n.held().iter().find(|h| h.0 == id).map_or(0, |h| h.1);
+    until("storage holds it", || held(&s) == held(&a)).await;
+    let before = held(&a);
+    // x knows the space and the storage node, but not the key.
+    let (store, _): (iroh::EndpointAddr, [u8; 16]) =
+        irch_core::op::uncode("host", &code).unwrap();
+    let mut inv = Invite::decode(&a.invite(&id).await.unwrap()).unwrap();
+    (inv.key, inv.peers) = ([7; 32], vec![store]);
+    let x = node("x").await;
+    x.join(&inv.encode()).await.unwrap();
+    say(&x, &id, Ch([1; 8]), "junk").await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!((held(&a), held(&s)), (before, before));
 }
 
 #[tokio::test(flavor = "multi_thread")]

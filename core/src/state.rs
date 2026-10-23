@@ -1,7 +1,8 @@
 //! A space's state: a deterministic fold over its set of ops, so every
 //! replica holding the same set agrees, whatever the delivery order.
 //! Control ops (names, channels, roles, epochs) are re-folded in `(ts, id)`
-//! order, so authority is judged at each op's place in that order.
+//! order, so authority is judged at each op's place in that order. Authors
+//! pick their own times, so the key that counts is set by an admin *now*.
 
 use crate::op::{File, Invite, Op, Role, Signed};
 use crate::{Ch, Id};
@@ -42,6 +43,16 @@ pub struct Quote {
     pub text: String,
 }
 
+/// A valid epoch: its tag, who received its key, where and by whom it
+/// was set.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Epoch {
+    pub tag: [u8; 8],
+    pub to: Vec<Id>,
+    pub at: Pos,
+    pub by: Id,
+}
+
 /// Latest reaction write per (user, emoji): last writer wins.
 type Reacts = HashMap<(Id, String), (Pos, bool)>;
 
@@ -63,14 +74,13 @@ pub struct State {
     edits: HashMap<Id, BTreeMap<Pos, (Id, Option<String>)>>,
     reacts: HashMap<Id, Reacts>,
     authors: HashMap<Id, u64>,
-    devices: HashMap<EndpointId, u64>,
+    devices: HashMap<EndpointId, (u64, Id)>,
     // Derived from `control` by `refold`:
     name: Option<String>,
     channels: BTreeMap<Ch, String>,
     profiles: HashMap<Id, (String, Vec<u8>)>,
     roles: HashMap<Id, Role>,
-    epochs: Vec<([u8; 8], Vec<Id>)>,
-    epoch_at: Option<Pos>,
+    epochs: Vec<Epoch>,
     bans: Vec<(Pos, Id)>,
     hosts: BTreeMap<EndpointId, Option<EndpointAddr>>,
     spaces: BTreeMap<Id, Option<Invite>>,
@@ -103,7 +113,7 @@ impl State {
         let t = self.authors.entry(s.author).or_default();
         *t = (*t).max(s.ts);
         let t = self.devices.entry(s.device).or_default();
-        *t = (*t).max(s.ts);
+        *t = (*t).max((s.ts, s.author));
         match s.op {
             Op::Post { channel, text, reply, files } => {
                 self.index.insert(s.id, (channel, at));
@@ -139,8 +149,8 @@ impl State {
     fn refold(&mut self) {
         (self.name, self.channels) = (None, BTreeMap::new());
         (self.profiles, self.roles) = (HashMap::new(), HashMap::new());
-        (self.epochs, self.hosts) = (vec![], BTreeMap::new());
-        (self.epoch_at, self.bans) = (None, vec![]);
+        (self.epochs, self.hosts, self.bans) =
+            (vec![], BTreeMap::new(), vec![]);
         (self.spaces, self.storage) = (BTreeMap::new(), BTreeMap::new());
         if self.dm.is_some() {
             self.channels.insert(DM, "dm".into());
@@ -173,8 +183,12 @@ impl State {
                 }
                 Op::Rekey { epoch, boxes } if admin => {
                     let to = boxes.iter().map(|b| b.0).collect();
-                    self.epochs.push((*epoch, to));
-                    self.epoch_at = Some(*at);
+                    self.epochs.push(Epoch {
+                        tag: *epoch,
+                        to,
+                        at: *at,
+                        by: *a,
+                    });
                 }
                 Op::Host { node, on } => {
                     drop(self.hosts.insert(node.id, on.then(|| node.clone())))
@@ -248,18 +262,38 @@ impl State {
         v
     }
 
-    /// Valid epochs, oldest first, with who received each.
-    pub fn epochs(&self) -> &[([u8; 8], Vec<Id>)] {
+    /// Valid epochs: set by an admin at their place, oldest first.
+    pub fn epochs(&self) -> &[Epoch] {
         &self.epochs
     }
 
-    /// Someone banned may hold the newest epoch's key: time to rekey.
+    /// Epochs whose setter is still an admin, newest first: a demoted or
+    /// banned admin's rekeys stop counting, however they were dated.
+    pub fn live(&self) -> impl Iterator<Item = &Epoch> + Clone {
+        self.epochs.iter().rev().filter(|e| self.role(&e.by) == Role::Admin)
+    }
+
+    /// The epoch to seal with.
+    pub fn epoch(&self) -> Option<&Epoch> {
+        self.live().next()
+    }
+
+    /// Someone banned may hold the current epoch's key: time to rekey.
     pub fn leaks(&self) -> bool {
         let banned = |u: &Id| self.role(u) == Role::Banned;
-        let to = self.epochs.last().map(|e| &e.1[..]).unwrap_or(&[]);
-        let since = |at: &Pos| self.epoch_at.is_none_or(|e| *at > e);
-        to.iter().any(banned)
-            || self.bans.iter().any(|(at, u)| since(at) && banned(u))
+        let e = self.epoch();
+        let after = |at: &Pos| e.is_none_or(|e| *at > e.at);
+        e.is_some_and(|e| e.to.iter().any(banned))
+            || self.bans.iter().any(|(at, u)| after(at) && banned(u))
+    }
+
+    /// What a ban or rekey must date after to take effect: the current
+    /// epoch and every standing ban, however far ahead they were dated.
+    pub fn horizon(&self) -> u64 {
+        let banned = |u: &Id| self.role(u) == Role::Banned;
+        let bans = self.bans.iter().filter(|(_, u)| banned(u));
+        let e = self.epoch().map(|e| e.at.0);
+        bans.map(|(at, _)| at.0).chain(e).max().unwrap_or(0)
     }
 
     pub fn hosts(&self) -> Vec<EndpointAddr> {
@@ -274,10 +308,11 @@ impl State {
         self.storage.values().flatten().cloned().collect()
     }
 
-    /// Devices heard from, most recent first.
+    /// Devices heard from, most recent first; no banned member's.
     pub fn devices(&self, n: usize) -> Vec<EndpointId> {
-        let mut v: Vec<_> =
-            self.devices.iter().map(|(d, t)| (*t, *d)).collect();
+        let ok = |(_, (_, a)): &(_, &(u64, Id))| self.role(a) != Role::Banned;
+        let v = self.devices.iter().filter(ok).map(|(d, (t, _))| (*t, *d));
+        let mut v: Vec<_> = v.collect();
         v.sort_unstable_by(|a, b| b.cmp(a));
         v.into_iter().take(n).map(|(_, d)| d).collect()
     }
@@ -511,6 +546,36 @@ mod tests {
         st.extend([op(32, o, del(24))]);
         let m = st.messages(&CH, None, 2);
         assert_eq!((&*m[0].text, m[1].quote.is_none()), ("25", true));
+    }
+
+    #[test]
+    fn epochs_count_while_their_setter_is_an_admin() {
+        let [o, a, b] = people();
+        let mut st = State::new(&Invite::new(o, "", None));
+        let rekey = |t, to: &[Id]| Op::Rekey {
+            epoch: [t; 8],
+            boxes: to.iter().map(|u| (*u, vec![])).collect(),
+        };
+        let role = |user, role| Op::Role { user, role };
+        st.extend([
+            op(1, o, rekey(1, &[])),
+            op(2, o, role(a, Role::Admin)),
+            op(3, a, rekey(2, &[a])),
+            op(4, o, role(a, Role::Member)),
+        ]);
+        assert_eq!(st.epochs().len(), 2);
+        assert_eq!(st.epoch().unwrap().tag, [1; 8], "a, demoted, is out");
+        // An admin's epoch dated far ahead reached b, since banned: only a
+        // rekey dated after it ends the leak. So with a ban dated far ahead.
+        st.extend([op(5, o, role(a, Role::Admin)), op(200, a, rekey(3, &[b]))]);
+        st.extend([op(6, o, role(b, Role::Banned))]);
+        assert!(st.leaks() && st.horizon() == 200);
+        st.extend([op(201, o, rekey(4, &[a]))]);
+        assert!(!st.leaks() && st.epoch().unwrap().tag == [4; 8]);
+        st.extend([op(240, o, role(a, Role::Banned))]);
+        assert!(st.leaks() && st.horizon() == 240);
+        st.extend([op(241, o, rekey(5, &[]))]);
+        assert!(!st.leaks());
     }
 
     #[test]

@@ -60,12 +60,6 @@ impl Log {
         self.f.read_exact(&mut b)?;
         Ok(b)
     }
-
-    /// Mark the record at `at` verified, to skip checking it next start.
-    pub fn check(&mut self, at: u64) -> Result<()> {
-        self.f.seek(SeekFrom::Start(at + 4))?;
-        Ok(self.f.write_all(&[1])?)
-    }
 }
 
 pub fn load<T: DeserializeOwned + Default>(path: &Path) -> T {
@@ -94,9 +88,8 @@ pub fn write(path: &Path, b: &[u8]) -> Result<()> {
 fn torn_tail() {
     let p = std::env::temp_dir().join(format!("irch-{}.log", crate::now()));
     let (mut l, _) = Log::open(&p).unwrap();
-    let a = l.append(false, b"one", false).unwrap();
+    l.append(false, b"one", false).unwrap();
     l.append(true, b"two", true).unwrap();
-    l.check(a).unwrap();
     drop(l);
     let len = fs::metadata(&p).unwrap().len();
     OpenOptions::new()
@@ -108,7 +101,7 @@ fn torn_tail() {
     let (mut l, recs) = Log::open(&p).unwrap();
     assert_eq!(
         recs,
-        vec![(0, true, b"one".to_vec()), (8, true, b"two".to_vec())]
+        vec![(0, false, b"one".to_vec()), (8, true, b"two".to_vec())]
     );
     assert_eq!(fs::metadata(&p).unwrap().len(), len);
     assert_eq!(l.read(8, 3).unwrap(), b"two");
