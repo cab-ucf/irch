@@ -215,3 +215,25 @@ async fn link_a_device() {
     a2.leave(&other).await.unwrap();
     until("a leaves too", || !a.spaces().contains(&other)).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn link_while_offline_through_storage() {
+    let s = start(&dir("s"), "s", None, true).await;
+    let a = node("a").await;
+    let id = a.create("home").await.unwrap();
+    let ch = general(&a, &id);
+    say(&a, &id, ch, "kept safe").await;
+    a.add_storage(&s.storage_code().await.unwrap()).await.unwrap();
+    let held =
+        |n: &Node, id: &Id| n.held().iter().find(|h| h.0 == *id).map(|h| h.1);
+    until("storage holds both spaces", || {
+        s.held().len() == 2 && held(&s, &id) == held(&a, &id)
+    })
+    .await;
+    let code = a.link_code().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    a.shutdown().await;
+    let a2 = start(&dir("a2"), "phone", Some(code), false).await;
+    until("a2 restored from storage", || texts(&a2, &id, &ch) == ["kept safe"])
+        .await;
+}

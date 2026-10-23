@@ -170,7 +170,7 @@ impl Book {
         match newest {
             None => Ok(inv.key),
             Some((t, _)) => self.keys.get(t).copied().ok_or_else(|| {
-                anyhow!("this space's keys changed without you: ask for a new invite")
+                anyhow!("keys changed without you: ask for a new invite")
             }),
         }
     }
@@ -281,7 +281,7 @@ impl Node {
             &cfg.dir,
             std::os::unix::fs::PermissionsExt::from_mode(0o700),
         )?;
-        let link: Option<(Key, EndpointAddr)> =
+        let link: Option<(Key, Vec<EndpointAddr>)> =
             cfg.link.as_deref().map(|c| uncode("link", c)).transpose()?;
         let me =
             Me::new(secret(&cfg.dir.join("seed"), link.as_ref().map(|l| l.0))?);
@@ -338,8 +338,7 @@ impl Node {
         let serve = cfg.serve.then(|| *local.token.get_or_insert_with(rand));
         let gossip =
             Gossip::builder().max_message_size(GOSSIP_MAX).spawn(ep.clone());
-        let own_inv =
-            own_invite(&me, link.map(|l| vec![l.1]).unwrap_or_default());
+        let own_inv = own_invite(&me, link.map(|l| l.1).unwrap_or_default());
         let n = Arc::new(Self {
             own: own_inv.id(),
             me,
@@ -785,11 +784,15 @@ impl Node {
         self.enter(inv).await
     }
 
+    /// Our address once we have one (a relay, or else an IP), for codes.
     async fn addr(&self) -> EndpointAddr {
-        if !matches!(self.net, Net::Lan | Net::Direct) {
-            let _ =
-                tokio::time::timeout(Duration::from_secs(5), self.ep.online())
-                    .await;
+        let relay = !matches!(self.net, Net::Lan | Net::Direct);
+        for _ in 0..100 {
+            let a = self.ep.addr();
+            if a.addrs.iter().any(|t| t.is_relay() || !relay && t.is_ip()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
         let mut a = self.ep.addr();
         // With a relay to meet at, keep IP addresses out of shared codes.
@@ -914,7 +917,9 @@ impl Node {
 
     /// Everything another device needs to become you. Keep it secret.
     pub async fn link_code(&self) -> String {
-        code("link", &(self.me.seed, self.addr().await))
+        let mut peers = vec![self.addr().await];
+        peers.extend(self.view(&self.own, |s| s.hosts()).unwrap_or_default());
+        code("link", &(self.me.seed, peers))
     }
 
     /// What a storage node hands to the people it stores for.
@@ -929,7 +934,7 @@ impl Node {
         let own = self.get(&self.own)?;
         let op = Op::Storage { addr: addr.clone(), token, on: true };
         self.post(&own, op).await?;
-        for sp in self.all().into_iter().filter(|s| s.id != self.own) {
+        for sp in self.all() {
             self.host(&sp, addr.clone(), token).await;
         }
         Ok(())

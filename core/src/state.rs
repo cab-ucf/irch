@@ -280,7 +280,7 @@ impl State {
         v.into_iter().take(n).map(|(_, d)| d).collect()
     }
 
-    /// Up to `n` visible messages before `before` (or the newest), oldest first.
+    /// Up to `n` visible messages before `before` (or newest), oldest first.
     pub fn messages(
         &self,
         ch: &Ch,

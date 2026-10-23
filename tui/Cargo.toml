@@ -1,0 +1,21 @@
+[package]
+name = "irch"
+description = "irch in a terminal, or headless as a storage node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+irch-core.workspace = true
+anyhow.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+tracing-subscriber.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4", features = ["derive"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
+data-encoding = "2"
+dirs = "6"
+iroh = { version = "1.4", default-features = false }
+n0-future = "0.3"
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }

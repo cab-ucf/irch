@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["core"]
-default-members = ["core"]
+members = ["core", "tui"]
+default-members = ["core", "tui"]
 
 [workspace.package]
 version = "0.1.0"

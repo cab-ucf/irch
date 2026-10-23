@@ -41,7 +41,8 @@ macro_rules! bytes {
             }
         }
         impl Serialize for $t {
-            fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            fn serialize<S: Serializer>(&self, s: S)
+            -> Result<S::Ok, S::Error> {
                 if s.is_human_readable() {
                     s.collect_str(self)
                 } else {
@@ -50,7 +51,8 @@ macro_rules! bytes {
             }
         }
         impl<'de> Deserialize<'de> for $t {
-            fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            fn deserialize<D: Deserializer<'de>>(d: D)
+            -> Result<Self, D::Error> {
                 if d.is_human_readable() {
                     let s = String::deserialize(d)?;
                     s.parse().map_err(de::Error::custom)

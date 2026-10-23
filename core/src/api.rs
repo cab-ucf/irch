@@ -32,7 +32,8 @@ pub enum Call {
 pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
     Ok(match c {
         Call::Me => {
-            json!({ "id": n.id(), "name": n.name(), "invisible": n.invisible() })
+            let (id, name, invisible) = (n.id(), n.name(), n.invisible());
+            json!({ "id": id, "name": name, "invisible": invisible })
         }
         Call::SetName { name } => json!(n.set_name(&name).await?),
         Call::SetInvisible { on } => json!(n.set_invisible(on)),
@@ -44,7 +45,8 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
             let ms = n.view(&space, |s| s.members()).unwrap_or_default();
             let row = |m: crate::Member| {
                 let online = on.contains(&m.id);
-                json!({ "id": m.id, "name": m.name, "role": m.role, "online": online })
+                let (id, name, role) = (m.id, m.name, m.role);
+                json!({ "id": id, "name": name, "role": role, "online": online })
             };
             json!(ms.into_iter().map(row).collect::<Vec<_>>())
         }
