@@ -365,8 +365,8 @@ function renderSidebar() {
   const s = cur();
   const hdr = $("server-header");
   const title = s?.dm ? "Direct Messages" : s?.name ?? "irch";
-  put(hdr, h("span", {}, title), s && !s.dm ? icon("chevron") : null);
-  hdr.onclick = s && !s.dm ? () => spaceMenu(hdr) : null;
+  put(hdr, h("span", {}, title), s && icon("chevron"));
+  hdr.onclick = s ? () => (s.dm ? dmMenu : spaceMenu)(hdr) : null;
   put($("channels"), s?.dm ? dmList() : s ? channelList(s) : []);
   renderUserPanel();
 }
@@ -831,6 +831,9 @@ function spaceMenu(anchor) {
   ]);
 }
 
+const dmMenu = (anchor) =>
+  menu(anchor, [["Close Conversation", "logout", leaveSpace, "danger"]]);
+
 function memberCard(id, anchor, align) {
   const s = cur();
   const m = memberOf(id) ?? { id, name: short(id), role: "Member", online: false };
@@ -1207,7 +1210,9 @@ async function renameSpace() {
 
 async function leaveSpace() {
   const s = cur();
-  const ok = await confirmBox({ title: `Leave '${s.name}'`,
+  const ok = await confirmBox(s.dm ? { title: `Close conversation`,
+    sub: `Your messages with ${s.name} are deleted from your devices.`,
+    ok: "Close" } : { title: `Leave '${s.name}'`,
     sub: `Leave ${s.name}? Its history is deleted from your devices, and ` +
       "you need a new invite to come back.", ok: "Leave Space" });
   if (!ok) return;

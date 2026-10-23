@@ -223,7 +223,7 @@ pub struct Node {
     own: Id,
     dir: PathBuf,
     net: Net,
-    pub ep: Endpoint,
+    ep: Endpoint,
     gossip: Gossip,
     router: OnceLock<Router>,
     lookup: MemoryLookup,
@@ -242,7 +242,8 @@ struct Proto(Weak<Node>);
 
 impl ProtocolHandler for Proto {
     async fn accept(&self, c: Connection) -> Result<(), AcceptError> {
-        let n = self.0.upgrade().ok_or_else(|| AcceptError::from_err(Gone))?;
+        let gone = || AcceptError::from_err(std::io::Error::other("closing"));
+        let n = self.0.upgrade().ok_or_else(gone)?;
         let r = match c.alpn() == sync::ALPN {
             true => sync::respond(&n, &c).await,
             false => n.give(&c).await,
@@ -259,15 +260,6 @@ enum Ask {
     Get(Id),
     Put([u8; 16], Vec<u8>),
 }
-
-#[derive(Debug)]
-struct Gone;
-impl std::fmt::Display for Gone {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.write_str("shutting down")
-    }
-}
-impl std::error::Error for Gone {}
 
 fn secret(path: &Path, link: Option<Key>) -> Result<Key> {
     if let Ok(b) = std::fs::read(path) {

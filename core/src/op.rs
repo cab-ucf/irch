@@ -15,73 +15,30 @@ pub const MAX_ENV: usize = 4 << 20;
 /// Append variants only: postcard tags are positions.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum Op {
-    /// Your name here, and the key that rekeys reach you with.
-    Profile {
-        name: String,
-        kem: Vec<u8>,
-    },
-    Rename {
-        name: String,
-    },
-    /// Create, rename, or (`None`) delete a channel.
-    Channel {
-        id: Ch,
-        name: Option<String>,
-    },
-    Role {
-        user: Id,
-        role: Role,
-    },
-    Post {
-        channel: Ch,
-        text: String,
-        reply: Option<Id>,
-        #[serde(default)]
-        files: Vec<File>,
-    },
-    /// Edit, or (`None`) delete.
-    Edit {
-        target: Id,
-        text: Option<String>,
-    },
-    React {
-        target: Id,
-        emoji: String,
-        on: bool,
-    },
-    /// A new epoch key, boxed to every member left.
-    Rekey {
-        epoch: [u8; 8],
-        boxes: Vec<(Id, Vec<u8>)>,
-    },
-    /// Sealed under a new epoch: the key it replaced, so history stays.
-    Back {
-        key: Key,
-    },
-    /// An always-on peer that keeps this space's ciphertext.
-    Host {
-        node: EndpointAddr,
-        on: bool,
-    },
-    /// A direct-message invite, readable only by its recipient.
-    Knock {
-        sealed: Vec<u8>,
-    },
-    /// Your own space: what you joined and left, on every device.
-    Joined {
-        invite: Invite,
-    },
-    Left {
-        space: Id,
-    },
-    Storage {
-        addr: EndpointAddr,
-        token: [u8; 16],
-        on: bool,
-    },
-    Typing {
-        channel: Ch,
-    },
+    // Your name, and the key that rekeys reach you with.
+    Profile { name: String, kem: Vec<u8> },
+    Rename { name: String },
+    // `None` deletes.
+    Channel { id: Ch, name: Option<String> },
+    Role { user: Id, role: Role },
+    Post { channel: Ch, text: String, reply: Option<Id>, files: Vec<File> },
+    // `None` deletes.
+    Edit { target: Id, text: Option<String> },
+    React { target: Id, emoji: String, on: bool },
+    // A new epoch key, boxed to every member left.
+    Rekey { epoch: [u8; 8], boxes: Vec<(Id, Vec<u8>)> },
+    // Sealed under a new epoch: the key it replaced, so history stays.
+    Back { key: Key },
+    // An always-on peer that keeps this space's ciphertext.
+    Host { node: EndpointAddr, on: bool },
+    // A direct-message invite only its recipient opens.
+    Knock { sealed: Vec<u8> },
+    // In your own space, on every device: what you joined and left.
+    Joined { invite: Invite },
+    Left { space: Id },
+    Storage { addr: EndpointAddr, token: [u8; 16], on: bool },
+    // Live only: never stored, synced or folded.
+    Typing { channel: Ch },
     Here,
 }
 

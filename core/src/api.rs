@@ -7,76 +7,31 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+/// `Attach` takes a file as base64 and returns what goes in `Post.files`;
+/// `File` returns an attachment's bytes as base64.
 #[derive(Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Call {
     Me,
-    SetName {
-        name: String,
-    },
-    SetInvisible {
-        on: bool,
-    },
+    SetName { name: String },
+    SetInvisible { on: bool },
     Spaces,
-    Members {
-        space: Id,
-    },
-    Messages {
-        space: Id,
-        channel: Ch,
-        before: Option<Pos>,
-        limit: usize,
-    },
-    MarkRead {
-        space: Id,
-        channel: Ch,
-    },
-    Typing {
-        space: Id,
-        channel: Ch,
-    },
-    Create {
-        name: String,
-    },
-    Join {
-        code: String,
-    },
-    Invite {
-        space: Id,
-    },
-    Leave {
-        space: Id,
-    },
-    Publish {
-        space: Id,
-        op: Op,
-    },
-    Ban {
-        space: Id,
-        user: Id,
-        on: bool,
-    },
-    Rekey {
-        space: Id,
-    },
-    Dm {
-        space: Id,
-        user: Id,
-    },
+    Members { space: Id },
+    Messages { space: Id, channel: Ch, before: Option<Pos>, limit: usize },
+    MarkRead { space: Id, channel: Ch },
+    Typing { space: Id, channel: Ch },
+    Create { name: String },
+    Join { code: String },
+    Invite { space: Id },
+    Leave { space: Id },
+    Publish { space: Id, op: Op },
+    Ban { space: Id, user: Id, on: bool },
+    Rekey { space: Id },
+    Dm { space: Id, user: Id },
     LinkCode,
-    AddStorage {
-        code: String,
-    },
-    /// A file to send, base64; returns what goes in `Post.files`.
-    Attach {
-        name: String,
-        data: String,
-    },
-    /// An attachment's bytes, base64.
-    File {
-        space: Id,
-        file: File,
-    },
+    AddStorage { code: String },
+    Attach { name: String, data: String },
+    File { space: Id, file: File },
 }
 
 pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
