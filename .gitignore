@@ -1,0 +1,11 @@
+target/
+*.log
+.DS_Store
+/app/gen/schemas/
+/app/gen/android/app/build/
+/app/gen/android/.gradle/
+/app/gen/android/local.properties
+/app/gen/android/buildSrc/build/
+/app/gen/android/buildSrc/.gradle/
+/app/gen/android/app/src/main/jniLibs/
+/app/gen/android/app/src/main/assets/

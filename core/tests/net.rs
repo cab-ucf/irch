@@ -1,0 +1,217 @@
+//! Several nodes on this machine, talking over real QUIC.
+
+use irch_core::{Ch, Config, Event, Id, Net, Node, Op};
+use std::sync::Arc;
+use std::time::Duration;
+
+fn dir(name: &str) -> std::path::PathBuf {
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+    std::env::temp_dir()
+        .join(format!("irch-test-{}-{name}", t.unwrap().as_nanos()))
+}
+
+async fn start(
+    dir: &std::path::Path,
+    name: &str,
+    link: Option<String>,
+    serve: bool,
+) -> Arc<Node> {
+    let filter = tracing_subscriber::EnvFilter::from_default_env();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_test_writer()
+        .try_init();
+    let cfg = Config {
+        dir: dir.into(),
+        name: name.into(),
+        net: Net::Direct,
+        link,
+        serve,
+    };
+    Node::start(cfg).await.unwrap()
+}
+
+async fn node(name: &str) -> Arc<Node> {
+    start(&dir(name), name, None, false).await
+}
+
+async fn until(what: &str, f: impl Fn() -> bool) {
+    for _ in 0..400 {
+        if f() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+fn general(n: &Node, id: &Id) -> Ch {
+    n.view(id, |s| s.channels()[0].0).unwrap()
+}
+
+fn texts(n: &Node, id: &Id, ch: &Ch) -> Vec<String> {
+    let m = n.view(id, |s| s.messages(ch, None, 100)).unwrap_or_default();
+    m.into_iter().map(|m| m.text).collect()
+}
+
+async fn say(n: &Arc<Node>, id: &Id, ch: Ch, text: &str) -> Id {
+    let op = Op::Post { channel: ch, text: text.into(), reply: None };
+    n.publish(id, op).await.unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn join_sync_and_live() {
+    let (a, b) = (node("a").await, node("b").await);
+    let id = a.create("home").await.unwrap();
+    let ch = general(&a, &id);
+    let hello = say(&a, &id, ch, "hello").await;
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    until("history", || texts(&b, &id, &ch) == ["hello"]).await;
+    assert_eq!(b.view(&id, |s| s.name().to_string()).unwrap(), "home");
+    assert_eq!(
+        b.unread(&id, &ch),
+        (0, 0),
+        "history before joining starts read"
+    );
+
+    let reply =
+        Op::Post { channel: ch, text: "@a hi".into(), reply: Some(hello) };
+    b.publish(&id, reply).await.unwrap();
+    until("live reply", || texts(&a, &id, &ch).len() == 2).await;
+    let m = a.view(&id, |s| s.messages(&ch, None, 9)).unwrap();
+    assert_eq!(m[1].quote.as_ref().unwrap().text, "hello");
+    assert_eq!(a.unread(&id, &ch), (1, 1));
+    assert_eq!(a.mentions(&id, 0).len(), 1);
+    a.mark_read(&id, &ch);
+    assert_eq!(a.unread(&id, &ch), (0, 0));
+
+    let react = Op::React { target: hello, emoji: "🎉".into(), on: true };
+    b.publish(&id, react).await.unwrap();
+    until("reaction", || {
+        let m = a.view(&id, |s| s.messages(&ch, None, 9)).unwrap();
+        m[0].reactions == [("🎉".to_string(), vec![b.id()])]
+    })
+    .await;
+    let names = a.view(&id, |s| {
+        s.members().into_iter().map(|m| m.name).collect::<Vec<_>>()
+    });
+    assert_eq!(names.unwrap(), ["a", "b"]);
+
+    let mut ev = b.subscribe();
+    a.typing(&id, ch).await;
+    let typing = async {
+        loop {
+            if let Ok(Event::Typing { user, .. }) = ev.recv().await {
+                return user;
+            }
+        }
+    };
+    let who =
+        tokio::time::timeout(Duration::from_secs(10), typing).await.unwrap();
+    assert_eq!(who, a.id());
+    let edit = Op::Edit { target: hello, text: Some("hello!".into()) };
+    assert!(b.publish(&id, edit.clone()).await.is_ok(), "anyone may send it");
+    a.publish(&id, edit).await.unwrap();
+    until("edit", || texts(&b, &id, &ch)[0] == "hello!").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ban_rekeys_and_history_survives() {
+    let (a, b, c) = (node("a").await, node("b").await, node("c").await);
+    let id = a.create("club").await.unwrap();
+    let ch = general(&a, &id);
+    say(&a, &id, ch, "before").await;
+    let code = a.invite(&id).await.unwrap();
+    b.join(&code).await.unwrap();
+    c.join(&code).await.unwrap();
+    let keyed = |u: Id| a.view(&id, |s| s.kem(&u).is_some()) == Some(true);
+    until("profiles", || keyed(b.id()) && keyed(c.id())).await;
+
+    a.ban(&id, &b.id(), true).await.unwrap();
+    until("b locked out", || b.locked(&id)).await;
+    assert!(!c.locked(&id));
+    say(&a, &id, ch, "after").await;
+    until("c reads on", || texts(&c, &id, &ch) == ["before", "after"]).await;
+    assert!(
+        b.publish(&id, Op::Post { channel: ch, text: "x".into(), reply: None })
+            .await
+            .is_err()
+    );
+    assert!(!a.invite(&id).await.unwrap().is_empty());
+
+    let d = node("d").await;
+    d.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    until("d sees all", || texts(&d, &id, &ch) == ["before", "after"]).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(texts(&b, &id, &ch), ["before"], "b never reads the new epoch");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn direct_messages() {
+    let (a, b) = (node("a").await, node("b").await);
+    let id = a.create("hub").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    until("b's key", || {
+        a.view(&id, |s| s.kem(&b.id()).is_some()) == Some(true)
+    })
+    .await;
+    let dm = a.dm(&id, &b.id()).await.unwrap();
+    assert_eq!(a.dm(&id, &b.id()).await.unwrap(), dm, "one DM per pair");
+    say(&a, &dm, irch_core::state::DM, "psst").await;
+    until("b got the DM", || texts(&b, &dm, &irch_core::state::DM) == ["psst"])
+        .await;
+    assert!(b.spaces().contains(&dm));
+    say(&b, &dm, irch_core::state::DM, "hey").await;
+    until("a got the answer", || {
+        texts(&a, &dm, &irch_core::state::DM).len() == 2
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn storage_node_and_restart() {
+    let s = start(&dir("s"), "s", None, true).await;
+    let (a, bdir) = (node("a").await, dir("b"));
+    let b = start(&bdir, "b", None, false).await;
+    let id = a.create("home").await.unwrap();
+    let ch = general(&a, &id);
+    a.add_storage(&s.storage_code().await.unwrap()).await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    until("b joined", || {
+        a.view(&id, |s| s.kem(&b.id()).is_some()) == Some(true)
+    })
+    .await;
+    b.shutdown().await;
+    drop(b);
+
+    say(&a, &id, ch, "while you were away").await;
+    let held =
+        |n: &Node| n.held().iter().find(|h| h.0 == id).map_or(0, |h| h.1);
+    until("storage holds it all", || held(&s) == held(&a)).await;
+    a.shutdown().await;
+    drop(a);
+
+    let b = start(&bdir, "b", None, false).await;
+    until("b caught up from storage", || {
+        texts(&b, &id, &ch).contains(&"while you were away".to_string())
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn link_a_device() {
+    let a = node("a").await;
+    let id = a.create("home").await.unwrap();
+    let ch = general(&a, &id);
+    say(&a, &id, ch, "mine").await;
+    let a2 = start(&dir("a2"), "phone", Some(a.link_code().await), false).await;
+    assert_eq!(a2.id(), a.id());
+    until("a2 has the space", || texts(&a2, &id, &ch) == ["mine"]).await;
+    assert_eq!(a2.name(), "a");
+    say(&a2, &id, ch, "from my phone").await;
+    until("a sees it", || texts(&a, &id, &ch).len() == 2).await;
+    let other = a2.create("second").await.unwrap();
+    until("a joins it too", || a.spaces().contains(&other)).await;
+    a2.leave(&other).await.unwrap();
+    until("a leaves too", || !a.spaces().contains(&other)).await;
+}
