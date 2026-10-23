@@ -2788,8 +2788,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "irch-core",
- "jni 0.21.1",
- "ndk-context",
  "qrcode",
  "serde",
  "serde_json",

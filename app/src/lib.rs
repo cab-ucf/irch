@@ -157,8 +157,6 @@ async fn start(app: &AppHandle, link: Option<String>) -> Result<(), String> {
     let r = async {
         let dir = app.path().app_data_dir()?;
         log_to(&dir);
-        #[cfg(target_os = "android")]
-        android::context().await;
         let net =
             match (std::env::var("IRCH_RELAY"), std::env::var_os("IRCH_LAN")) {
                 (Ok(r), _) => Net::Relay(
