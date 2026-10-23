@@ -16,7 +16,8 @@ const INLINE = [
   ["mention", /(?<![\p{L}\p{N}_])@[\p{L}\p{N}_.-]*[\p{L}\p{N}_]/u],
 ];
 
-/** Inline tokens: {t:"text"|"code"|"link"|"mention", v} or {t:"b"|"i"|"u"|"s"|"spoiler", c:[...]}. */
+/** Inline tokens: {t:"text"|"code"|"link"|"mention", v} or
+ *  {t:"b"|"i"|"u"|"s"|"spoiler", c:[...]}. */
 export function inline(text) {
   const out = [];
   while (text) {
@@ -50,10 +51,13 @@ export function markdown(src) {
     if (one) blocks.push({ t: "pre", v: one[1] });
     else if (line.startsWith("```")) {
       const body = [];
-      while (++i < lines.length && !lines[i].startsWith("```")) body.push(lines[i]);
+      while (++i < lines.length && !lines[i].startsWith("```")) {
+        body.push(lines[i]);
+      }
       blocks.push({ t: "pre", v: body.join("\n") });
-    } else if (line.startsWith("> ")) blocks.push({ t: "quote", c: inline(line.slice(2)) });
-    else blocks.push({ t: "line", c: inline(line) });
+    } else if (line.startsWith("> ")) {
+      blocks.push({ t: "quote", c: inline(line.slice(2)) });
+    } else blocks.push({ t: "line", c: inline(line) });
   }
   return blocks;
 }

@@ -23,7 +23,8 @@ test("inline styles nest and leave the rest as text", () => {
 });
 
 test("html is never interpreted, only carried as text", () => {
-  assert.deepEqual(inline("<img src=x onerror=alert(1)>"), [txt("<img src=x onerror=alert(1)>")]);
+  const tag = "<img src=x onerror=alert(1)>";
+  assert.deepEqual(inline(tag), [txt(tag)]);
 });
 
 test("links stop before trailing punctuation; mentions need a boundary", () => {
@@ -44,7 +45,7 @@ test("snake_case words are not italic", () => {
   assert.deepEqual(inline("_yes_"), [{ t: "i", c: [txt("yes")] }]);
 });
 
-test("blocks: fences (with language, single-line, unterminated) and quotes", () => {
+test("blocks: fences (language, one-line, unterminated), quotes", () => {
   assert.deepEqual(markdown("```rust\nfn x() {}\n```\n> **q**\nend"), [
     { t: "pre", v: "fn x() {}" },
     { t: "quote", c: [{ t: "b", c: [txt("q")] }] },

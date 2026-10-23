@@ -5,6 +5,7 @@ mod android;
 
 use irch_core::{Config, File, Id, Net, Node, api};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -110,6 +111,8 @@ async fn background(app: AppHandle, on: bool) {
 pub fn run() {
     let b = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init());
+    #[cfg(not(target_os = "android"))]
+    let b = b.plugin(tauri_plugin_notification::init());
     #[cfg(target_os = "android")]
     let b = b.plugin(android::init());
     let b = b.setup(|app| {
@@ -184,8 +187,7 @@ async fn start(app: &AppHandle, link: Option<String>) -> Result<(), String> {
 fn forward(app: AppHandle, n: Arc<Node>) {
     let mut rx = n.subscribe();
     tauri::async_runtime::spawn(async move {
-        #[cfg(target_os = "android")]
-        let mut seen = std::collections::HashMap::new();
+        let mut seen = HashMap::new();
         loop {
             let e = match rx.recv().await {
                 Ok(e) => e,
@@ -195,13 +197,58 @@ fn forward(app: AppHandle, n: Arc<Node>) {
                 }
                 Err(RecvError::Closed) => break,
             };
-            #[cfg(target_os = "android")]
             if let irch_core::Event::Changed { space } = &e {
-                android::mentions(&app, &n, *space, &mut seen).await;
+                mentions(&app, &n, *space, &mut seen).await;
             }
             let _ = app.emit("irch", e);
         }
     });
+}
+
+/// Notify about mentions newer than any seen before in `space`, so
+/// history arriving by sync stays quiet.
+async fn mentions(
+    app: &AppHandle,
+    n: &Node,
+    space: Id,
+    seen: &mut HashMap<Id, u64>,
+) {
+    let after = *seen.entry(space).or_insert_with(irch_core::now);
+    let hits = n.mentions(&space, after);
+    let Some((name, dm, chans, newest)) = n.view(&space, |s| {
+        let chans = s.channels();
+        let newest = chans.iter().filter_map(|c| s.latest(&c.0)).max();
+        (s.name().to_string(), s.dm.is_some(), chans, newest.unwrap_or(0))
+    }) else {
+        return;
+    };
+    seen.insert(space, after.max(newest));
+    for (ch, m) in hits {
+        let channel = chans.iter().find(|c| c.0 == ch).map_or("", |c| &c.1);
+        let title = match dm {
+            true => m.name.clone(),
+            false => format!("{} in #{channel} ({name})", m.name),
+        };
+        notify(app, &format!("{space:?}{ch:?}"), &title, &m.text).await;
+    }
+}
+
+#[cfg(target_os = "android")]
+async fn notify(app: &AppHandle, tag: &str, title: &str, body: &str) {
+    if let Some(b) = app.try_state::<android::Bridge>() {
+        b.mention(tag, title, body).await;
+    }
+}
+
+/// Only while no irch window is in front.
+#[cfg(not(target_os = "android"))]
+async fn notify(app: &AppHandle, _tag: &str, title: &str, body: &str) {
+    use tauri_plugin_notification::NotificationExt;
+    let front =
+        app.webview_windows().values().any(|w| w.is_focused().unwrap_or(false));
+    if !front {
+        let _ = app.notification().builder().title(title).body(body).show();
+    }
 }
 
 /// Logs stay in the app's private directory, never the system log.

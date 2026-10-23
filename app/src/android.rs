@@ -2,13 +2,12 @@
 //! (which iroh cannot see from native code there), mention notifications,
 //! the share sheet, and the opt-in background service.
 
-use irch_core::{Id, Node};
+use irch_core::Node;
 use serde::Serialize;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::ipc::Channel;
 use tauri::plugin::{Builder, PluginHandle, TauriPlugin};
-use tauri::{AppHandle, Manager, Wry};
+use tauri::{Manager, Wry};
 
 pub struct Bridge(PluginHandle<Wry>);
 
@@ -61,6 +60,11 @@ impl Bridge {
         self.call("watchNetwork", Watch { channel }).await;
     }
 
+    /// Shown only while irch is in the background.
+    pub async fn mention(&self, tag: &str, title: &str, body: &str) {
+        self.call("mention", Mention { tag, title, body }).await;
+    }
+
     pub async fn share(&self, text: &str) {
         self.call("share", Text { text }).await;
     }
@@ -78,34 +82,6 @@ impl Bridge {
         if let Err(e) = self.0.run_mobile_plugin_async::<()>(cmd, args).await {
             tracing::warn!("android {cmd}: {e}");
         }
-    }
-}
-
-/// Notify about mentions newer than any seen before in `space`, so
-/// history arriving by sync stays quiet. Shown only in the background.
-pub async fn mentions(
-    app: &AppHandle,
-    n: &Node,
-    space: Id,
-    seen: &mut HashMap<Id, u64>,
-) {
-    let Some(b) = app.try_state::<Bridge>() else { return };
-    let after = *seen.entry(space).or_insert_with(irch_core::now);
-    let hits = n.mentions(&space, after);
-    let Some((name, chans, newest)) = n.view(&space, |s| {
-        let chans = s.channels();
-        let newest = chans.iter().filter_map(|c| s.latest(&c.0)).max();
-        (s.name().to_string(), chans, newest.unwrap_or(0))
-    }) else {
-        return;
-    };
-    seen.insert(space, after.max(newest));
-    for (ch, m) in hits {
-        let channel = chans.iter().find(|c| c.0 == ch).map_or("", |c| &c.1);
-        let tag = format!("{space:?}{ch:?}");
-        let title = format!("{} in #{channel} ({name})", m.name);
-        b.call("mention", Mention { tag: &tag, title: &title, body: &m.text })
-            .await;
     }
 }
 

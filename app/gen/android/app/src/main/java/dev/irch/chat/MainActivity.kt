@@ -34,12 +34,13 @@ class MainActivity : TauriActivity() {
   // open, irch moves to the background instead of finishing, which would
   // stop the node.
   override fun onWebViewCreate(webView: WebView) {
-    onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+    val back = object : OnBackPressedCallback(true) {
       override fun handleOnBackPressed() {
         webView.evaluateJavascript("window.irchBack?.() === true") { handled ->
           if (handled != "true") moveTaskToBack(true)
         }
       }
-    })
+    }
+    onBackPressedDispatcher.addCallback(this, back)
   }
 }

@@ -20,9 +20,12 @@ fail() {
   adb logcat -d >"$out/logcat.txt" || true
   exit 1
 }
-front() { adb shell dumpsys activity activities | grep -E 'ResumedActivity' | grep -q "$pkg/"; }
+front() {
+  adb shell dumpsys activity activities | grep ResumedActivity |
+    grep -q "$pkg/"
+}
 pid() { adb shell pidof "$pkg" || true; }
-# Wait up to $2 seconds for text $1 in the accessibility tree (the web view's DOM).
+# Wait up to $2 seconds for text $1 in the accessibility tree (the DOM).
 see() {
   i=0
   until ui | grep -q "$1"; do
@@ -33,7 +36,7 @@ see() {
 }
 tap() {
   b=$(ui | tr '>' '\n' | grep -m1 "text=\"$1\"" |
-    sed -n 's/.*bounds="\[\([0-9]*\),\([0-9]*\)\]\[\([0-9]*\),\([0-9]*\)\]".*/\1 \2 \3 \4/p')
+    grep -o 'bounds="[^"]*"' | tr -c 0-9 ' ')
   [ -n "$b" ] || fail "no \"$1\" on screen"
   set -- $b
   adb shell input tap $((($1 + $3) / 2)) $((($2 + $4) / 2))
@@ -72,5 +75,7 @@ front || fail "not in front after returning"
 adb exec-out screencap -p >"$out/3-resumed.png"
 
 adb logcat -d >"$out/logcat.txt"
-if grep -E 'FATAL EXCEPTION|panicked at' "$out/logcat.txt"; then fail "crash in the device log"; fi
+if grep -E 'FATAL EXCEPTION|panicked at' "$out/logcat.txt"; then
+  fail "crash in the device log"
+fi
 echo "smoke test passed"

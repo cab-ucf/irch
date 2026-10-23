@@ -29,6 +29,9 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 tauri = { version = "2", features = [] }
 tauri-plugin-clipboard-manager = "2"
 
+[target.'cfg(not(target_os = "android"))'.dependencies]
+tauri-plugin-notification = "2"
+
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
 ndk-context = "0.1"

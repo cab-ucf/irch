@@ -85,7 +85,8 @@ Ctrl-N/P switches channel; PgUp/PgDn scrolls.
 
 Desktop and phone: `+` creates or joins a space; the paperclip, a drop or
 a paste attaches files; hover a message to react, reply, edit or delete;
-click a member to message, ban or promote them.
+click a member to message, ban or promote them. Mentions and direct
+messages notify while irch is out of sight.
 Ctrl+K switches, Alt+↑/↓ moves between channels, ↑ edits your last
 message. On Android, Back closes the topmost thing, then sends irch to the
 background; My Account › Stay connected keeps it receiving (there is no
@@ -109,7 +110,7 @@ Quiet (Tor and OrbitDB), Keet (Hypercore, closed source), Briar, Cwtch,
 SimpleX and Jami groups, Matrix's peer-to-peer experiments, and
 [p2panda](https://p2panda.org), whose spaces and DCGKA group encryption
 are the closest research. irch's niche: Discord's shape on a core small
-enough to read (`core/`, about 2,000 lines), with keys that change on
+enough to read (`core/`, about 2,200 lines), with keys that change on
 bans, storage that never sees plaintext, and the same code in a
 terminal, on desktops and on Android.
 

@@ -36,7 +36,8 @@ function h(tag, props, ...kids) {
 
 /** replaceChildren that skips null/false, for inline conditionals. */
 const put = (el, ...kids) =>
-  el.replaceChildren(...kids.flat(Infinity).filter((x) => x != null && x !== false));
+  el.replaceChildren(
+    ...kids.flat(Infinity).filter((x) => x != null && x !== false));
 
 const ICONS = {
   hash: "M9 3 7 21M17 3l-2 18M4 9h16M3 15h16",
@@ -313,11 +314,12 @@ function stepChannel(d) {
 
 const unread = (s) => s.channels.some((x) => x.unread);
 const mentions = (s) => s.channels.reduce((n, x) => n + x.mentions, 0);
-const badge = (n) => n ? h("span", { class: "badge" }, String(Math.min(n, 99))) : null;
+const badge = (n) =>
+  n ? h("span", { class: "badge" }, String(Math.min(n, 99))) : null;
 
-function railItem({ label, active, unread: u, count, onclick, kids, cls = "" }) {
+function railItem({ label, active, unread: u, count, onclick, kids, cls }) {
   return h("div", {
-    class: `server ${cls}${active ? " active" : ""}${u ? " unread" : ""}`,
+    class: `server ${cls ?? ""}${active ? " active" : ""}${u ? " unread" : ""}`,
   },
   h("i", { class: "pill" }),
   h("button", {
@@ -330,8 +332,10 @@ function railItem({ label, active, unread: u, count, onclick, kids, cls = "" }) 
 function renderRail() {
   const d = dms();
   const inDm = !!cur()?.dm;
-  const others = (s) => s.channels.filter((x) => s.id !== S.sid || x.id !== S.ch);
-  const dmCount = d.reduce((n, s) => n + others(s).reduce((m, x) => m + x.unread, 0), 0);
+  const others = (s) =>
+    s.channels.filter((x) => s.id !== S.sid || x.id !== S.ch);
+  const dmCount = d.reduce((n, s) =>
+    n + others(s).reduce((m, x) => m + x.unread, 0), 0);
   put($("rail"),
     d.length > 0 && railItem({
       label: "Direct Messages", active: inDm, unread: dmCount, count: dmCount,
@@ -347,12 +351,14 @@ function renderRail() {
       });
     }),
     S.spaces.some((s) => !s.dm) && h("div", { class: "rail-sep" }),
-    railItem({ label: "Add a Space", kids: icon("plus"), cls: "add", onclick: addSpace }),
+    railItem({ label: "Add a Space", kids: icon("plus"), cls: "add",
+      onclick: addSpace }),
   );
 }
 
 function tip(e) {
-  const t = $("tooltip") ?? document.body.appendChild(h("div", { id: "tooltip" }));
+  const t = $("tooltip") ??
+    document.body.appendChild(h("div", { id: "tooltip" }));
   const r = e.currentTarget.getBoundingClientRect();
   t.textContent = e.currentTarget.dataset.tip;
   t.style.left = `${r.right + 14}px`;
@@ -383,8 +389,8 @@ function dmList() {
 function channelList(s) {
   return [
     h("div", { class: "category" }, h("span", {}, "Text Channels"),
-      s.admin && h("button", { title: "Create Channel", onclick: createChannel },
-        icon("plus"))),
+      s.admin && h("button",
+        { title: "Create Channel", onclick: createChannel }, icon("plus"))),
     ...s.channels.map((ch) => {
       const active = ch.id === S.ch;
       return h("div", {
@@ -428,7 +434,8 @@ function renderHeader() {
   put(net, s && [h("i", { class: "dot" }),
     `${s.peers} peer${s.peers === 1 ? "" : "s"}`]);
   const input = $("input");
-  input.placeholder = s?.dm ? `Message @${s.name}` : ch ? `Message #${ch.name}` : "";
+  input.placeholder = s?.dm ? `Message @${s.name}`
+    : ch ? `Message #${ch.name}` : "";
   input.disabled = !ch || s.locked;
   $("locked").classList.toggle("hidden", !s?.locked);
   for (const id of ["scroller", "composer", "members"]) {
@@ -443,7 +450,7 @@ function renderHeader() {
       h("h1", {}, `Welcome to #${ch.name}!`),
       h("p", {}, `This is the start of the #${ch.name} channel.`)]
     : s ? [h("h1", {}, s.name),
-      h("p", {}, "Syncing… history arrives as soon as a member is reachable.")]
+      h("p", {}, "Syncing… history arrives once a member is reachable.")]
     : [],
     s && h("div", { class: "e2e" }, icon("lock"),
       "End-to-end encrypted. Stored only on members' devices."));
@@ -456,7 +463,8 @@ function renderEmpty() {
       "phone number: devices talk directly over iroh, and everything is " +
       "end-to-end encrypted."),
     h("button", { class: "btn", onclick: createFlow }, "Create a space"), " ",
-    h("button", { class: "btn grey", onclick: joinFlow }, "Join with an invite"),
+    h("button", { class: "btn grey", onclick: joinFlow },
+      "Join with an invite"),
     h("p", { class: "note" }, "Already use irch elsewhere? ",
       h("span", { class: "link", onclick: linkFlow }, "Link this device"))));
 }
@@ -476,7 +484,9 @@ function renderMessages(keepScroll) {
     const newDay = !prev || fmtDay(prev.ts) !== day;
     if (newDay) items.push({ k: "d" + day, sig: "", make: () => divider(day) });
     const isNew = S.newFrom === m.id;
-    if (isNew) items.push({ k: "new", sig: "", make: () => divider("New", true) });
+    if (isNew) {
+      items.push({ k: "new", sig: "", make: () => divider("New", true) });
+    }
     const cont = prev && !newDay && !isNew && !m.reply &&
       prev.author === m.author && m.ts - prev.ts < 7 * 60e3;
     const mentioned = mentionsMe(m);
@@ -518,7 +528,8 @@ const divider = (text, isNew) =>
 function mentionsMe(m) {
   if (isMe(m.author)) return false;
   const tag = "@" + S.me.name.toLowerCase();
-  return m.text.toLowerCase().includes(tag) || (m.quote && isMe(m.quote.author));
+  return m.text.toLowerCase().includes(tag) ||
+    (m.quote && isMe(m.quote.author));
 }
 
 function msgRow(m, { cont, mentioned, editing, authorAdmin }) {
@@ -530,14 +541,16 @@ function msgRow(m, { cont, mentioned, editing, authorAdmin }) {
   if (m.reply) row.append(replyRef(m));
   const at = new Date(m.ts).toLocaleString();
   if (cont) {
-    row.append(h("span", { class: "time side-time", title: at }, fmtTime(m.ts)));
+    row.append(h("span", { class: "time side-time", title: at },
+      fmtTime(m.ts)));
   } else {
     const card = (e) => memberCard(m.author, e.currentTarget, "right");
     const av = avatar(m.author, m.name);
     av.addEventListener("click", card);
     row.append(av, h("div", { class: "head" },
-      h("span", { class: "author" + (authorAdmin ? " admin" : ""), onclick: card },
-        m.name),
+      h("span", {
+        class: "author" + (authorAdmin ? " admin" : ""), onclick: card,
+      }, m.name),
       h("span", { class: "time", title: at }, fmtStamp(m.ts))));
   }
   if (editing) row.append(editBox(m));
@@ -560,7 +573,9 @@ function content(text, edited) {
   const div = h("div", { class: "content" });
   for (const b of markdown(text)) {
     if (b.t === "pre") div.append(h("pre", {}, h("code", {}, b.v)));
-    else if (b.t === "quote") div.append(h("div", { class: "quote" }, inl(b.c)));
+    else if (b.t === "quote") {
+      div.append(h("div", { class: "quote" }, inl(b.c)));
+    }
     else div.append(h("div", {}, b.c.length ? inl(b.c) : h("br")));
   }
   if (edited) {
@@ -586,7 +601,8 @@ function inl(nodes) {
         s.addEventListener("click", () => s.classList.add("shown"));
         return s;
       }
-      default: return h({ b: "strong", i: "em", u: "u", s: "s" }[n.t], {}, inl(n.c));
+      default:
+        return h({ b: "strong", i: "em", u: "u", s: "s" }[n.t], {}, inl(n.c));
     }
   });
 }
@@ -689,7 +705,8 @@ function reactionsBar(m) {
     }, icon("smile")));
 }
 
-const tool = (ic, title, onclick, cls) => h("button", { title, onclick, class: cls }, icon(ic));
+const tool = (ic, title, onclick, cls) =>
+  h("button", { title, onclick, class: cls }, icon(ic));
 
 function toolbar(m) {
   const mine = isMe(m.author);
@@ -699,8 +716,8 @@ function toolbar(m) {
     tool("reply", "Reply", () => startReply(m)),
     mine && tool("pencil", "Edit", () => startEdit(m)),
     (mine || cur()?.admin) &&
-      tool("trash", "Delete (hold Shift to skip confirmation)", (e) => del(m, e),
-        "danger"));
+      tool("trash", "Delete (hold Shift to skip confirmation)",
+        (e) => del(m, e), "danger"));
 }
 
 function editBox(m) {
@@ -739,9 +756,11 @@ function renderTyping() {
     .filter(([, until]) => until > now).map(([u]) => nameOf(u));
   const text = !who.length ? ""
     : who.length === 1 ? `${who[0]} is typing…`
-    : who.length <= 3 ? `${who.slice(0, -1).join(", ")} and ${who.at(-1)} are typing…`
+    : who.length <= 3
+      ? `${who.slice(0, -1).join(", ")} and ${who.at(-1)} are typing…`
     : "Several people are typing…";
-  put($("typing"), text && [h("span", { class: "dots" }, h("i"), h("i"), h("i")), text]);
+  const dots = h("span", { class: "dots" }, h("i"), h("i"), h("i"));
+  put($("typing"), text && [dots, text]);
 }
 
 // ---------- rendering: members ----------
@@ -756,12 +775,14 @@ function renderMembers() {
     ["Offline", ms.filter((m) => m.role !== "Banned" && !m.online)],
     ["Banned", s.admin ? ms.filter((m) => m.role === "Banned") : []],
   ];
-  put($("members"), groups.filter(([, l]) => l.length).flatMap(([title, list]) => [
+  const shown = groups.filter(([, l]) => l.length);
+  put($("members"), shown.flatMap(([title, list]) => [
     h("h3", {}, `${title} — ${list.length}`),
     ...list.map((m) => h("div", {
       class: `member ${m.online ? "on" : "off"} ${m.role.toLowerCase()}`,
       onclick: (e) => memberCard(m.id, e.currentTarget, "left"),
-    }, avatar(m.id, m.name, "sm", m.online), h("span", { class: "name" }, m.name))),
+    }, avatar(m.id, m.name, "sm", m.online),
+    h("span", { class: "name" }, m.name))),
   ]));
   // Names and admin colours in messages depend on members.
   if (S.msgs.length) renderMessages(true);
@@ -801,7 +822,8 @@ const EMOJI = ("👍 👎 ❤️ 😂 😮 😢 😡 🎉 🔥 👀 🙏 ✅ ❌
 function picker(anchor, onPick) {
   let close;
   const pick = (em) => { close(); onPick(em); };
-  const input = h("input", { placeholder: "Custom reaction (text or emoji)", maxLength: 16 });
+  const input = h("input",
+    { placeholder: "Custom reaction (text or emoji)", maxLength: 16 });
   input.addEventListener("keydown",
     (e) => e.key === "Enter" && input.value.trim() && pick(input.value.trim()));
   close = popover(anchor, h("div", { class: "menu picker" }, input,
@@ -836,23 +858,26 @@ const dmMenu = (anchor) =>
 
 function memberCard(id, anchor, align) {
   const s = cur();
-  const m = memberOf(id) ?? { id, name: short(id), role: "Member", online: false };
+  const m = memberOf(id) ??
+    { id, name: short(id), role: "Member", online: false };
   const ownerMe = s && isMe(s.owner);
   let close;
-  const act = (label, fn, cls = "") =>
-    h("button", { class: "btn " + cls, onclick: () => { close(); fn(); } }, label);
+  const act = (label, fn, cls = "") => h("button",
+    { class: "btn " + cls, onclick: () => { close(); fn(); } }, label);
   const role = (r) => () => publish({ Role: { user: id, role: r } });
   const ban = (on) => () => banFlow(m, on);
   const actions = [];
   if (!isMe(id)) {
     actions.push(act("Message", () => startDm(id)));
-    if (!s?.dm) actions.push(act("Mention", () => insert($("input"), `@${m.name} `), "grey"));
+    const mention = () => insert($("input"), `@${m.name} `);
+    if (!s?.dm) actions.push(act("Mention", mention, "grey"));
     if (s?.admin && id !== s.owner && (ownerMe || m.role !== "Admin")) {
       actions.push(m.role === "Banned" ? act("Unban", ban(false), "grey")
         : act("Ban", ban(true), "red"));
     }
     if (ownerMe && m.role !== "Banned") {
-      actions.push(m.role === "Admin" ? act("Remove Admin", role("Member"), "grey")
+      actions.push(m.role === "Admin"
+        ? act("Remove Admin", role("Member"), "grey")
         : act("Make Admin", role("Admin")));
     }
   }
@@ -884,12 +909,15 @@ function modal(build) {
     d.onclose = () => finish(null);
     d.onclick = (e) => e.target === d && finish(null);
     d.showModal();
-    d.querySelector("input:not([readonly]),textarea")?.focus({ preventScroll: true });
+    d.querySelector("input:not([readonly]),textarea")
+      ?.focus({ preventScroll: true });
   });
 }
 
-const foot = (...btns) => h("div", { class: "m-foot" }, h("span", { class: "spacer" }), btns);
-const cancel = (finish) => h("button", { class: "btn link", onclick: () => finish(null) }, "Cancel");
+const foot = (...btns) =>
+  h("div", { class: "m-foot" }, h("span", { class: "spacer" }), btns);
+const cancel = (finish) =>
+  h("button", { class: "btn link", onclick: () => finish(null) }, "Cancel");
 
 function ask({ title, sub, label, value = "", ok = "Save", placeholder,
   maxLength = 64, danger }) {
@@ -899,15 +927,18 @@ function ask({ title, sub, label, value = "", ok = "Save", placeholder,
     input.addEventListener("keydown", (e) => e.key === "Enter" && submit());
     return h("div", {},
       h("div", { class: "m-body" }, h("h2", {}, title),
-        sub && h("p", { class: "sub" }, sub), label && h("label", {}, label), input),
+        sub && h("p", { class: "sub" }, sub),
+        label && h("label", {}, label), input),
       foot(cancel(finish),
-        h("button", { class: "btn" + (danger ? " red" : ""), onclick: submit }, ok)));
+        h("button",
+          { class: "btn" + (danger ? " red" : ""), onclick: submit }, ok)));
   });
 }
 
 function confirmBox({ title, sub, ok }) {
   return modal((finish) => h("div", {},
-    h("div", { class: "m-body" }, h("h2", {}, title), h("p", { class: "sub" }, sub)),
+    h("div", { class: "m-body" }, h("h2", {}, title),
+      h("p", { class: "sub" }, sub)),
     foot(cancel(finish),
       h("button", { class: "btn red", onclick: () => finish(true) }, ok))));
 }
@@ -921,7 +952,8 @@ async function showCode({ title, label, code, note }) {
       b.textContent = "Copied";
       b.classList.add("green");
     } }, "Copy");
-    const field = h("input", { class: "field mono", type: "text", value: code, readOnly: true });
+    const field = h("input",
+      { class: "field mono", type: "text", value: code, readOnly: true });
     field.addEventListener("focus", () => field.select());
     const share = android && h("button", { class: "btn",
       onclick: () => quiet(invoke("share", { text: code })) }, "Share");
@@ -932,7 +964,8 @@ async function showCode({ title, label, code, note }) {
       h("div", { class: "m-body" }, h("h2", {}, title), h("label", {}, label),
         h("div", { class: "row" }, field, b, share), img,
         h("p", { class: "note" }, note)),
-      foot(h("button", { class: "btn grey", onclick: () => finish(null) }, "Done")));
+      foot(h("button", { class: "btn grey", onclick: () => finish(null) },
+        "Done")));
   });
 }
 
@@ -989,7 +1022,8 @@ async function linkFlow() {
   const code = await ask({ title: "Link this device",
     sub: "On your other device, open My Account › Link a device and paste " +
       "its code here. This device becomes you, with all your spaces.",
-    label: "Link code", placeholder: "irch:link:…", ok: "Link", maxLength: 8192 });
+    label: "Link code", placeholder: "irch:link:…", ok: "Link",
+    maxLength: 8192 });
   if (!code) return;
   try {
     await invoke("link", { code });
@@ -1027,7 +1061,9 @@ async function resetInvites() {
   const ok = await confirmBox({ title: "Reset invite links",
     sub: "Everyone here gets a new key; every invite shared so far stops " +
       "working. Bans do this by themselves.", ok: "Reset" });
-  if (ok) quiet(call("rekey", { space: S.sid }).then(() => toast("New key sent")));
+  if (ok) {
+    quiet(call("rekey", { space: S.sid }).then(() => toast("New key sent")));
+  }
 }
 
 async function banFlow(m, on) {
@@ -1044,8 +1080,10 @@ function settings() {
   modal((finish) => {
     const name = h("input", { type: "text", value: S.me.name, maxLength: 64 });
     const invisible = h("input", { type: "checkbox", checked: S.me.invisible });
-    const bg = android && h("input", { type: "checkbox", checked: store.get("bg") === "1" });
-    const storage = h("input", { type: "text", placeholder: "irch:host:…", maxLength: 8192 });
+    const bg = android &&
+      h("input", { type: "checkbox", checked: store.get("bg") === "1" });
+    const storage = h("input",
+      { type: "text", placeholder: "irch:host:…", maxLength: 8192 });
     const save = async () => {
       const n = name.value.trim();
       if (n && n !== S.me.name) await quiet(call("set_name", { name: n }));
@@ -1073,21 +1111,25 @@ function settings() {
         h("label", {}, "Display name"), name,
         h("label", {}, "User ID (your public key)"),
         h("div", { class: "row" },
-          h("input", { class: "field mono", type: "text", value: S.me.id, readOnly: true }),
-          h("button", { class: "btn grey", onclick: () => copy(S.me.id, "ID copied") }, "Copy")),
+          h("input", { class: "field mono", type: "text", value: S.me.id,
+            readOnly: true }),
+          h("button", { class: "btn grey",
+            onclick: () => copy(S.me.id, "ID copied") }, "Copy")),
         sw(invisible, "Invisible", "Send no presence or typing signals."),
         bg && sw(bg, "Stay connected in the background",
           "Receive messages and mentions while irch is closed. No server " +
           "can wake it, so it keeps running. Uses more battery."),
         h("label", {}, "Storage node"), storage,
-        h("p", { class: "note" }, "Paste the code `irch --serve` prints on an " +
-          "always-on machine: it keeps your spaces' ciphertext, never the " +
-          "keys, so messages wait there while everyone is offline."),
-        h("button", { class: "choice", onclick: () => { finish(null); linkDevice(); } },
-          icon("phone"), "Link a device"),
+        h("p", { class: "note" }, "Paste the code `irch --serve` prints " +
+          "on an always-on machine: it keeps your spaces' ciphertext, " +
+          "never the keys, so messages wait there while everyone is offline."),
+        h("button", {
+          class: "choice", onclick: () => { finish(null); linkDevice(); },
+        }, icon("phone"), "Link a device"),
         h("p", { class: "note" }, "Your identity is a key on your devices. " +
           "Messages are end-to-end encrypted; read positions stay here.")),
-      foot(cancel(finish), h("button", { class: "btn", onclick: save }, "Save")));
+      foot(cancel(finish),
+        h("button", { class: "btn", onclick: save }, "Save")));
   });
 }
 
@@ -1102,15 +1144,16 @@ async function linkDevice() {
 function quickSwitch() {
   const all = S.spaces.flatMap((s) => s.channels.map((ch) => ({ s, ch })));
   modal((finish) => {
-    const input = h("input", { type: "text", placeholder: "Where would you like to go?" });
+    const input = h("input",
+      { type: "text", placeholder: "Where would you like to go?" });
     const list = h("div", { class: "qs-list" });
     let sel = 0;
     let hits = [];
     const label = ({ s, ch }) => s.dm ? `@${s.name}` : ch.name;
     const draw = () => {
       const q = input.value.toLowerCase();
-      hits = all.filter((x) => `${label(x)} ${x.s.name}`.toLowerCase().includes(q))
-        .slice(0, 50);
+      const hit = (x) => `${label(x)} ${x.s.name}`.toLowerCase().includes(q);
+      hits = all.filter(hit).slice(0, 50);
       sel = Math.min(sel, Math.max(0, hits.length - 1));
       list.replaceChildren(...hits.map((x, i) => h("button", {
         class: i === sel ? "sel" : "", onclick: () => finish(x),
@@ -1127,7 +1170,8 @@ function quickSwitch() {
       } else if (e.key === "Enter" && hits[sel]) finish(hits[sel]);
     });
     draw();
-    return h("div", { class: "m-body" }, h("h2", {}, "Quick Switcher"), input, list);
+    return h("div", { class: "m-body" },
+      h("h2", {}, "Quick Switcher"), input, list);
   }).then((x) => x && select(x.s.id, x.ch.id));
 }
 
@@ -1204,7 +1248,8 @@ async function editChannel(ch) {
 const slug = (s) => s.trim().toLowerCase().replace(/\s+/g, "-");
 
 async function renameSpace() {
-  const name = await ask({ title: "Rename Space", label: "Space name", value: cur().name });
+  const name = await ask({ title: "Rename Space", label: "Space name",
+    value: cur().name });
   if (name) publish({ Rename: { name } });
 }
 
@@ -1298,7 +1343,8 @@ function wire() {
     if (files.length && chan()) addFiles(files);
   });
   $("emoji-btn").append(icon("smile"));
-  $("emoji-btn").onclick = (e) => picker(e.currentTarget, (em) => insert($("input"), em));
+  $("emoji-btn").onclick = (e) =>
+    picker(e.currentTarget, (em) => insert($("input"), em));
   $("chat").addEventListener("click", (e) => {
     if (e.target === $("chat")) document.body.classList.remove("drawer");
   });
@@ -1310,7 +1356,9 @@ function wire() {
     else if (closePop) closePop();
     else if (S.editing) stopEdit();
     else if (S.reply) cancelReply();
-    else if (mobile() && !$("members").classList.contains("hidden-panel")) showMembers(false);
+    else if (mobile() && !$("members").classList.contains("hidden-panel")) {
+      showMembers(false);
+    }
     else if (mobile() && !body.contains("drawer")) body.add("drawer");
     else return false;
     return true;
@@ -1382,7 +1430,9 @@ async function start() {
   }
   wire();
   renderEmpty();
-  if (android && store.get("bg") === "1") quiet(invoke("background", { on: true }));
+  if (android && store.get("bg") === "1") {
+    quiet(invoke("background", { on: true }));
+  }
   // Member lists change rarely but can be large: at most every 2 s.
   let membersDue = 0;
   const members = () => {

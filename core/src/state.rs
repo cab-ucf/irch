@@ -367,7 +367,7 @@ impl State {
         })
     }
 
-    /// The newest mention of `me` after `since`: what a notification shows.
+    /// The newest mention of `me` after `since` (in a DM, any message).
     pub fn last_mention(
         &self,
         ch: &Ch,
@@ -402,10 +402,8 @@ impl State {
     }
 
     fn mentions(&self, p: &Post, me: &Id, tag: &str) -> bool {
-        let to_me = p
-            .reply
-            .and_then(|r| self.post(&r))
-            .is_some_and(|q| q.author == *me);
+        let reply = p.reply.and_then(|r| self.post(&r));
+        let to_me = self.dm.is_some() || reply.is_some_and(|q| q.author == *me);
         p.author != *me && (to_me || p.text.to_lowercase().contains(tag))
     }
 }
@@ -513,5 +511,13 @@ mod tests {
         st.extend([op(32, o, del(24))]);
         let m = st.messages(&CH, None, 2);
         assert_eq!((&*m[0].text, m[1].quote.is_none()), ("25", true));
+    }
+
+    #[test]
+    fn every_dm_message_is_a_mention() {
+        let [o, a, _] = people();
+        let mut st = State::new(&Invite::new(o, "", Some(a)));
+        st.extend([op(1, o, post("hey", None))]);
+        assert_eq!(st.unread(&CH, 0, &a), (1, 1));
     }
 }

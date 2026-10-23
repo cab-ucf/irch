@@ -49,9 +49,9 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
             let on = n.online(&space);
             let ms = n.view(&space, |s| s.members()).unwrap_or_default();
             let row = |m: crate::Member| {
-                let online = on.contains(&m.id);
-                let (id, name, role) = (m.id, m.name, m.role);
-                json!({ "id": id, "name": name, "role": role, "online": online })
+                let mut v = json!(m);
+                v["online"] = on.contains(&m.id).into();
+                v
             };
             json!(ms.into_iter().map(row).collect::<Vec<_>>())
         }

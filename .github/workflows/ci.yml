@@ -81,23 +81,20 @@ jobs:
         working-directory: app
         run: NDK_HOME="$ANDROID_NDK_LATEST_HOME" cargo tauri android build
           --ci --debug --apk --target aarch64 --target x86_64
+      - run: mv app/gen/android/app/build/outputs/apk/*/*/*.apk irch.apk
       - name: Let the emulator use KVM
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
-            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
+        run: sudo chmod 666 /dev/kvm
       - uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
           arch: x86_64
           target: google_apis
           disable-animations: true
-          script: sh app/smoke.sh app/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk evidence
+          script: sh app/smoke.sh irch.apk evidence
       - uses: actions/upload-artifact@v4
         with:
           name: irch-android
-          path: app/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+          path: irch.apk
           retention-days: 14
       - uses: actions/upload-artifact@v4
         if: always()

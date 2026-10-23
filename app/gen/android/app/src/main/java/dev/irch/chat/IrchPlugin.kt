@@ -1,6 +1,6 @@
 package dev.irch.chat
 
-import android.Manifest
+import android.Manifest.permission.POST_NOTIFICATIONS
 import android.app.Activity
 import android.app.PendingIntent
 import android.content.Context
@@ -61,12 +61,13 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
   fun watchNetwork(invoke: Invoke) {
     val channel = invoke.parseArgs(WatchArgs::class.java).channel
     val cm = activity.getSystemService(ConnectivityManager::class.java)
-    cm.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
+    val ping = object : ConnectivityManager.NetworkCallback() {
       override fun onAvailable(network: Network) = channel.send(JSObject())
       override fun onLost(network: Network) = channel.send(JSObject())
-      override fun onLinkPropertiesChanged(network: Network, lp: LinkProperties) =
+      override fun onLinkPropertiesChanged(n: Network, lp: LinkProperties) =
         channel.send(JSObject())
-    })
+    }
+    cm.registerDefaultNetworkCallback(ping)
     invoke.resolve()
   }
 
@@ -74,15 +75,16 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
   @Command
   fun mention(invoke: Invoke) {
     val args = invoke.parseArgs(MentionArgs::class.java)
-    val lifecycle = ProcessLifecycleOwner.get().lifecycle
-    if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) postMention(activity, args)
+    val state = ProcessLifecycleOwner.get().lifecycle.currentState
+    if (!state.isAtLeast(Lifecycle.State.STARTED)) postMention(activity, args)
     invoke.resolve()
   }
 
   @Command
   fun share(invoke: Invoke) {
     val text = invoke.parseArgs(ShareArgs::class.java).text
-    val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text)
+    val send = Intent(Intent.ACTION_SEND).setType("text/plain")
+      .putExtra(Intent.EXTRA_TEXT, text)
     activity.startActivity(Intent.createChooser(send, null))
     invoke.resolve()
   }
@@ -93,7 +95,8 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     val file = java.io.File(invoke.parseArgs(FileArgs::class.java).path)
     val authority = activity.packageName + ".fileprovider"
     val uri = FileProvider.getUriForFile(activity, authority, file)
-    val type = activity.contentResolver.getType(uri) ?: "application/octet-stream"
+    val type =
+      activity.contentResolver.getType(uri) ?: "application/octet-stream"
     val send = Intent(Intent.ACTION_SEND).setType(type)
       .putExtra(Intent.EXTRA_STREAM, uri)
       .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -101,7 +104,7 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     invoke.resolve()
   }
 
-  /** Keep the node running while irch is in the background (a foreground service). */
+  /** Keep the node running in the background: a foreground service. */
   @Command
   fun background(invoke: Invoke) {
     val on = invoke.parseArgs(BackgroundArgs::class.java).on
@@ -109,7 +112,7 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     try {
       if (on) {
         if (!notificationsAllowed(activity)) {
-          val perm = arrayOf(Manifest.permission.POST_NOTIFICATIONS)
+          val perm = arrayOf(POST_NOTIFICATIONS)
           ActivityCompat.requestPermissions(activity, perm, 1)
         }
         ContextCompat.startForegroundService(activity, service)
@@ -127,25 +130,27 @@ const val MENTIONS = "mentions"
 const val CONNECTED = "connected"
 
 fun notificationsAllowed(ctx: Context) = Build.VERSION.SDK_INT < 33 ||
-  ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) ==
+  ContextCompat.checkSelfPermission(ctx, POST_NOTIFICATIONS) ==
   PackageManager.PERMISSION_GRANTED
 
 fun openAppIntent(ctx: Context): PendingIntent = PendingIntent.getActivity(
-  ctx, 0, Intent(ctx, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
+  ctx, 0, Intent(ctx, MainActivity::class.java),
+  PendingIntent.FLAG_IMMUTABLE,
 )
 
-fun notificationChannel(ctx: Context, id: String, name: String, importance: Int) =
+fun notificationChannel(ctx: Context, id: String, name: String, level: Int) =
   NotificationManagerCompat.from(ctx).createNotificationChannel(
-    NotificationChannelCompat.Builder(id, importance).setName(name).build()
+    NotificationChannelCompat.Builder(id, level).setName(name).build()
   )
 
-/** The lock screen shows only "New mention"; the text needs an unlocked device. */
+/** Locked, the screen shows only "New message"; the text needs unlocking. */
 private fun postMention(ctx: Context, args: MentionArgs) {
   if (!notificationsAllowed(ctx)) return
-  notificationChannel(ctx, MENTIONS, "Mentions", NotificationManagerCompat.IMPORTANCE_HIGH)
+  val high = NotificationManagerCompat.IMPORTANCE_HIGH
+  notificationChannel(ctx, MENTIONS, "Mentions", high)
   val hidden = NotificationCompat.Builder(ctx, MENTIONS)
     .setSmallIcon(R.drawable.ic_stat)
-    .setContentTitle("New mention")
+    .setContentTitle("New message")
     .build()
   val n = NotificationCompat.Builder(ctx, MENTIONS)
     .setSmallIcon(R.drawable.ic_stat)
