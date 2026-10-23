@@ -26,6 +26,7 @@ const HELP: &str = "\
 /rekey           new key, old invites stop working (admins)
 /link            become you on another device (keep it secret)
 /store CODE      keep your spaces on a storage node
+/file PATH TEXT  send a file        /save        save the last file here
 /invisible       no presence or typing    /quit
 Ctrl-N/P or Alt-Up/Down: channel   PgUp/PgDn: scroll   Esc: close";
 
@@ -182,7 +183,9 @@ impl App {
         let Some(cmd) = line.strip_prefix('/') else {
             if !line.is_empty() {
                 let (channel, text) = (self.here()?.1, line.into());
-                self.post(Op::Post { channel, text, reply: None }).await?;
+                let files = vec![];
+                self.post(Op::Post { channel, text, reply: None, files })
+                    .await?;
                 (self.scroll, self.typed) = (0, None);
             }
             return Ok(false);
@@ -229,11 +232,32 @@ impl App {
             "reply" => {
                 let (reply, channel) =
                     (Some(self.last(false)?), self.here()?.1);
-                self.post(Op::Post { channel, text: arg, reply }).await?;
+                let files = vec![];
+                self.post(Op::Post { channel, text: arg, reply, files })
+                    .await?;
             }
             "react" => {
                 let target = self.last(false)?;
                 self.post(Op::React { target, emoji: arg, on: true }).await?;
+            }
+            "file" => {
+                let (path, text) = arg.split_once(' ').unwrap_or((&arg, ""));
+                let data = std::fs::read(path)?;
+                let name = std::path::Path::new(path).file_name();
+                let name = name.and_then(|n| n.to_str()).unwrap_or("file");
+                let files = vec![n.attach(name, &data).await?];
+                let (channel, text) = (self.here()?.1, text.to_string());
+                self.post(Op::Post { channel, text, reply: None, files })
+                    .await?;
+            }
+            "save" => {
+                let (s, c) = self.here()?;
+                let msgs = n.view(&s, |st| st.messages(&c, None, 200));
+                let mut f = msgs.unwrap_or_default().into_iter().rev();
+                let f = f.find_map(|m| m.files.last().cloned());
+                let f = f.ok_or_else(|| anyhow!("no file here"))?;
+                let p = n.save(&s, &f, &std::env::current_dir()?).await?;
+                self.status = format!("saved {}", p.display());
             }
             "admin" | "member" => {
                 let role =
@@ -439,6 +463,10 @@ impl App {
         }
         out.push(Line::from(head));
         out.extend(text.map(|l| Line::from(format!("      {l}"))));
+        for f in &m.files {
+            let l = format!("      📎 {} ({})", f.name, size(f.size));
+            out.push(Line::from(l).cyan());
+        }
         if !m.reactions.is_empty() {
             let r: Vec<_> = m
                 .reactions
@@ -485,6 +513,14 @@ impl App {
             1 => format!("{} is typing…", who[0]),
             _ => format!("{} are typing…", who.join(", ")),
         }
+    }
+}
+
+fn size(n: u64) -> String {
+    match n {
+        n if n < 1 << 10 => format!("{n} B"),
+        n if n < 1 << 20 => format!("{} KB", n >> 10),
+        n => format!("{:.1} MB", n as f64 / (1 << 20) as f64),
     }
 }
 

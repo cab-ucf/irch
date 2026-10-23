@@ -41,6 +41,11 @@ struct Text<'a> {
 }
 
 #[derive(Serialize)]
+struct FilePath<'a> {
+    path: &'a str,
+}
+
+#[derive(Serialize)]
 struct On {
     on: bool,
 }
@@ -58,6 +63,11 @@ impl Bridge {
 
     pub async fn share(&self, text: &str) {
         self.call("share", Text { text }).await;
+    }
+
+    pub async fn share_file(&self, path: &std::path::Path) {
+        let path = &path.to_string_lossy();
+        self.call("shareFile", FilePath { path }).await;
     }
 
     pub async fn background(&self, on: bool) {

@@ -11,7 +11,7 @@ mod store;
 mod sync;
 
 pub use node::{Config, Event, Net, Node};
-pub use op::{Invite, Op, Role};
+pub use op::{File, Invite, Op, Role};
 pub use state::{Member, Message, State};
 
 use data_encoding::HEXLOWER_PERMISSIVE as HEX;

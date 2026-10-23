@@ -56,6 +56,9 @@ disk   : one append-only log of envs per space; nothing else to migrate
   while your others are off. It cannot read any of it.
 - **DMs** are two-person spaces, announced by a `Knock` that only the
   recipient's key opens.
+- **Files** (up to 25 MiB) are sealed under a fresh key that travels only
+  inside the post; their ciphertext is named by its BLAKE3 hash, fetched
+  from whoever has it and kept by your storage nodes too.
 
 Sync sends per-day bucket fingerprints (BLAKE3 of the sorted ids, so
 colliding sets cannot be crafted), then ids of the days that differ, then
@@ -76,11 +79,13 @@ Invites carry your relay address, not your IP, whenever a relay is known.
 
 Terminal: `/create NAME`, `/join CODE`, `/invite`, `/channel NAME`,
 `/reply TEXT`, `/react EMOJI`, `/edit TEXT`, `/delete`, `/dm USER`,
-`/ban USER`, `/rekey`, `/link`, `/store CODE`, `/invisible`, `/help`.
+`/ban USER`, `/rekey`, `/file PATH`, `/save`, `/link`, `/store CODE`,
+`/invisible`, `/help`.
 Ctrl-N/P switches channel; PgUp/PgDn scrolls.
 
-Desktop and phone: `+` creates or joins a space; hover a message to react,
-reply, edit or delete; click a member to message, ban or promote them.
+Desktop and phone: `+` creates or joins a space; the paperclip, a drop or
+a paste attaches files; hover a message to react, reply, edit or delete;
+click a member to message, ban or promote them.
 Ctrl+K switches, Alt+↑/↓ moves between channels, ↑ edits your last
 message. On Android, Back closes the topmost thing, then sends irch to the
 background; My Account › Stay connected keeps it receiving (there is no

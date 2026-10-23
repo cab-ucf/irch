@@ -3,7 +3,7 @@
 //! Control ops (names, channels, roles, epochs) are re-folded in `(ts, id)`
 //! order, so authority is judged at each op's place in that order.
 
-use crate::op::{Invite, Op, Role, Signed};
+use crate::op::{File, Invite, Op, Role, Signed};
 use crate::{Ch, Id};
 use iroh::{EndpointAddr, EndpointId};
 use serde::Serialize;
@@ -32,6 +32,7 @@ pub struct Message {
     pub reply: Option<Id>,
     pub quote: Option<Quote>,
     pub reactions: Vec<(String, Vec<Id>)>,
+    pub files: Vec<File>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -48,6 +49,7 @@ struct Post {
     author: Id,
     text: String,
     reply: Option<Id>,
+    files: Vec<File>,
 }
 
 #[derive(Default)]
@@ -103,9 +105,9 @@ impl State {
         let t = self.devices.entry(s.device).or_default();
         *t = (*t).max(s.ts);
         match s.op {
-            Op::Post { channel, text, reply } => {
+            Op::Post { channel, text, reply, files } => {
                 self.index.insert(s.id, (channel, at));
-                let p = Post { author: s.author, text, reply };
+                let p = Post { author: s.author, text, reply, files };
                 let ch = self.posts.entry(channel).or_default();
                 (ch.insert(at, p).is_none(), false)
             }
@@ -338,7 +340,7 @@ impl State {
         reactions.values_mut().for_each(|v| v.sort());
         let (author, name) = (p.author, self.display_name(&p.author));
         let reactions = reactions.into_iter().collect();
-        let reply = p.reply;
+        let (reply, files) = (p.reply, p.files.clone());
         Some(Message {
             id,
             author,
@@ -349,6 +351,7 @@ impl State {
             reply,
             quote,
             reactions,
+            files,
         })
     }
 
@@ -425,7 +428,7 @@ mod tests {
 
     fn post(text: &str, reply: Option<u8>) -> Op {
         let reply = reply.map(|n| Id([n; 32]));
-        Op::Post { channel: CH, text: text.into(), reply }
+        Op::Post { channel: CH, text: text.into(), reply, files: vec![] }
     }
 
     fn history() -> Vec<Signed> {

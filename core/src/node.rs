@@ -3,7 +3,7 @@
 //! space's log, open with a known epoch key, fold, notify.
 
 use crate::crypto::{Key, Me, kem_open, kem_seal, rand};
-use crate::op::{self, Env, Invite, Op, Role, code, tag, uncode};
+use crate::op::{self, Env, File, Invite, Op, Role, code, tag, uncode};
 use crate::state::{Message, State};
 use crate::store::{self, Log};
 use crate::sync::{self, Bucket, Hello};
@@ -35,6 +35,8 @@ const BEAT: Duration = Duration::from_secs(60);
 const ONLINE: Duration = Duration::from_secs(150);
 pub const MAX_TEXT: usize = 4000;
 pub const MAX_NAME: usize = 64;
+pub const MAX_FILE: usize = 25 << 20;
+const BLOB: &[u8] = b"irch/blob/1";
 
 /// How to reach peers beyond the LAN.
 #[derive(Clone, Debug, Default)]
@@ -234,16 +236,28 @@ pub struct Node {
     serve: Option<[u8; 16]>,
 }
 
+/// Serves sync and blobs; the ALPN says which.
 #[derive(Debug, Clone)]
-struct Syncs(Weak<Node>);
+struct Proto(Weak<Node>);
 
-impl ProtocolHandler for Syncs {
+impl ProtocolHandler for Proto {
     async fn accept(&self, c: Connection) -> Result<(), AcceptError> {
         let n = self.0.upgrade().ok_or_else(|| AcceptError::from_err(Gone))?;
-        sync::respond(&n, &c).await.map_err(|e| {
+        let r = match c.alpn() == sync::ALPN {
+            true => sync::respond(&n, &c).await,
+            false => n.give(&c).await,
+        };
+        r.map_err(|e| {
             AcceptError::from_err(std::io::Error::other(e.to_string()))
         })
     }
+}
+
+/// A blob by hash, or (to a storage node) one to keep.
+#[derive(Serialize, Deserialize)]
+enum Ask {
+    Get(Id),
+    Put([u8; 16], Vec<u8>),
 }
 
 #[derive(Debug)]
@@ -358,10 +372,11 @@ impl Node {
         });
         let router = Router::builder(n.ep.clone())
             .accept(iroh_gossip::ALPN, n.gossip.clone())
-            .accept(sync::ALPN, Syncs(Arc::downgrade(&n)))
+            .accept(sync::ALPN, Proto(Arc::downgrade(&n)))
+            .accept(BLOB, Proto(Arc::downgrade(&n)))
             .spawn();
         let _ = n.router.set(router);
-        n.save();
+        n.persist();
         if serve.is_some() {
             let hosted = lock(&n.local).hosted.clone();
             for (id, peers) in hosted {
@@ -411,7 +426,7 @@ impl Node {
         op::seal(&sp.id, key, me, dev, self.tick(), op)
     }
 
-    fn save(&self) {
+    fn persist(&self) {
         let l = lock(&self.local);
         if let Err(e) = store::save(&self.dir.join("local"), &*l) {
             warn!("saving local state: {e}");
@@ -485,7 +500,7 @@ impl Node {
     pub fn set_invisible(&self, on: bool) {
         self.invisible.store(on, Relaxed);
         lock(&self.local).invisible = on;
-        self.save();
+        self.persist();
     }
 
     fn since(&self, id: &Id, ch: &Ch) -> u64 {
@@ -497,7 +512,7 @@ impl Node {
         let latest = self.view(id, |s| s.latest(ch)).flatten().unwrap_or(0);
         if self.since(id, ch) < latest {
             lock(&self.local).read.insert((*id, *ch), latest);
-            self.save();
+            self.persist();
         }
     }
 
@@ -593,7 +608,7 @@ impl Node {
         l.joined.remove(id);
         l.hosted.remove(id);
         drop(l);
-        self.save();
+        self.persist();
         self.emit(Event::Changed { space: *id });
     }
 
@@ -708,7 +723,7 @@ impl Node {
                 _ => {}
             }
         }
-        self.save();
+        self.persist();
     }
 
     /// Seal, store, fold and broadcast an op.
@@ -728,9 +743,11 @@ impl Node {
     pub async fn publish(self: &Arc<Self>, id: &Id, op: Op) -> Result<Id> {
         let fits = |t: &str, max| !t.trim().is_empty() && t.len() <= max;
         let ok = match &op {
-            Op::Post { text: t, .. } | Op::Edit { text: Some(t), .. } => {
-                fits(t, MAX_TEXT)
+            Op::Post { text: t, files, .. } => {
+                let empty = t.is_empty() && !files.is_empty();
+                (empty || fits(t, MAX_TEXT)) && files.len() <= 10
             }
+            Op::Edit { text: Some(t), .. } => fits(t, MAX_TEXT),
             Op::Rename { name: n } | Op::Channel { name: Some(n), .. } => {
                 fits(n, MAX_NAME)
             }
@@ -960,6 +977,129 @@ impl Node {
         }
     }
 
+    fn blob(&self, h: &Id) -> PathBuf {
+        self.dir.join("blobs").join(h.to_string())
+    }
+
+    /// Seal a file and keep its ciphertext; send it in an `Op::Post`.
+    pub async fn attach(
+        self: &Arc<Self>,
+        name: &str,
+        data: &[u8],
+    ) -> Result<File> {
+        ensure!(data.len() <= MAX_FILE, "files are at most 25 MiB");
+        let key = rand();
+        let ct = crate::crypto::seal(&key, b"irch file", data);
+        let hash = Id(blake3::hash(&ct).into());
+        self.keep(&hash, &ct)?;
+        let (name, size) =
+            (name.chars().take(128).collect(), data.len() as u64);
+        Ok(File { name, size, hash, key: Id(key) })
+    }
+
+    /// Store a blob here, and on our storage nodes.
+    fn keep(self: &Arc<Self>, hash: &Id, ct: &[u8]) -> Result<()> {
+        std::fs::create_dir_all(self.dir.join("blobs"))?;
+        store::write(&self.blob(hash), ct)?;
+        let stores = self.view(&self.own, |s| s.storage()).unwrap_or_default();
+        for (addr, token) in stores {
+            let (n, put) = (self.clone(), Ask::Put(token, ct.to_vec()));
+            tokio::spawn(async move { n.ask(addr, &put).await });
+        }
+        Ok(())
+    }
+
+    /// An attachment's plaintext, from here or from anyone who has it.
+    pub async fn file(
+        self: &Arc<Self>,
+        space: &Id,
+        f: &File,
+    ) -> Result<Vec<u8>> {
+        let ct = match std::fs::read(self.blob(&f.hash)) {
+            Ok(ct) => ct,
+            Err(_) => {
+                let sp = self.get(space)?;
+                let (mut peers, mut got, get) =
+                    (sp.nbrs(), None, Ask::Get(f.hash));
+                peers.extend(self.bootstrap(&sp));
+                for p in peers {
+                    let ask = self.ask(p.into(), &get);
+                    let wait =
+                        tokio::time::timeout(Duration::from_secs(20), ask);
+                    if let Ok(Ok(b)) = wait.await
+                        && blake3::hash(&b) == f.hash.0
+                    {
+                        got = Some(b);
+                        break;
+                    }
+                }
+                let ct = got.context("nobody reachable has that file now")?;
+                self.keep(&f.hash, &ct)?;
+                ct
+            }
+        };
+        crate::crypto::open(&f.key.0, b"irch file", &ct).context("damaged file")
+    }
+
+    /// An attachment written into `dir`, never over anything already there.
+    pub async fn save(
+        self: &Arc<Self>,
+        space: &Id,
+        f: &File,
+        dir: &Path,
+    ) -> Result<PathBuf> {
+        use std::io::{ErrorKind::AlreadyExists, Write};
+        let data = self.file(space, f).await?;
+        let name = Path::new(&f.name).file_name().and_then(|n| n.to_str());
+        let name = name.unwrap_or_default().trim_start_matches('.');
+        let name = if name.is_empty() { "file" } else { name };
+        let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
+        let dot = if ext.is_empty() { "" } else { "." };
+        std::fs::create_dir_all(dir)?;
+        for i in 0.. {
+            let n = match i {
+                0 => name.to_string(),
+                i => format!("{stem} ({i}){dot}{ext}"),
+            };
+            let p = dir.join(n);
+            match std::fs::File::create_new(&p) {
+                Ok(mut out) => return Ok(out.write_all(&data).map(|_| p)?),
+                Err(e) if e.kind() == AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        unreachable!()
+    }
+
+    async fn ask(&self, peer: EndpointAddr, a: &Ask) -> Result<Vec<u8>> {
+        let c = self.ep.connect(peer, BLOB).await?;
+        let (mut tx, mut rx) = c.open_bi().await?;
+        tx.write_all(&postcard::to_allocvec(a)?).await?;
+        tx.finish()?;
+        let b = rx.read_to_end(MAX_FILE + 1024).await?;
+        c.close(0u32.into(), b"done");
+        Ok(b)
+    }
+
+    /// Answer a blob request.
+    async fn give(&self, c: &Connection) -> Result<()> {
+        let (mut tx, mut rx) = c.accept_bi().await?;
+        match postcard::from_bytes(&rx.read_to_end(MAX_FILE + 1024).await?)? {
+            Ask::Get(h) => {
+                tx.write_all(&std::fs::read(self.blob(&h)).unwrap_or_default())
+                    .await?
+            }
+            Ask::Put(t, b) if self.serve == Some(t) => {
+                std::fs::create_dir_all(self.dir.join("blobs"))?;
+                store::write(&self.blob(&Id(blake3::hash(&b).into())), &b)?;
+            }
+            Ask::Put(..) => bail!("not a storage node of yours"),
+        }
+        tx.finish()?;
+        let _ = tokio::time::timeout(Duration::from_secs(10), c.closed()).await;
+        Ok(())
+    }
+
     /// Serve a sync session: a space we have, or, for a storage node, one
     /// its owner asks it to keep.
     pub(crate) fn find(
@@ -972,7 +1112,7 @@ impl Node {
         }
         self.serve.filter(|t| h.token == Some(*t))?;
         lock(&self.local).hosted.insert(h.space, vec![from]);
-        self.save();
+        self.persist();
         self.open(None, h.space, vec![from.into()]).ok()
     }
 
@@ -1025,7 +1165,7 @@ impl Node {
                 l.peers.insert(peer, a);
             }
             drop(l);
-            n.save();
+            n.persist();
         });
     }
 

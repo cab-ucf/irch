@@ -15,6 +15,7 @@ import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
 import app.tauri.annotation.Command
@@ -40,6 +41,11 @@ class MentionArgs {
 @InvokeArg
 class ShareArgs {
   var text = ""
+}
+
+@InvokeArg
+class FileArgs {
+  var path = ""
 }
 
 @InvokeArg
@@ -77,6 +83,20 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
   fun share(invoke: Invoke) {
     val text = invoke.parseArgs(ShareArgs::class.java).text
     val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text)
+    activity.startActivity(Intent.createChooser(send, null))
+    invoke.resolve()
+  }
+
+  /** Hand a saved attachment to another app: Files, Photos, a messenger. */
+  @Command
+  fun shareFile(invoke: Invoke) {
+    val file = java.io.File(invoke.parseArgs(FileArgs::class.java).path)
+    val authority = activity.packageName + ".fileprovider"
+    val uri = FileProvider.getUriForFile(activity, authority, file)
+    val type = activity.contentResolver.getType(uri) ?: "application/octet-stream"
+    val send = Intent(Intent.ACTION_SEND).setType(type)
+      .putExtra(Intent.EXTRA_STREAM, uri)
+      .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     activity.startActivity(Intent.createChooser(send, null))
     invoke.resolve()
   }

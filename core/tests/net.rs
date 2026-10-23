@@ -55,7 +55,8 @@ fn texts(n: &Node, id: &Id, ch: &Ch) -> Vec<String> {
 }
 
 async fn say(n: &Arc<Node>, id: &Id, ch: Ch, text: &str) -> Id {
-    let op = Op::Post { channel: ch, text: text.into(), reply: None };
+    let op =
+        Op::Post { channel: ch, text: text.into(), reply: None, files: vec![] };
     n.publish(id, op).await.unwrap()
 }
 
@@ -74,8 +75,12 @@ async fn join_sync_and_live() {
         "history before joining starts read"
     );
 
-    let reply =
-        Op::Post { channel: ch, text: "@a hi".into(), reply: Some(hello) };
+    let reply = Op::Post {
+        channel: ch,
+        text: "@a hi".into(),
+        reply: Some(hello),
+        files: vec![],
+    };
     b.publish(&id, reply).await.unwrap();
     until("live reply", || texts(&a, &id, &ch).len() == 2).await;
     let m = a.view(&id, |s| s.messages(&ch, None, 9)).unwrap();
@@ -133,9 +138,17 @@ async fn ban_rekeys_and_history_survives() {
     say(&a, &id, ch, "after").await;
     until("c reads on", || texts(&c, &id, &ch) == ["before", "after"]).await;
     assert!(
-        b.publish(&id, Op::Post { channel: ch, text: "x".into(), reply: None })
-            .await
-            .is_err()
+        b.publish(
+            &id,
+            Op::Post {
+                channel: ch,
+                text: "x".into(),
+                reply: None,
+                files: vec![]
+            }
+        )
+        .await
+        .is_err()
     );
     assert!(!a.invite(&id).await.unwrap().is_empty());
 
@@ -236,4 +249,46 @@ async fn link_while_offline_through_storage() {
     let a2 = start(&dir("a2"), "phone", Some(code), false).await;
     until("a2 restored from storage", || texts(&a2, &id, &ch) == ["kept safe"])
         .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn attachments_live_on_storage_too() {
+    let s = start(&dir("s"), "s", None, true).await;
+    let (a, b) = (node("a").await, node("b").await);
+    let id = a.create("home").await.unwrap();
+    let ch = general(&a, &id);
+    a.add_storage(&s.storage_code().await.unwrap()).await.unwrap();
+    let code = a.invite(&id).await.unwrap();
+    b.join(&code).await.unwrap();
+    let data: Vec<u8> = (0..300_000u32).map(|i| (i * 7) as u8).collect();
+    let f = a.attach("cat.png", &data).await.unwrap();
+    let files = vec![f.clone()];
+    let op = Op::Post { channel: ch, text: String::new(), reply: None, files };
+    a.publish(&id, op).await.unwrap();
+    let first = |n: &Node| {
+        let m = n.view(&id, |s| s.messages(&ch, None, 9)).unwrap_or_default();
+        m.into_iter().find_map(|m| m.files.first().cloned())
+    };
+    until("b sees the file", || first(&b).is_some()).await;
+    assert_eq!(first(&b).unwrap(), f);
+    assert_eq!(b.file(&id, &f).await.unwrap(), data, "fetched from a");
+    let out = dir("saved");
+    let evil = irch_core::File { name: "../../.cat.png".into(), ..f.clone() };
+    let p1 = b.save(&id, &evil, &out).await.unwrap();
+    let p2 = b.save(&id, &evil, &out).await.unwrap();
+    assert_eq!(
+        (p1.parent(), p1.file_name()),
+        (Some(&*out), Some("cat.png".as_ref()))
+    );
+    assert_eq!(p2.file_name(), Some("cat (1).png".as_ref()));
+    assert_eq!(std::fs::read(p2).unwrap(), data);
+    let held = |n: &Node| n.held().iter().find(|h| h.0 == id).map(|h| h.1);
+    until("storage caught up", || held(&s) == held(&a)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    a.shutdown().await;
+    b.shutdown().await;
+    let c = node("c").await;
+    c.join(&code).await.unwrap();
+    until("c sees the file", || first(&c).is_some()).await;
+    assert_eq!(c.file(&id, &f).await.unwrap(), data, "fetched from storage");
 }

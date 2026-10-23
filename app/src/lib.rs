@@ -3,7 +3,7 @@
 #[cfg(target_os = "android")]
 mod android;
 
-use irch_core::{Config, Net, Node, api};
+use irch_core::{Config, File, Id, Net, Node, api};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,6 +55,28 @@ async fn link(
     start(&app, Some(code)).await
 }
 
+/// Save an attachment: into Downloads, or on Android to the share sheet.
+#[tauri::command]
+async fn save(
+    app: AppHandle,
+    s: State<'_, App>,
+    space: Id,
+    file: File,
+) -> Result<String, String> {
+    let (n, p) = (node(&s).await?, app.path());
+    #[cfg(target_os = "android")]
+    let dir = p.app_cache_dir().map(|d| d.join("shared"));
+    #[cfg(not(target_os = "android"))]
+    let dir = p.download_dir().or_else(|_| p.home_dir());
+    let dir = dir.map_err(|e| e.to_string())?;
+    let f = n.save(&space, &file, &dir).await.map_err(err)?;
+    #[cfg(target_os = "android")]
+    if let Some(b) = app.try_state::<android::Bridge>() {
+        b.share_file(&f).await;
+    }
+    Ok(f.display().to_string())
+}
+
 /// A QR code, as SVG, for codes shown to a camera.
 #[tauri::command]
 fn qr(text: String) -> Result<String, String> {
@@ -97,7 +119,7 @@ pub fn run() {
         Ok(())
     });
     let b = b.invoke_handler(tauri::generate_handler![
-        irch, link, qr, share, background
+        irch, link, qr, save, share, background
     ]);
     let app = b.build(tauri::generate_context!()).expect("tauri builds");
     app.run(|app, e| {

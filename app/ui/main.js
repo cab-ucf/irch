@@ -67,6 +67,9 @@ const ICONS = {
   key: "M15 9a3 3 0 1 0 0-.01M12.5 11.5 4 20M7 17l2 2M9 15l2 2",
   phone: "M8 3h8v18H8zM11 18h2",
   disk: "M4 6h16v5H4zM4 13h16v5H4zM7 8.5h.01M7 15.5h.01",
+  clip: "M8 12.5 14 6.5a3 3 0 0 1 4.2 4.2l-7.6 7.6a5 5 0 0 1-7-7L11 3.8",
+  file: "M6 3h8l4 4v14H6zM14 3v4h4",
+  down: "M12 4v11M7 10l5 5 5-5M5 20h14",
 };
 
 function icon(name) {
@@ -150,7 +153,7 @@ const store = {
 const S = {
   me: null, spaces: [], members: [], msgs: [], sid: null, ch: null,
   limit: 50, more: true, loading: false, reply: null, editing: null,
-  newFrom: null, unreadAtOpen: 0, stick: false, lastTyping: 0,
+  newFrom: null, unreadAtOpen: 0, stick: false, lastTyping: 0, files: [],
   typing: new Map(), // "space|channel" -> Map(user -> expiry)
 };
 
@@ -537,7 +540,9 @@ function msgRow(m, { cont, mentioned, editing, authorAdmin }) {
         m.name),
       h("span", { class: "time", title: at }, fmtStamp(m.ts))));
   }
-  row.append(editing ? editBox(m) : content(m.text, m.edited));
+  if (editing) row.append(editBox(m));
+  else if (m.text || m.edited) row.append(content(m.text, m.edited));
+  if (m.files.length) row.append(attachments(m.files));
   if (m.reactions.length) row.append(reactionsBar(m));
   row.append(toolbar(m));
   return row;
@@ -584,6 +589,88 @@ function inl(nodes) {
       default: return h({ b: "strong", i: "em", u: "u", s: "s" }[n.t], {}, inl(n.c));
     }
   });
+}
+
+// ---------- attachments ----------
+
+const MIME = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+  gif: "image/gif", webp: "image/webp", avif: "image/avif", bmp: "image/bmp" };
+const mime = (name) => MIME[name.split(".").pop().toLowerCase()];
+const size = (n) => n < 1024 ? `${n} B` : n < 1 << 20 ? `${n >> 10} KB`
+  : `${(n / (1 << 20)).toFixed(1)} MB`;
+const images = new Map(); // hash -> Promise of a data: URL
+
+function image(f) {
+  if (!images.has(f.hash)) {
+    images.set(f.hash, rpc("file", { space: S.sid, file: f })
+      .then((b64) => `data:${mime(f.name)};base64,${b64}`)
+      .catch((e) => (images.delete(f.hash), Promise.reject(e))));
+  }
+  return images.get(f.hash);
+}
+
+function attachments(files) {
+  return h("div", { class: "attachments" }, files.map((f) => {
+    if (!mime(f.name)) return fileChip(f);
+    const img = h("img", { class: "attachment", alt: f.name, title: f.name });
+    const box = h("div", { class: "image loading" }, img);
+    image(f).then((src) => {
+      const stick = nearBottom();
+      img.onload = () => stick && ($("scroller").scrollTop = 1e9);
+      img.src = src;
+      box.classList.remove("loading");
+      img.onclick = () => lightbox(src, f);
+    }, () => box.replaceWith(fileChip(f)));
+    return box;
+  }));
+}
+
+const fileChip = (f) => h("div", { class: "file-chip" }, icon("file"),
+  h("div", { class: "meta" }, h("b", {}, f.name), h("small", {}, size(f.size))),
+  h("button", { title: android ? "Share" : "Save to Downloads",
+    onclick: () => saveFile(f) }, icon("down")));
+
+async function saveFile(f) {
+  const at = await invoke("save", { space: S.sid, file: f })
+    .catch((e) => toast(String(e), true));
+  if (at && !android) toast(`Saved to ${at}`);
+}
+
+function lightbox(src, f) {
+  modal((finish) => h("div", { class: "lightbox", onclick: () => finish(null) },
+    h("img", { src, alt: f.name }),
+    h("div", { class: "row" }, h("span", {}, f.name),
+      h("button", { class: "btn grey", onclick: (e) => {
+        e.stopPropagation();
+        saveFile(f);
+      } }, android ? "Share" : "Save"))));
+}
+
+async function addFiles(list) {
+  for (const file of list) {
+    if (file.size > 25 << 20) {
+      toast(`${file.name} is over 25 MB`, true);
+      continue;
+    }
+    const data = await new Promise((ok) => {
+      const r = new FileReader();
+      r.onload = () => ok(r.result.slice(r.result.indexOf(",") + 1));
+      r.readAsDataURL(file);
+    });
+    const f = await call("attach", { name: file.name, data }).catch(() => null);
+    if (f) S.files.push(f);
+    renderFilesBar();
+  }
+}
+
+function renderFilesBar() {
+  const bar = $("files-bar");
+  bar.classList.toggle("hidden", !S.files.length);
+  put(bar, S.files.map((f, i) => h("span", { class: "pending" }, icon("clip"),
+    f.name, h("button", { title: "Remove", onclick: () => {
+      S.files.splice(i, 1);
+      renderFilesBar();
+    } }, icon("x")))));
 }
 
 function reactionsBar(m) {
@@ -1154,17 +1241,23 @@ async function send() {
   const text = input.value.trim();
   const s = cur();
   const ch = chan();
-  if (!text || !s || !ch) return;
+  const files = S.files;
+  if ((!text && !files.length) || !s || !ch) return;
   const reply = S.reply?.id ?? null;
   input.value = "";
+  S.files = [];
+  renderFilesBar();
   autosize(input);
   cancelReply();
   S.lastTyping = 0;
   S.stick = true;
   try {
-    await call("publish", { space: s.id, op: { Post: { channel: ch.id, text, reply } } });
+    const op = { Post: { channel: ch.id, text, reply, files } };
+    await call("publish", { space: s.id, op });
   } catch {
     input.value = text;
+    S.files = files;
+    renderFilesBar();
   }
 }
 
@@ -1184,6 +1277,21 @@ function wire() {
     showMembers(on);
     store.set("members", on ? "1" : "0");
   };
+  $("attach-btn").append(icon("clip"));
+  $("attach-btn").onclick = () => $("picker").click();
+  $("picker").onchange = (e) => {
+    addFiles([...e.target.files]);
+    e.target.value = "";
+  };
+  addEventListener("dragover", (e) => e.preventDefault());
+  addEventListener("drop", (e) => {
+    e.preventDefault();
+    if (chan() && !cur()?.locked) addFiles([...e.dataTransfer.files]);
+  });
+  addEventListener("paste", (e) => {
+    const files = [...(e.clipboardData?.files ?? [])];
+    if (files.length && chan()) addFiles(files);
+  });
   $("emoji-btn").append(icon("smile"));
   $("emoji-btn").onclick = (e) => picker(e.currentTarget, (em) => insert($("input"), em));
   $("chat").addEventListener("click", (e) => {

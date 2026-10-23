@@ -36,6 +36,8 @@ pub enum Op {
         channel: Ch,
         text: String,
         reply: Option<Id>,
+        #[serde(default)]
+        files: Vec<File>,
     },
     /// Edit, or (`None`) delete.
     Edit {
@@ -88,6 +90,16 @@ impl Op {
     pub fn live(&self) -> bool {
         matches!(self, Op::Typing { .. } | Op::Here)
     }
+}
+
+/// An attachment. Its ciphertext lives apart, named by its BLAKE3 hash;
+/// the key travels only inside the sealed post.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct File {
+    pub name: String,
+    pub size: u64,
+    pub hash: Id,
+    pub key: Id,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
@@ -223,7 +235,8 @@ fn sealed() {
     let inv = Invite::new(Id(*sk.public().as_bytes()), "x", None);
     assert_eq!(Invite::decode(&inv.encode()).unwrap(), inv);
     let (sp, key) = (inv.id(), inv.key);
-    let op = Op::Post { channel: Ch([1; 8]), text: "hi".into(), reply: None };
+    let (channel, text) = (Ch([1; 8]), "hi".into());
+    let op = Op::Post { channel, text, reply: None, files: vec![] };
     let (s, raw) = seal(&sp, &key, &sk, dev, 7, op);
     let e: Env = postcard::from_bytes(&raw).unwrap();
     assert_eq!(open(&sp, &key, &e, true), Some(s));
