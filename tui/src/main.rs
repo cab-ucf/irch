@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
     let ui = !(c.serve || c.headless);
     let log = tracing_subscriber::fmt().with_ansi(false).with_env_filter(
         tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "warn".into()),
+            .unwrap_or_else(|_| "warn,n0_mainline=off".into()),
     );
     if ui {
         std::fs::create_dir_all(&dir)?;

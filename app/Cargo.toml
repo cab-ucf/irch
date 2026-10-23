@@ -1,0 +1,34 @@
+[package]
+name = "irch-app"
+description = "irch on the desktop and on Android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "irch_app"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "irch-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+irch-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+tauri = { version = "2", features = [] }
+tauri-plugin-clipboard-manager = "2"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"

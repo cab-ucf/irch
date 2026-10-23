@@ -1,0 +1,108 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  TAURI_DEPS: >-
+    libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev
+    libjavascriptcoregtk-4.1-dev librsvg2-dev
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y $TAURI_DEPS
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: node --test app/tests/*.test.mjs
+
+  # The core, the terminal client and the app compile everywhere.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p irch-core
+      - run: cargo build --release -p irch -p irch-app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: irch-${{ runner.os }}
+          path: |
+            target/release/irch
+            target/release/irch.exe
+            target/release/irch-app
+            target/release/irch-app.exe
+          retention-days: 14
+
+  # One job builds the APK and runs it on an emulator.
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      # Gradle's debug variant is the one signed (with a throwaway key) and
+      # so installable; optimize its Rust side instead.
+      CARGO_PROFILE_DEV_OPT_LEVEL: "2"
+      CARGO_PROFILE_DEV_DEBUG: "false"
+    steps:
+      - name: Room for the build and a system image
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+      - uses: actions/checkout@v4
+      - uses: gradle/actions/wrapper-validation@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - run: cargo install tauri-cli --version 2.12.4 --locked
+      - name: APK for arm64 phones and x86_64 emulators
+        working-directory: app
+        run: NDK_HOME="$ANDROID_NDK_LATEST_HOME" cargo tauri android build
+          --ci --debug --apk --target aarch64 --target x86_64
+      - name: Let the emulator use KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          script: sh app/smoke.sh app/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk evidence
+      - uses: actions/upload-artifact@v4
+        with:
+          name: irch-android
+          path: app/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-evidence
+          path: evidence
+          retention-days: 14
+          if-no-files-found: ignore

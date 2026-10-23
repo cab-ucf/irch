@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Status-bar icon: the launcher icon's speech bubble, as an alpha mask. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="704"
+    android:viewportHeight="704">
+    <group android:translateX="-160" android:translateY="-160">
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M512 212c-176 0-318 118-318 268 0 86 47 162 120 211l-26 121 132-74c29 6 59 9 92 9 176 0 318-118 318-267S688 212 512 212z" />
+    </group>
+</vector>

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>irch</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div id="boot">Starting irch…</div>
+    <div id="app">
+      <nav id="rail" aria-label="Spaces"></nav>
+      <aside id="sidebar">
+        <button id="server-header"><span>irch</span></button>
+        <div id="channels"></div>
+        <div id="user-panel"></div>
+      </aside>
+      <main id="chat">
+        <header id="chat-header">
+          <button class="hdr-btn" id="menu-btn" title="Channels"></button>
+          <div class="title"></div>
+          <div id="net" title="Peers connected directly. No servers."></div>
+          <button class="hdr-btn on" id="members-btn" title="Members"></button>
+        </header>
+        <div id="scroller">
+          <div id="welcome"></div>
+          <div id="list"></div>
+        </div>
+        <div id="empty" class="hidden"></div>
+        <div id="composer">
+          <div id="locked" class="hidden">This space moved to a new key
+            without you. Ask a member for a new invite.</div>
+          <div id="reply-bar" class="hidden"></div>
+          <div class="box">
+            <button id="emoji-btn" title="Emoji"></button>
+            <textarea id="input" rows="1" maxlength="4000"
+              autocomplete="off"></textarea>
+          </div>
+          <div id="typing"></div>
+        </div>
+      </main>
+      <aside id="members"></aside>
+    </div>
+    <div id="toasts"></div>
+    <dialog id="modal"></dialog>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

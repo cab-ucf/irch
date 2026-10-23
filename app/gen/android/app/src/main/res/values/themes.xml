@@ -1,0 +1,6 @@
+<resources>
+    <!-- The UI is dark only; a dark window avoids a white flash at launch. -->
+    <style name="Theme.irch_app" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="android:windowBackground">@color/bg</item>
+    </style>
+</resources>
