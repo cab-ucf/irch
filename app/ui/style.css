@@ -910,6 +910,8 @@ dialog label {
 }
 .field,
 .picker input,
+dialog select,
+dialog input[type="date"],
 dialog input[type="text"] {
   width: 100%;
   height: 40px;
@@ -922,6 +924,15 @@ dialog input[type="text"] {
 .field:focus,
 .picker input:focus,
 dialog input[type="text"]:focus { border-color: var(--pink); }
+dialog input[type="date"] { color-scheme: dark; }
+dialog label.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-transform: none;
+  font-size: 14px;
+  color: var(--text);
+}
 .field.mono { font: 13px var(--mono); }
 .note { font-size: 12px; color: var(--muted); margin-top: 8px; }
 .row { display: flex; gap: 8px; }

@@ -28,6 +28,7 @@ async fn start(
         net: Net::Direct,
         link,
         serve,
+        notes: None,
     };
     Node::start(cfg).await.unwrap()
 }

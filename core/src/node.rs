@@ -65,6 +65,8 @@ pub struct Config {
     pub link: Option<String>,
     /// Keep other people's ciphertext: a storage node.
     pub serve: bool,
+    /// Where "Add to notes" writes: a Markdown vault (loroh's, say).
+    pub notes: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -342,6 +344,7 @@ pub struct Node {
     own: Id,
     dir: PathBuf,
     net: Net,
+    notes: Option<PathBuf>,
     ep: Endpoint,
     gossip: Gossip,
     router: OnceLock<Router>,
@@ -475,6 +478,7 @@ impl Node {
             me,
             dir: cfg.dir,
             net: cfg.net,
+            notes: cfg.notes,
             ep,
             gossip,
             router: OnceLock::new(),
@@ -1131,6 +1135,17 @@ impl Node {
         self.emit(Event::Call { space: id });
         tokio::spawn(self.clone().ring(run));
         Ok(())
+    }
+
+    /// Notes in the notes folder, if there is one.
+    pub fn notes(&self) -> Option<Vec<String>> {
+        self.notes.as_deref().map(crate::notes::list)
+    }
+
+    /// Add Markdown to a note in the notes folder.
+    pub fn note(&self, file: &str, md: &str) -> Result<()> {
+        let dir = self.notes.as_deref().context("no notes folder here")?;
+        crate::notes::append(dir, file, md)
     }
 
     /// The call we are in.

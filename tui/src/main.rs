@@ -60,7 +60,9 @@ async fn main() -> Result<()> {
         log.with_writer(std::io::stderr).init();
     }
     let (name, link, serve) = (c.name, c.link, c.serve);
-    let n = Node::start(Config { dir, name, net, link, serve }).await?;
+    let notes = std::env::var_os("LOROH_VAULT").map(Into::into);
+    let notes = notes.or_else(|| dirs::home_dir().map(|h| h.join("notes")));
+    let n = Node::start(Config { dir, name, net, link, serve, notes }).await?;
     if let Some(code) = n.storage_code().await {
         println!("Storage code (give it to the people you store for):");
         println!("{code}");

@@ -6,6 +6,7 @@ pub mod api;
 mod call;
 pub mod crypto;
 mod node;
+pub mod notes;
 pub mod op;
 pub mod state;
 mod store;

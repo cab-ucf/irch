@@ -3,7 +3,9 @@
   "productName": "irch",
   "version": "0.1.0",
   "identifier": "dev.irch.chat",
-  "build": { "frontendDist": "ui" },
+  "build": {
+    "frontendDist": "ui"
+  },
   "app": {
     "windows": [
       {
@@ -22,6 +24,27 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"]
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "irch"
+        ]
+      },
+      "mobile": [
+        {
+          "scheme": [
+            "irch"
+          ],
+          "appLink": false
+        }
+      ]
+    }
   }
 }

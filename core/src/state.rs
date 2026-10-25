@@ -398,10 +398,10 @@ impl State {
         }
     }
 
-    /// One message, wherever it is.
-    pub fn message(&self, id: &Id) -> Option<Message> {
+    /// One message, and where it is.
+    pub fn message(&self, id: &Id) -> Option<(Ch, Message)> {
         let (ch, at) = self.index.get(id)?;
-        self.view(at, self.posts.get(ch)?.get(at)?)
+        Some((*ch, self.view(at, self.posts.get(ch)?.get(at)?)?))
     }
 
     fn post(&self, id: &Id) -> Option<&Post> {

@@ -103,7 +103,7 @@ Invites carry your relay address, not your IP, whenever a relay is known.
 Terminal: `/create NAME`, `/join CODE`, `/invite`, `/channel NAME`,
 `/reply TEXT`, `/thread TEXT`, `/react EMOJI`, `/edit TEXT`, `/delete`,
 `/dm USER`, `/ban USER`, `/rekey`, `/file PATH`, `/save`, `/link`,
-`/store CODE`, `/invisible`, `/help`.
+`/store CODE`, `/note [FILE]`, `/todo [FILE]`, `/invisible`, `/help`.
 Ctrl-N/P switches channel; PgUp/PgDn scrolls.
 
 Desktop and phone: `+` creates or joins a space; the paperclip, a drop or
@@ -118,6 +118,16 @@ message. On phones, swipe right for channels and left for members; Back
 closes the topmost thing (a thread returns to its channel), then sends
 irch to the background; My Account › Stay connected keeps it receiving
 (there is no push server to wake a peer-to-peer app).
+
+Notes: the bookmark on a message adds it (or its whole thread) to your
+notes as a task, with an optional due date, or as a quote: plain Markdown
+with an `irch://` link back, appended to a file in
+[loroh](https://github.com/cab-ucf/siroh)'s vault (`LOROH_VAULT`, else
+`~/notes`). A lab's ideas and projects live in a shared folder there
+(`Lab/Ideas.md`, `Lab/Projects.md`), synced by siroh with everyone who
+shares it, so loroh's task list tracks them beside your own. `irch://`
+links open irch at that message. On Android, where loroh's vault is
+private to it, the Markdown goes to the clipboard.
 
 ## Limits
 

@@ -85,6 +85,7 @@ const ICONS = {
   screen: "M3 4h18v12H3zM8 20h8M12 16v4",
   speaker: "M4 9h4l5-4v14l-5-4H4zM16 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12",
   thread: "M5 4v9a4 4 0 0 0 4 4h10M15 13l4 4-4 4",
+  note: "M6 3h12v18l-6-4-6 4zM9 8h6M9 11h4",
 };
 
 function icon(name) {
@@ -245,6 +246,8 @@ async function loadMessages() {
   if (last) S.typing.get(`${S.sid}|${S.ch}`)?.delete(last.author);
   renderMessages();
   renderTyping();
+  if (S.jump && msgs.some((m) => m.id === S.jump)) jumpTo(S.jump);
+  S.jump = null;
   if (document.hasFocus() && nearBottom()) markRead();
 }
 
@@ -438,6 +441,20 @@ const threadRow = (t) => h("div", {
   onclick: () => openThread(t.root),
 }, icon("thread"), h("span", { class: "name" }, t.name),
 t.id !== S.ch && badge(t.mentions));
+
+/** irch://open/SPACE/CHANNEL/MESSAGE, from a note: there, if we can. */
+async function openUrl(url) {
+  if (!String(url).startsWith("irch://open/")) return;
+  const [sid, ch, msg] = url.replace(/^irch:\/\/open\//, "").split("/");
+  const s = S.spaces.find((x) => x.id === sid);
+  if (!s || !/^[0-9a-f]{16}$/.test(ch) || !/^[0-9a-f]{64}$/.test(msg)) {
+    return toast("That link is to a space you are not in", true);
+  }
+  S.jump = msg;
+  if (s.channels.some((c) => c.id === ch)) return select(sid, ch);
+  S.sid = sid;
+  await openThread(ch);
+}
 
 /** A message's thread: a channel of its own, there once anyone writes. */
 async function openThread(root) {
@@ -877,10 +894,52 @@ function toolbar(m) {
       (e) => picker(e.currentTarget, (em) => react(m, em, true))),
     tool("reply", "Reply", () => startReply(m)),
     !inThread() && tool("thread", "Reply in thread", () => openThread(m.id)),
+    tool("note", "Add to notes", () => toNotes(m)),
     mine && tool("pencil", "Edit", () => startEdit(m)),
     (mine || cur()?.admin) &&
       tool("trash", "Delete (hold Shift to skip confirmation)",
         (e) => del(m, e), "danger"));
+}
+
+/** Into your notes (loroh's vault, a lab's shared folder in it) as a task
+ *  or a quote, linked back here; on phones, onto the clipboard. */
+async function toNotes(m) {
+  const files = await rpc("notes").catch(() => null);
+  const last = store.get("note") ?? "Inbox.md";
+  const todo = h("select", {}, h("option", { value: "1" }, "A task"),
+    h("option", { value: "" }, "A note (quoted)"));
+  const whole = (inThread() || m.thread > 0) &&
+    h("input", { type: "checkbox", checked: inThread() });
+  const into = files &&
+    h("input", { type: "text", value: last, maxLength: 200 });
+  into?.setAttribute("list", "notes-list");
+  const due = h("input", { type: "date" });
+  todo.onchange = () => due.parentElement.classList.toggle("hidden",
+    !todo.value);
+  const add = async (finish) => {
+    let file = into?.value.trim() || null;
+    if (file && !file.endsWith(".md")) file += ".md";
+    const md = await call("note", { space: S.sid, message: m.id,
+      thread: !!whole?.checked, todo: !!todo.value, due: due.value || null,
+      file });
+    finish(true);
+    if (file) {
+      store.set("note", file);
+      toast(`Added to ${file}`);
+    } else await copy(md, "Copied as Markdown: paste it into your notes");
+  };
+  modal((finish) => h("div", {},
+    h("div", { class: "m-body" }, h("h2", {}, "Add to notes"),
+      h("p", { class: "sub" }, "Plain Markdown with a link back here, for " +
+        "loroh (or any notes app). A shared folder (Lab/Ideas.md) reaches " +
+        "everyone who shares it."),
+      h("label", {}, "As"), todo,
+      h("div", {}, h("label", {}, "Due (optional)"), due),
+      whole && h("label", { class: "check" }, whole, "The whole thread"),
+      into && [h("label", {}, "Into"), into, h("datalist", { id: "notes-list" },
+        files.map((f) => h("option", { value: f })))]),
+    foot(cancel(finish), h("button", { class: "btn",
+      onclick: () => quiet(add(finish)) }, files ? "Add" : "Copy"))));
 }
 
 function editBox(m) {
@@ -1660,8 +1719,11 @@ async function start() {
       setTimeout(renderTyping, 6100);
     }
   });
+  await T.event.listen("open-url", ({ payload }) => openUrl(payload));
   await loadSidebar();
   if (!S.spaces.length) renderHeader();
+  const url = await invoke("opened").catch(() => null);
+  if (url) openUrl(url);
   $("boot").remove();
 }
 

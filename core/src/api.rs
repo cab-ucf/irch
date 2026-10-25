@@ -1,7 +1,7 @@
 //! The app's whole bridge: one JSON call in, one JSON value out.
 
-use crate::{Ch, Id, Node, Op, Role, op::File, state::Pos};
-use anyhow::Result;
+use crate::{Ch, Id, Node, Op, Role, notes, op::File, state::Pos};
+use anyhow::{Context, Result};
 use data_encoding::BASE64;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -13,27 +13,87 @@ use std::sync::Arc;
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Call {
     Me,
-    SetName { name: String },
-    SetInvisible { on: bool },
+    SetName {
+        name: String,
+    },
+    SetInvisible {
+        on: bool,
+    },
     Spaces,
-    Members { space: Id },
-    Messages { space: Id, channel: Ch, before: Option<Pos>, limit: usize },
-    Thread { space: Id, channel: Ch },
-    MarkRead { space: Id, channel: Ch },
-    Typing { space: Id, channel: Ch },
-    Create { name: String },
-    Join { code: String },
-    Invite { space: Id },
-    Leave { space: Id },
-    Publish { space: Id, op: Op },
-    Ban { space: Id, user: Id, on: bool },
-    Rekey { space: Id },
-    Dm { space: Id, user: Id },
+    Members {
+        space: Id,
+    },
+    Messages {
+        space: Id,
+        channel: Ch,
+        before: Option<Pos>,
+        limit: usize,
+    },
+    Thread {
+        space: Id,
+        channel: Ch,
+    },
+    MarkRead {
+        space: Id,
+        channel: Ch,
+    },
+    Typing {
+        space: Id,
+        channel: Ch,
+    },
+    Create {
+        name: String,
+    },
+    Join {
+        code: String,
+    },
+    Invite {
+        space: Id,
+    },
+    Leave {
+        space: Id,
+    },
+    Publish {
+        space: Id,
+        op: Op,
+    },
+    Ban {
+        space: Id,
+        user: Id,
+        on: bool,
+    },
+    Rekey {
+        space: Id,
+    },
+    Dm {
+        space: Id,
+        user: Id,
+    },
     LinkCode,
-    AddStorage { code: String },
-    Attach { name: String, data: String },
-    File { space: Id, file: File },
-    Ring { space: Id, channel: Ch },
+    AddStorage {
+        code: String,
+    },
+    Attach {
+        name: String,
+        data: String,
+    },
+    File {
+        space: Id,
+        file: File,
+    },
+    Ring {
+        space: Id,
+        channel: Ch,
+    },
+    Notes,
+    Note {
+        space: Id,
+        message: Id,
+        thread: bool,
+        todo: bool,
+        due: Option<String>,
+        file: Option<String>,
+    },
     Hangup,
 }
 
@@ -70,7 +130,7 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
         // The thread, and the message it hangs off.
         Call::Thread { space, channel } => json!(
             n.view(&space, |s| s.thread(&channel).map(|t| {
-                let m = s.message(&t.root);
+                let m = s.message(&t.root).map(|m| m.1);
                 (t, m)
             }))
             .flatten()
@@ -101,6 +161,26 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
             json!(n.call(Some((space, channel))).await?)
         }
         Call::Hangup => json!(n.call(None).await?),
+        // Notes in the notes folder, or null where there is none (Android).
+        Call::Notes => json!(n.notes()),
+        // The Markdown, added to `file` if given.
+        Call::Note { space, message, thread, todo, due, file } => {
+            let md = |s: &crate::State| {
+                notes::markdown(
+                    s,
+                    &space,
+                    &message,
+                    thread,
+                    todo,
+                    due.as_deref(),
+                )
+            };
+            let md = n.view(&space, md).flatten().context("no such message")?;
+            if let Some(f) = file {
+                n.note(&f, &md)?;
+            }
+            json!(md)
+        }
     })
 }
 

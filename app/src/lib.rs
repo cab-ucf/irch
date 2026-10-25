@@ -115,6 +115,14 @@ async fn tune(s: State<'_, App>, to: Channel<Body>) -> Result<(), String> {
     Ok(())
 }
 
+/// The irch:// link irch was opened with, if any.
+#[tauri::command]
+fn opened(app: AppHandle) -> Option<String> {
+    use tauri_plugin_deep_link::DeepLinkExt;
+    let urls = app.deep_link().get_current().ok().flatten()?;
+    urls.first().map(|u| u.to_string())
+}
+
 /// A QR code, as SVG, for codes shown to a camera.
 #[tauri::command]
 fn qr(text: String) -> Result<String, String> {
@@ -148,7 +156,17 @@ async fn background(app: AppHandle, on: bool) {
 pub fn run() {
     // Calls ask for the camera, the microphone or the screen only after
     // a click on irch's own page; the operating system may still ask too.
-    let b = tauri::Builder::default()
+    let b = tauri::Builder::default();
+    // One irch per device: a second launch (an irch:// link from a note,
+    // say) hands its link to the first and leaves.
+    #[cfg(desktop)]
+    let b = b.plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = (w.unminimize(), w.set_focus());
+        }
+    }));
+    let b = b
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .on_permission_request(|_, kind| match kind {
             Kind::Camera | Kind::Microphone | Kind::DisplayCapture => {
@@ -172,12 +190,21 @@ pub fn run() {
                 }
             });
         }
+        use tauri_plugin_deep_link::DeepLinkExt;
+        #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
+        let _ = app.deep_link().register_all();
+        let h = app.handle().clone();
+        app.deep_link().on_open_url(move |e| {
+            for u in e.urls() {
+                let _ = h.emit("open-url", u.to_string());
+            }
+        });
         let h = app.handle().clone();
         tauri::async_runtime::spawn(async move { start(&h, None).await });
         Ok(())
     });
     let b = b.invoke_handler(tauri::generate_handler![
-        irch, link, qr, save, share, background, media, tune
+        irch, link, qr, save, share, background, media, tune, opened
     ]);
     let app = b.build(tauri::generate_context!()).expect("tauri builds");
     app.run(|app, e| {
@@ -220,7 +247,14 @@ async fn start(app: &AppHandle, link: Option<String>) -> Result<(), String> {
                 (_, Some(_)) => Net::Lan,
                 _ => Net::Default,
             };
-        let cfg = Config { dir, name: "anon".into(), net, link, serve: false };
+        // Desktop: notes go to loroh's vault (LOROH_VAULT, else ~/notes).
+        let notes =
+            std::env::var_os("LOROH_VAULT").map(Into::into).or_else(|| {
+                let home = app.path().home_dir().ok();
+                home.filter(|_| cfg!(desktop)).map(|h| h.join("notes"))
+            });
+        let (name, serve) = ("anon".into(), false);
+        let cfg = Config { dir, name, net, link, serve, notes };
         tokio::spawn(Node::start(cfg)).await?
     };
     let r = r.await.map_err(err);

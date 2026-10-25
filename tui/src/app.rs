@@ -1,9 +1,9 @@
 //! The terminal client: the core's state on screen, IRC-style commands.
 
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use crossterm::event::{Event as Term, EventStream, KeyCode, KeyEvent};
 use crossterm::event::{KeyEventKind, KeyModifiers};
-use irch_core::{Ch, Event, Id, Message, Node, Op, Role};
+use irch_core::{Ch, Event, Id, Message, Node, Op, Role, notes};
 use n0_future::StreamExt;
 use ratatui::layout::{Constraint::*, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
@@ -21,6 +21,8 @@ const HELP: &str = "\
 /rename NAME     rename space       /nick NAME   your name everywhere
 /reply TEXT      reply to the last message by someone else
 /thread TEXT     reply in its thread (indented under the channel)
+/note [FILE]     it into your notes ($LOROH_VAULT or ~/notes; Inbox.md)
+/todo [FILE]     it as a task there (in a thread: the whole thread)
 /react EMOJI     react to it        /edit TEXT   edit your last message
 /delete          delete your last   /dm USER     a direct message
 /admin USER  /member USER  /ban USER  /unban USER  (admins)
@@ -231,6 +233,23 @@ impl App {
                 self.post(Op::Post { channel, text, reply: None, files })
                     .await?;
                 (self.at, self.scroll) = (Some((s, Some(channel))), 0);
+            }
+            "note" | "todo" => {
+                let (s, c) = self.here()?;
+                let id = self.last(false)?;
+                let thread = n.view(&s, |st| st.thread(&c).is_some());
+                let (thread, todo) = (thread == Some(true), cmd == "todo");
+                let md = |st: &irch_core::State| {
+                    notes::markdown(st, &s, &id, thread, todo, None)
+                };
+                let md = n.view(&s, md).flatten().context("nothing here")?;
+                let mut file =
+                    if arg.is_empty() { "Inbox".into() } else { arg };
+                if !file.ends_with(".md") {
+                    file += ".md";
+                }
+                n.note(&file, &md)?;
+                self.status = format!("added to {file}");
             }
             "rmchannel" => {
                 let id = self.here()?.1;
