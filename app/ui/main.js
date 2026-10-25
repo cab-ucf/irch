@@ -84,6 +84,7 @@ const ICONS = {
   camOff: "M3 7h12v10H3zM15 10.5 21 7v10l-6-3.5M3 3l18 18",
   screen: "M3 4h18v12H3zM8 20h8M12 16v4",
   speaker: "M4 9h4l5-4v14l-5-4H4zM16 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12",
+  thread: "M5 4v9a4 4 0 0 0 4 4h10M15 13l4 4-4 4",
 };
 
 function icon(name) {
@@ -169,10 +170,14 @@ const S = {
   limit: 50, more: true, loading: false, reply: null, editing: null,
   newFrom: null, unreadAtOpen: 0, stick: false, lastTyping: 0, files: [],
   typing: new Map(), // "space|channel" -> Map(user -> expiry)
+  thread: null, // the thread open, or last open: { id, root, parent, msg… }
 };
 
 const cur = () => S.spaces.find((s) => s.id === S.sid);
-const chan = () => cur()?.channels.find((c) => c.id === S.ch);
+const inThread = () => !!S.ch && S.thread?.id === S.ch;
+// Where we read and write: a channel, or a thread (a channel of its own).
+const chan = () => inThread() ? S.thread
+  : cur()?.channels.find((c) => c.id === S.ch);
 const dms = () => S.spaces.filter((s) => s.dm);
 const memberOf = (id) => S.members.find((m) => m.id === id);
 const nameOf = (id) => memberOf(id)?.name ?? short(id);
@@ -208,6 +213,8 @@ async function loadSidebar() {
       S.spaces.find((x) => !x.dm) ?? S.spaces[0];
     return select(s?.id ?? null);
   }
+  if (!cur().channels.some((c) => c.id === S.thread?.parent)) S.thread = null;
+  adopt();
   if (!chan() && cur().channels.length) return select(S.sid);
   renderRail();
   renderSidebar();
@@ -295,7 +302,8 @@ function select(sid, ch) {
   S.sid = sid;
   const s = cur();
   if (sid && !s?.dm) store.set("sid", sid);
-  const valid = (k) => k && s?.channels.some((x) => x.id === k);
+  const valid = (k) =>
+    k && (s?.channels.some((x) => x.id === k) || k === S.thread?.id);
   if (!valid(ch)) ch = store.get("ch." + sid);
   if (!valid(ch)) ch = s?.channels[0]?.id ?? null;
   if (ch !== S.ch || !S.msgs.length) {
@@ -303,11 +311,12 @@ function select(sid, ch) {
     put($("list"));
     Object.assign(S, { msgs: [], limit: 50, more: true, newFrom: undefined,
       editing: null, stick: true });
-    S.unreadAtOpen = s?.channels.find((x) => x.id === ch)?.unread ?? 0;
+    S.unreadAtOpen = s?.channels.find((x) => x.id === ch)?.unread ??
+      (ch === S.thread?.id ? S.thread.unread : 0);
     cancelReply();
   }
   S.ch = ch;
-  if (ch) store.set("ch." + sid, ch);
+  if (ch) store.set("ch." + sid, inThread() ? S.thread.parent : ch);
   document.body.classList.remove("drawer");
   renderRail();
   renderSidebar();
@@ -326,7 +335,8 @@ function stepChannel(d) {
 // ---------- rendering: rail, sidebar, header ----------
 
 const unread = (s) => s.channels.some((x) => x.unread);
-const mentions = (s) => s.channels.reduce((n, x) => n + x.mentions, 0);
+const mentions = (s) => s.channels.reduce((n, x) =>
+  n + x.mentions + x.threads.reduce((m, t) => m + t.mentions, 0), 0);
 const badge = (n) =>
   n ? h("span", { class: "badge" }, String(Math.min(n, 99))) : null;
 
@@ -417,8 +427,34 @@ function channelList(s) {
         class: "gear", title: "Edit Channel",
         onclick: (e) => { e.stopPropagation(); editChannel(ch); },
       }, icon("gear")), ch.call.length > 0 && icon("speaker"));
-    }).flatMap((row, i) => [row, callers(s.channels[i].call)]),
+    }).flatMap((row, i) => [row, callers(s.channels[i].call),
+      ...s.channels[i].threads.map(threadRow)]),
   ];
+}
+
+const threadRow = (t) => h("div", {
+  class: `channel thread${t.id === S.ch ? " active" : ""}` +
+    (t.unread && t.id !== S.ch ? " unread" : ""),
+  onclick: () => openThread(t.root),
+}, icon("thread"), h("span", { class: "name" }, t.name),
+t.id !== S.ch && badge(t.mentions));
+
+/** A message's thread: a channel of its own, there once anyone writes. */
+async function openThread(root) {
+  const r = await rpc("thread", { space: S.sid, channel: root.slice(0, 16) });
+  if (!r) return toast("Threads hang off messages in channels", true);
+  const [t, msg] = r;
+  S.thread = { unread: 0, mentions: 0, ...t, msg };
+  adopt();
+  select(S.sid, t.id);
+}
+
+/** The open thread and its row in the sidebar: one object, read as one. */
+function adopt() {
+  for (const c of cur()?.channels ?? []) {
+    c.threads = c.threads.map((t) =>
+      t.id === S.thread?.id ? Object.assign(S.thread, t) : t);
+  }
 }
 
 /** Who is in a channel's call, under it. */
@@ -446,7 +482,13 @@ function renderUserPanel() {
 function renderHeader() {
   const s = cur();
   const ch = chan();
-  const label = s?.dm ? [h("b", { class: "at" }, "@"), h("span", {}, s.name)]
+  const parent = inThread() &&
+    s.channels.find((c) => c.id === S.thread.parent);
+  const up = () => select(S.sid, S.thread.parent);
+  const label = parent ? [icon("hash"),
+    h("span", { class: "crumb", onclick: up }, parent.name),
+    icon("thread"), h("span", {}, ch.name)]
+    : s?.dm ? [h("b", { class: "at" }, "@"), h("span", {}, s.name)]
     : ch ? [icon("hash"), h("span", {}, ch.name)]
     : [h("span", {}, s ? "Syncing…" : "irch")];
   put($("chat-header").querySelector(".title"), label);
@@ -455,7 +497,8 @@ function renderHeader() {
   put(net, s && [h("i", { class: "dot" }),
     `${s.peers} peer${s.peers === 1 ? "" : "s"}`]);
   const input = $("input");
-  input.placeholder = s?.dm ? `Message @${s.name}`
+  input.placeholder = parent ? `Reply in ${ch.name}`
+    : s?.dm ? `Message @${s.name}`
     : ch ? `Message #${ch.name}` : "";
   input.disabled = !ch || s.locked;
   $("locked").classList.toggle("hidden", !s?.locked);
@@ -466,7 +509,11 @@ function renderHeader() {
   $("empty").classList.toggle("hidden", !!s);
   renderCall();
   put($("welcome"),
-    s?.dm ? [avatar(s.with ?? s.id, s.name, "big"), h("h1", {}, s.name),
+    parent ? [h("div", { class: "big" }, icon("thread")),
+      h("h1", {}, ch.name),
+      h("p", {}, `A thread in #${parent.name}, on this message:`),
+      ch.msg && h("div", { class: "starter" }, msgRow(ch.msg, {}))]
+    : s?.dm ? [avatar(s.with ?? s.id, s.name, "big"), h("h1", {}, s.name),
       h("p", {}, `The beginning of your messages with ${s.name}.`)]
     : ch ? [h("div", { class: "big" }, icon("hash")),
       h("h1", {}, `Welcome to #${ch.name}!`),
@@ -544,7 +591,7 @@ function renderCall() {
   const ch = on && callOf(on.space, on.channel);
   if (ch) av.keep(ch.call);
   const btn = $("call-btn");
-  btn.classList.toggle("hidden", !chan());
+  btn.classList.toggle("hidden", !chan() || inThread());
   btn.classList.toggle("live", here());
   btn.title = here() ? "Leave call" : "Join call";
   put(btn, icon(here() ? "hangup" : "ring"));
@@ -603,7 +650,7 @@ function renderMessages(keepScroll) {
     const editing = S.editing === m.id;
     const authorAdmin = memberOf(m.author)?.role === "Admin";
     const sig = JSON.stringify([m.text, m.edited, m.name, m.reactions, m.quote,
-      cont, mentioned, editing, admin, authorAdmin]);
+      m.thread, cont, mentioned, editing, admin, authorAdmin]);
     items.push({ k: m.id, sig,
       make: () => msgRow(m, { cont, mentioned, editing, authorAdmin }) });
     prev = m;
@@ -667,6 +714,11 @@ function msgRow(m, { cont, mentioned, editing, authorAdmin }) {
   else if (m.text || m.edited) row.append(content(m.text, m.edited));
   if (m.files.length) row.append(attachments(m.files));
   if (m.reactions.length) row.append(reactionsBar(m));
+  if (m.thread && !inThread()) {
+    row.append(h("div", { class: "thread-link", onclick: () =>
+      openThread(m.id) }, icon("thread"),
+    `${m.thread} ${m.thread === 1 ? "reply" : "replies"}`));
+  }
   row.append(toolbar(m));
   return row;
 }
@@ -824,6 +876,7 @@ function toolbar(m) {
     tool("smile", "Add Reaction",
       (e) => picker(e.currentTarget, (em) => react(m, em, true))),
     tool("reply", "Reply", () => startReply(m)),
+    !inThread() && tool("thread", "Reply in thread", () => openThread(m.id)),
     mine && tool("pencil", "Edit", () => startEdit(m)),
     (mine || cur()?.admin) &&
       tool("trash", "Delete (hold Shift to skip confirmation)",
@@ -1441,6 +1494,29 @@ function wire() {
     $("members-btn").classList.toggle("on", on);
   };
   showMembers(store.get("members") ? store.get("members") === "1" : !mobile());
+  // Phones: swipe right for channels (or away from members), left away
+  // from channels (or to members), as in Discord. Not in text or code.
+  let touch = null;
+  addEventListener("touchstart", (e) => {
+    const t = e.touches[0];
+    const skip = e.touches.length > 1 || $("modal").open ||
+      e.target.closest?.("textarea, input, pre");
+    touch = skip ? null : [t.clientX, t.clientY];
+  }, { passive: true });
+  addEventListener("touchend", (e) => {
+    const t = e.changedTouches[0];
+    const [dx, dy] = touch ? [t.clientX - touch[0], t.clientY - touch[1]] : [];
+    touch = null;
+    if (!mobile() || !(Math.abs(dx) > 60 && Math.abs(dx) > 2 * Math.abs(dy))) {
+      return;
+    }
+    const body = document.body.classList;
+    const members = !$("members").classList.contains("hidden-panel");
+    if (dx > 0 && members) showMembers(false);
+    else if (dx > 0) body.add("drawer");
+    else if (body.contains("drawer")) body.remove("drawer");
+    else if (cur() && !cur().dm) showMembers(true);
+  });
   $("members-btn").onclick = () => {
     const on = $("members").classList.contains("hidden-panel");
     showMembers(on);
@@ -1475,6 +1551,7 @@ function wire() {
     else if (closePop) closePop();
     else if (S.editing) stopEdit();
     else if (S.reply) cancelReply();
+    else if (inThread()) select(S.sid, S.thread.parent);
     else if (mobile() && !$("members").classList.contains("hidden-panel")) {
       showMembers(false);
     }
@@ -1524,6 +1601,7 @@ function wire() {
     } else if (e.key === "Escape" && !$("modal").open) {
       if (closePop) closePop();
       else if (S.reply) cancelReply();
+      else if (inThread()) select(S.sid, S.thread.parent);
       else {
         sc.scrollTop = sc.scrollHeight;
         markRead();

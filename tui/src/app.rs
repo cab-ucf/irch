@@ -1,6 +1,6 @@
 //! The terminal client: the core's state on screen, IRC-style commands.
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail, ensure};
 use crossterm::event::{Event as Term, EventStream, KeyCode, KeyEvent};
 use crossterm::event::{KeyEventKind, KeyModifiers};
 use irch_core::{Ch, Event, Id, Message, Node, Op, Role};
@@ -20,6 +20,7 @@ const HELP: &str = "\
 /channel NAME    new channel        /rmchannel   delete this channel
 /rename NAME     rename space       /nick NAME   your name everywhere
 /reply TEXT      reply to the last message by someone else
+/thread TEXT     reply in its thread (indented under the channel)
 /react EMOJI     react to it        /edit TEXT   edit your last message
 /delete          delete your last   /dm USER     a direct message
 /admin USER  /member USER  /ban USER  /unban USER  (admins)
@@ -220,6 +221,17 @@ impl App {
                 self.post(Op::Channel { id, name: Some(arg) }).await?;
                 self.at = self.at.map(|(s, _)| (s, Some(id)));
             }
+            "thread" => {
+                need()?;
+                let (s, c) = self.here()?;
+                let room = |c| n.view(&s, |st| st.thread(&c)).flatten();
+                ensure!(room(c).is_none(), "threads hang off channels");
+                let channel = self.last(false)?.thread();
+                let (text, files) = (arg, vec![]);
+                self.post(Op::Post { channel, text, reply: None, files })
+                    .await?;
+                (self.at, self.scroll) = (Some((s, Some(channel))), 0);
+            }
             "rmchannel" => {
                 let id = self.here()?.1;
                 self.post(Op::Channel { id, name: None }).await?;
@@ -297,15 +309,22 @@ impl App {
         Ok(false)
     }
 
-    /// Sidebar rows: each space's channels, or the space while it syncs.
+    /// Sidebar rows: each space's channels, each followed by its threads
+    /// active this week; or the space while it syncs.
     fn rows(&self) -> Vec<(Id, Option<Ch>)> {
         let mut v = vec![];
+        let week = irch_core::now().saturating_sub(7 * 86_400_000);
         for s in self.n.spaces() {
-            let chans = self.n.view(&s, |st| st.channels()).unwrap_or_default();
+            let rooms = self.n.view(&s, |st| (st.channels(), st.threads()));
+            let (chans, threads) = rooms.unwrap_or_default();
             if chans.is_empty() {
                 v.push((s, None));
             }
-            v.extend(chans.into_iter().map(|(c, _)| (s, Some(c))));
+            for (c, _) in chans {
+                v.push((s, Some(c)));
+                let t = threads.iter().filter(|t| t.parent == c);
+                v.extend(t.filter(|t| t.last > week).map(|t| (s, Some(t.id))));
+            }
         }
         v
     }
@@ -364,12 +383,14 @@ impl App {
     }
 
     fn channel_name(&self, s: &Id, c: &Ch) -> String {
-        let chans = self.n.view(s, |st| st.channels()).unwrap_or_default();
+        let chans = self.n.view(s, |st| st.rooms()).unwrap_or_default();
         let name = chans.into_iter().find(|x| x.0 == *c).map(|x| x.1);
         let dm = self.n.view(s, |st| st.dm.is_some()) == Some(true);
-        match (dm, name) {
-            (true, _) => format!("@{}", self.space_name(s)),
-            (_, n) => format!("#{}", n.unwrap_or_default()),
+        let thread = self.n.view(s, |st| st.thread(c).is_some());
+        match (thread == Some(true), dm, name) {
+            (true, _, n) => format!("  ↳ {}", n.unwrap_or_default()),
+            (_, true, _) => format!("@{}", self.space_name(s)),
+            (_, _, n) => format!("#{}", n.unwrap_or_default()),
         }
     }
 
@@ -479,6 +500,10 @@ impl App {
                 .map(|(e, u)| format!("{e} {}", u.len()))
                 .collect();
             out.push(Line::from(format!("      {}", r.join("  "))).dark_gray());
+        }
+        if m.thread > 0 {
+            let l = format!("      ↳ {} in its thread", m.thread);
+            out.push(Line::from(l).cyan());
         }
         out
     }

@@ -34,6 +34,19 @@ pub struct Message {
     pub quote: Option<Quote>,
     pub reactions: Vec<(String, Vec<Id>)>,
     pub files: Vec<File>,
+    /// Replies in its thread.
+    pub thread: usize,
+}
+
+/// Replies to one message, in a channel of their own.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Thread {
+    pub id: Ch,
+    pub root: Id,
+    pub parent: Ch,
+    pub name: String,
+    pub count: usize,
+    pub last: u64,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -71,6 +84,8 @@ pub struct State {
     control: BTreeMap<Pos, (Id, Op)>,
     posts: HashMap<Ch, BTreeMap<Pos, Post>>,
     index: HashMap<Id, (Ch, Pos)>,
+    // Every post's would-be thread, back to the post.
+    roots: HashMap<Ch, Id>,
     edits: HashMap<Id, BTreeMap<Pos, (Id, Option<String>)>>,
     reacts: HashMap<Id, Reacts>,
     authors: HashMap<Id, u64>,
@@ -117,6 +132,7 @@ impl State {
         match s.op {
             Op::Post { channel, text, reply, files } => {
                 self.index.insert(s.id, (channel, at));
+                self.roots.insert(s.id.thread(), s.id);
                 let p = Post { author: s.author, text, reply, files };
                 let ch = self.posts.entry(channel).or_default();
                 (ch.insert(at, p).is_none(), false)
@@ -248,6 +264,37 @@ impl State {
         v
     }
 
+    /// The thread `ch` is: on a message in a channel, never in a thread.
+    pub fn thread(&self, ch: &Ch) -> Option<Thread> {
+        let root = *self.roots.get(ch)?;
+        let parent = self.index.get(&root)?.0;
+        self.channels.contains_key(&parent).then_some(())?;
+        let posts = self.posts.get(ch).into_iter().flatten();
+        let seen = posts.filter(|(k, p)| self.resolve(&k.1, p).is_some());
+        let (count, last) = seen.fold((0, 0), |(n, _), (k, _)| (n + 1, k.0));
+        let text = self.post(&root).and_then(|p| self.resolve(&root, p));
+        let line = text
+            .as_ref()
+            .and_then(|t| t.0.lines().find(|l| !l.trim().is_empty()));
+        let name =
+            line.map_or("Thread".into(), |l| l.chars().take(48).collect());
+        Some(Thread { id: *ch, root, parent, name, count, last })
+    }
+
+    /// Threads with replies, most recently active first.
+    pub fn threads(&self) -> Vec<Thread> {
+        let t = self.posts.keys().filter_map(|c| self.thread(c));
+        let mut v: Vec<_> = t.filter(|t| t.count > 0).collect();
+        v.sort_by_key(|t| std::cmp::Reverse(t.last));
+        v
+    }
+
+    /// Channels, then threads: everywhere a message can be.
+    pub fn rooms(&self) -> Vec<(Ch, String)> {
+        let t = self.threads().into_iter().map(|t| (t.id, t.name));
+        self.channels().into_iter().chain(t).collect()
+    }
+
     /// Everyone with a profile or a role.
     pub fn members(&self) -> Vec<Member> {
         let ids = self.profiles.keys().chain(self.roles.keys());
@@ -351,6 +398,12 @@ impl State {
         }
     }
 
+    /// One message, wherever it is.
+    pub fn message(&self, id: &Id) -> Option<Message> {
+        let (ch, at) = self.index.get(id)?;
+        self.view(at, self.posts.get(ch)?.get(at)?)
+    }
+
     fn post(&self, id: &Id) -> Option<&Post> {
         let (ch, at) = self.index.get(id)?;
         self.posts.get(ch)?.get(at)
@@ -378,6 +431,8 @@ impl State {
         let (author, name) = (p.author, self.display_name(&p.author));
         let reactions = reactions.into_iter().collect();
         let (reply, files) = (p.reply, p.files.clone());
+        let t = self.posts.get(&id.thread()).and(self.thread(&id.thread()));
+        let thread = t.map_or(0, |t| t.count);
         Some(Message {
             id,
             author,
@@ -389,6 +444,7 @@ impl State {
             quote,
             reactions,
             files,
+            thread,
         })
     }
 
@@ -548,6 +604,41 @@ mod tests {
         st.extend([op(32, o, del(24))]);
         let m = st.messages(&CH, None, 2);
         assert_eq!((&*m[0].text, m[1].quote.is_none()), ("25", true));
+    }
+
+    #[test]
+    fn threads_hang_off_messages_in_channels() {
+        let [o, a, _] = people();
+        let mut st = State::new(&Invite::new(o, "", None));
+        let root = Id([2; 32]);
+        let reply = |channel, text: &str| Op::Post {
+            channel,
+            text: text.into(),
+            reply: None,
+            files: vec![],
+        };
+        // Replies may arrive before their message, or the channel.
+        st.extend([
+            op(3, a, reply(root.thread(), "first")),
+            op(4, o, reply(root.thread(), "@alice second")),
+            op(5, a, reply(Id([3; 32]).thread(), "a thread in a thread")),
+            op(7, a, Op::Profile { name: "alice".into(), kem: vec![] }),
+        ]);
+        assert!(st.threads().is_empty());
+        st.extend([
+            op(1, o, Op::Channel { id: CH, name: Some("general".into()) }),
+            op(2, o, post("\nplans for\nthe weekend", None)),
+        ]);
+        let t = st.thread(&root.thread()).unwrap();
+        assert_eq!((t.root, t.parent, &*t.name), (root, CH, "plans for"));
+        assert_eq!((t.count, t.last), (2, 4));
+        assert_eq!(st.threads(), vec![t.clone()]);
+        assert_eq!(st.messages(&CH, None, 9)[0].thread, 2);
+        assert_eq!(st.messages(&t.id, None, 9).len(), 2);
+        assert_eq!(st.unread(&t.id, 0, &a), (1, 1));
+        assert_eq!(st.rooms().last(), Some(&(t.id, t.name)));
+        st.extend([op(6, o, Op::Channel { id: CH, name: None })]);
+        assert!(st.threads().is_empty() && st.thread(&root.thread()).is_none());
     }
 
     #[test]

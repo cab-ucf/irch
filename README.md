@@ -1,8 +1,8 @@
 # irch
 
-Private, peer-to-peer community chat: spaces with channels, roles,
-replies, reactions, mentions, direct messages and voice and video calls,
-shaped like Discord, with no server. A small Rust core over
+Private, peer-to-peer community chat: spaces with channels, threads,
+roles, replies, reactions, mentions, direct messages and voice and video
+calls, shaped like Discord, with no server. A small Rust core over
 [iroh](https://iroh.computer), one terminal client, one app for the
 desktop and Android.
 
@@ -63,6 +63,10 @@ disk   : one append-only log of envs per space; nothing else to migrate
   wait there while everyone else is offline, and a new device can link
   while your others are off. It cannot read any of it, so it takes
   envelopes only from your devices and the member devices they vouch for.
+- **Threads need no op of their own.** A message's thread is the channel
+  named by the first 8 bytes of its id: replying in it is posting there,
+  so two people who start the same thread at once start one, and unread
+  counts, mentions, edits and sync come for free.
 - **DMs** are two-person spaces, announced by a `Knock` that only the
   recipient's key opens.
 - **Files** (up to 25 MiB) are sealed under a fresh key that travels only
@@ -97,21 +101,23 @@ Invites carry your relay address, not your IP, whenever a relay is known.
 ## Using it
 
 Terminal: `/create NAME`, `/join CODE`, `/invite`, `/channel NAME`,
-`/reply TEXT`, `/react EMOJI`, `/edit TEXT`, `/delete`, `/dm USER`,
-`/ban USER`, `/rekey`, `/file PATH`, `/save`, `/link`, `/store CODE`,
-`/invisible`, `/help`.
+`/reply TEXT`, `/thread TEXT`, `/react EMOJI`, `/edit TEXT`, `/delete`,
+`/dm USER`, `/ban USER`, `/rekey`, `/file PATH`, `/save`, `/link`,
+`/store CODE`, `/invisible`, `/help`.
 Ctrl-N/P switches channel; PgUp/PgDn scrolls.
 
 Desktop and phone: `+` creates or joins a space; the paperclip, a drop or
 a paste attaches files; hover a message to react, reply, edit or delete;
-click a member to message, ban or promote them. The phone in a channel's
+click a member to message, ban or promote them. The arrow on a message
+replies in its thread, listed under its channel. The phone in a channel's
 header joins its call; mute, camera, screen and hang up sit under the
 tiles (the terminal shows how many are in one: 🔊2). Mentions and direct
 messages notify while irch is out of sight.
 Ctrl+K switches, Alt+↑/↓ moves between channels, ↑ edits your last
-message. On Android, Back closes the topmost thing, then sends irch to the
-background; My Account › Stay connected keeps it receiving (there is no
-push server to wake a peer-to-peer app).
+message. On phones, swipe right for channels and left for members; Back
+closes the topmost thing (a thread returns to its channel), then sends
+irch to the background; My Account › Stay connected keeps it receiving
+(there is no push server to wake a peer-to-peer app).
 
 ## Limits
 

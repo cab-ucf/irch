@@ -13,7 +13,7 @@ mod sync;
 
 pub use node::{Config, Event, Net, Node};
 pub use op::{File, Invite, Op, Role};
-pub use state::{Member, Message, State};
+pub use state::{Member, Message, State, Thread};
 
 use data_encoding::HEXLOWER_PERMISSIVE as HEX;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -65,6 +65,14 @@ macro_rules! bytes {
     )*};
 }
 bytes!(Id 32, Ch 8);
+
+impl Id {
+    /// The thread on this message: a channel named by the id's first bytes,
+    /// so everyone who starts it at once starts the same one.
+    pub fn thread(&self) -> Ch {
+        Ch(self.0[..8].try_into().expect("8 of 32"))
+    }
+}
 
 /// Unix time in milliseconds.
 pub fn now() -> u64 {

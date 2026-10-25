@@ -649,10 +649,10 @@ impl Node {
         self.view(id, |s| s.unread(ch, since, &me)).unwrap_or_default()
     }
 
-    /// Per channel, the newest unread mention of us after `after`.
+    /// Per channel or thread, the newest unread mention of us after `after`.
     pub fn mentions(&self, id: &Id, after: u64) -> Vec<(Ch, Message)> {
         let me = self.id();
-        let chans = self.view(id, |s| s.channels()).unwrap_or_default();
+        let chans = self.view(id, |s| s.rooms()).unwrap_or_default();
         let hit = |ch: Ch| {
             let since = self.since(id, &ch).max(after);
             Some((ch, self.view(id, |s| s.last_mention(&ch, since, &me))??))

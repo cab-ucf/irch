@@ -269,7 +269,7 @@ async fn mentions(
     let after = *seen.entry(space).or_insert_with(irch_core::now);
     let hits = n.mentions(&space, after);
     let Some((name, dm, chans, newest)) = n.view(&space, |s| {
-        let chans = s.channels();
+        let chans = s.rooms();
         let newest = chans.iter().filter_map(|c| s.latest(&c.0)).max();
         (s.name().to_string(), s.dm.is_some(), chans, newest.unwrap_or(0))
     }) else {

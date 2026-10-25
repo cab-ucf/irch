@@ -264,6 +264,8 @@ svg.icon {
 .channel:hover .gear { display: grid; }
 .channel .gear:hover { color: var(--text-strong); }
 .channel .gear svg.icon { width: 16px; height: 16px; }
+.channel.thread { height: 30px; margin-left: 14px; font-size: 14px; }
+.channel.thread svg.icon { width: 16px; height: 16px; color: var(--muted); }
 
 /* User panel */
 #user-panel {
@@ -367,6 +369,8 @@ svg.icon {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+#chat-header .title .crumb { color: var(--dim); cursor: pointer; flex: none; }
+#chat-header .title .crumb:hover { color: var(--pink); }
 #net {
   display: flex;
   align-items: center;
@@ -577,6 +581,28 @@ svg.icon {
 .reply-ref:hover span { color: var(--text); }
 
 .reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.thread-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 2px 10px 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--cyan);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.thread-link:hover { border-color: var(--cyan); box-shadow: var(--glow); }
+.thread-link svg.icon { width: 16px; height: 16px; }
+#welcome .starter {
+  margin-top: 12px;
+  border-left: 2px solid var(--pink);
+  background: var(--bg-float);
+  border-radius: 0 4px 4px 0;
+}
+#welcome .starter .toolbar { display: none; }
 .reaction {
   display: flex;
   align-items: center;

@@ -18,6 +18,7 @@ pub enum Call {
     Spaces,
     Members { space: Id },
     Messages { space: Id, channel: Ch, before: Option<Pos>, limit: usize },
+    Thread { space: Id, channel: Ch },
     MarkRead { space: Id, channel: Ch },
     Typing { space: Id, channel: Ch },
     Create { name: String },
@@ -66,6 +67,14 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
                 |s: &crate::State| s.messages(&channel, before, limit.min(500));
             json!(n.view(&space, page).unwrap_or_default())
         }
+        // The thread, and the message it hangs off.
+        Call::Thread { space, channel } => json!(
+            n.view(&space, |s| s.thread(&channel).map(|t| {
+                let m = s.message(&t.root);
+                (t, m)
+            }))
+            .flatten()
+        ),
         Call::MarkRead { space, channel } => {
             json!(n.mark_read(&space, &channel))
         }
@@ -117,16 +126,30 @@ fn space(n: &Node, id: &Id) -> Option<Value> {
             s.role(&me) == Role::Admin,
             s.channels(),
             with,
+            s.threads(),
         )
     })?;
-    let (name, dm, owner, admin, chans, with) = v;
+    let (name, dm, owner, admin, chans, with, threads) = v;
     let mut calls = n.calls(id);
+    // Threads active this week, or that mention us.
+    let thread = |t: &crate::Thread| {
+        let (unread, mentions) = n.unread(id, &t.id);
+        let fresh = t.last + 7 * 86_400_000 > crate::now();
+        (fresh || mentions > 0).then(|| {
+            json!({
+                "id": t.id, "name": t.name, "root": t.root, "count": t.count,
+                "unread": unread, "mentions": mentions,
+            })
+        })
+    };
     let chan = |(c, name): (Ch, String)| {
         let (unread, mentions) = n.unread(id, &c);
         let call = calls.remove(&c).unwrap_or_default();
+        let t = threads.iter().filter(|t| t.parent == c);
+        let threads: Vec<_> = t.filter_map(thread).collect();
         json!({
             "id": c, "name": name, "unread": unread, "mentions": mentions,
-            "call": call,
+            "call": call, "threads": threads,
         })
     };
     let channels: Vec<_> = chans.into_iter().map(chan).collect();
