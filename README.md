@@ -91,12 +91,21 @@ yet waits in memory, a bounded amount of it.
 
 | | terminal (app: env) | who else is involved |
 |---|---|---|
-| default | | n0's relays (ciphertext), n0 DNS, the Mainline DHT |
+| default | | relays `iroh.cxn.center`, n0's `use1-1`; n0 DNS; Mainline DHT |
 | your relays | `--relay URL` (`IRCH_RELAY`) | your relays; the Mainline DHT |
 | LAN only | `--lan` (`IRCH_LAN=1`) | nobody (mDNS) |
 
 Run your own relay with `cargo install iroh-relay --features server`.
 Invites carry your relay address, not your IP, whenever a relay is known.
+
+## A server
+
+An always-on member's desktop keeps the spaces it is in synced, but it can
+read them and covers only those. A storage node (`irch --serve`) keeps
+every space of everyone who adds its code, ciphertext only. On NixOS,
+`nixos.nix` runs one as its own user, rebuilt from the latest commit
+hourly (as tydig's): import it, `systemctl start irch-update` once, and
+`journalctl -u irch | grep -A1 'Storage code'` prints the code to hand out.
 
 ## Using it
 
@@ -140,14 +149,19 @@ private to it, the Markdown goes to the clipboard.
   relays see endpoint ids and traffic; storage nodes see sizes, times and
   members' devices. Anyone who knows a space's id (every invite has it)
   can fetch its ciphertext from members.
-- Authors date their own ops, at most a day ahead. Whoever ever held an
-  epoch's key can still add ops dated inside it: a banned member's stay
-  hidden, but a demoted admin's backdated bans and renames stand.
+- Authors date their own ops, at most a day ahead. An op sealed under a
+  replaced key counts only if dated before the replacement, or if its
+  author was given the new key (a member who wrote offline): an old
+  invite or a banned member under a new name gets nowhere. Inside its
+  epoch, though, a key still writes: a demoted admin's backdated bans and
+  renames stand.
 - Calls: every caller sends to every other, so a handful of people, not
   a stage. QUIC encrypts them between the two devices (classical); the
-  space's key does not. Invisible hides you everywhere but in a call you
-  join. A Mac needs Safari 26's WebKit (WebCodecs audio); Android
-  cannot share its screen.
+  space's key does not. Invisible hides your name from presence, typing
+  and the member list, not that your device is connected: members who
+  watch the network can still tell, and a call you join shows you. A
+  Mac needs Safari 26's WebKit (WebCodecs audio); Android cannot share
+  its screen.
 - A storage code is a password: whoever has it can make the node store
   anything. Members are trusted not to flood. Unaudited.
 

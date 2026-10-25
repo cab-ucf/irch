@@ -84,6 +84,8 @@ pub struct State {
     control: BTreeMap<Pos, (Id, Op)>,
     posts: HashMap<Ch, BTreeMap<Pos, Post>>,
     index: HashMap<Id, (Ch, Pos)>,
+    // The epoch each op was sealed under.
+    sealed: HashMap<Id, [u8; 8]>,
     // Every post's would-be thread, back to the post.
     roots: HashMap<Ch, Id>,
     edits: HashMap<Id, BTreeMap<Pos, (Id, Option<String>)>>,
@@ -125,6 +127,7 @@ impl State {
 
     fn insert(&mut self, s: Signed) -> (bool, bool) {
         let at = (s.ts, s.id);
+        self.sealed.insert(s.id, s.epoch);
         let t = self.authors.entry(s.author).or_default();
         *t = (*t).max(s.ts);
         let t = self.devices.entry(s.device).or_default();
@@ -178,7 +181,7 @@ impl State {
             let role = self.role(a);
             let (admin, own) = (role == Role::Admin, *a == self.owner);
             match op {
-                _ if role == Role::Banned => {}
+                _ if role == Role::Banned || self.stale_at(at, a) => {}
                 Op::Profile { name, kem } => {
                     self.profiles.insert(*a, (name.clone(), kem.clone()));
                 }
@@ -208,7 +211,8 @@ impl State {
                         by: *a,
                     });
                 }
-                Op::Host { node, on } => {
+                // Any member lists a storage node; only admins unlist.
+                Op::Host { node, on } if *on || admin => {
                     drop(self.hosts.insert(node.id, on.then(|| node.clone())))
                 }
                 Op::Joined { invite } if own => {
@@ -225,6 +229,23 @@ impl State {
             }
         }
         self.control = control;
+    }
+
+    /// Sealed under `epoch` at `at` by `a`, after a newer epoch was set
+    /// without `a`: an old invite's key, a banned member's under a new
+    /// name. Hidden everywhere (a member who wrote offline under the key
+    /// before was given the new one, and stays).
+    pub fn stale(&self, epoch: &[u8; 8], at: &Pos, a: &Id) -> bool {
+        let es = &self.epochs;
+        let Some(from) = es.iter().find(|e| e.tag == *epoch) else {
+            return false;
+        };
+        let since = |e: &&Epoch| e.at > from.at && e.at < *at;
+        es.iter().filter(since).any(|e| !e.to.contains(a))
+    }
+
+    fn stale_at(&self, at: &Pos, a: &Id) -> bool {
+        self.sealed.get(&at.1).is_some_and(|t| self.stale(t, at, a))
     }
 
     /// Who a direct-message space is with, seen by `me`.
@@ -386,12 +407,13 @@ impl State {
         if self.role(&p.author) == Role::Banned {
             return None;
         }
-        let edits =
-            self.edits.get(id).into_iter().flat_map(|e| e.values().rev());
-        let ok = |(by, t): &&(Id, Option<String>)| {
-            *by == p.author || t.is_none() && self.role(by) == Role::Admin
+        let edits = self.edits.get(id).into_iter().flat_map(|e| e.iter().rev());
+        let ok = |(at, (by, t)): &(&Pos, &(Id, Option<String>))| {
+            !self.stale_at(at, by)
+                && (*by == p.author
+                    || t.is_none() && self.role(by) == Role::Admin)
         };
-        match edits.clone().find(ok) {
+        match edits.clone().find(ok).map(|e| e.1) {
             Some((_, None)) => None,
             Some((_, Some(t))) => Some((t.clone(), true)),
             None => Some((p.text.clone(), false)),
@@ -410,6 +432,9 @@ impl State {
     }
 
     fn view(&self, &(ts, id): &Pos, p: &Post) -> Option<Message> {
+        if self.stale_at(&(ts, id), &p.author) {
+            return None;
+        }
         let (text, edited) = self.resolve(&id, p)?;
         let quote = p.reply.and_then(|r| {
             let q = self.post(&r)?;
@@ -421,9 +446,9 @@ impl State {
             })
         });
         let mut reactions: BTreeMap<String, Vec<Id>> = BTreeMap::new();
-        for ((u, emoji), (_, on)) in self.reacts.get(&id).into_iter().flatten()
+        for ((u, emoji), (at, on)) in self.reacts.get(&id).into_iter().flatten()
         {
-            if *on && self.role(u) != Role::Banned {
+            if *on && self.role(u) != Role::Banned && !self.stale_at(at, u) {
                 reactions.entry(emoji.clone()).or_default().push(*u);
             }
         }
@@ -485,8 +510,10 @@ impl State {
             .flat_map(move |p| {
                 p.range((since.saturating_add(1), Id::default())..).rev()
             })
-            .filter(|(_, p)| {
-                p.author != *me && self.role(&p.author) != Role::Banned
+            .filter(|(at, p)| {
+                p.author != *me
+                    && self.role(&p.author) != Role::Banned
+                    && !self.stale_at(at, &p.author)
             })
     }
 
@@ -514,7 +541,14 @@ mod tests {
 
     fn op(n: u8, author: Id, op: Op) -> Signed {
         let device = SecretKey::from_bytes(&[n; 32]).public();
-        Signed { id: Id([n; 32]), author, device, ts: n as u64, op }
+        Signed {
+            id: Id([n; 32]),
+            author,
+            device,
+            ts: n as u64,
+            op,
+            epoch: [0; 8],
+        }
     }
 
     fn post(text: &str, reply: Option<u8>) -> Op {
@@ -639,6 +673,39 @@ mod tests {
         assert_eq!(st.rooms().last(), Some(&(t.id, t.name)));
         st.extend([op(6, o, Op::Channel { id: CH, name: None })]);
         assert!(st.threads().is_empty() && st.thread(&root.thread()).is_none());
+    }
+
+    #[test]
+    fn a_replaced_key_writes_only_for_who_got_the_new_one() {
+        let [o, a, x] = people();
+        let mut st = State::new(&Invite::new(o, "", None));
+        let sealed = |n, author, epoch, o| Signed { epoch, ..op(n, author, o) };
+        let rekey = |t, to: &[Id]| Op::Rekey {
+            epoch: [t; 8],
+            boxes: to.iter().map(|u| (*u, vec![])).collect(),
+        };
+        let name = |n: &str| Op::Profile { name: n.into(), kem: vec![1] };
+        st.extend([
+            sealed(1, o, [0; 8], rekey(0, &[])),
+            sealed(
+                2,
+                o,
+                [0; 8],
+                Op::Channel { id: CH, name: Some("g".into()) },
+            ),
+            sealed(3, a, [0; 8], name("a")),
+            sealed(5, o, [0; 8], rekey(1, &[o, a])), // invites reset
+            sealed(6, x, [0; 8], name("x")),         // an old invite, after
+            sealed(7, x, [0; 8], post("x was here", None)),
+            sealed(8, a, [0; 8], post("a, offline", None)),
+            sealed(9, o, [1; 8], post("o", None)),
+        ]);
+        assert!(st.kem(&a).is_some() && st.kem(&x).is_none());
+        let m: Vec<_> =
+            st.messages(&CH, None, 9).into_iter().map(|m| m.text).collect();
+        assert_eq!(m, ["a, offline", "o"]);
+        assert!(st.stale(&[0; 8], &(10, Id([10; 32])), &x));
+        assert!(!st.stale(&[1; 8], &(10, Id([10; 32])), &x));
     }
 
     #[test]

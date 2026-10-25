@@ -107,7 +107,14 @@ fn messages_and_threads_become_markdown() {
     let ch = Ch([9; 8]);
     let op = |n: u8, op| {
         let device = iroh::SecretKey::from_bytes(&[n; 32]).public();
-        Signed { id: Id([n; 32]), author: o, device, ts: n.into(), op }
+        Signed {
+            id: Id([n; 32]),
+            author: o,
+            device,
+            ts: n.into(),
+            op,
+            epoch: [0; 8],
+        }
     };
     let post = |channel, text: &str| Op::Post {
         channel,

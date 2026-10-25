@@ -168,6 +168,25 @@ async fn ban_rekeys_and_history_survives() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_old_invite_stays_dead_after_a_reset() {
+    let a = node("a").await;
+    let id = a.create("club").await.unwrap();
+    let ch = general(&a, &id);
+    let old = a.invite(&id).await.unwrap();
+    a.rekey(&id).await.unwrap(); // Reset invite links
+    let e = node("e").await;
+    e.join(&old).await.unwrap(); // its Profile goes out under the old key
+    until("e learns it is out", || e.locked(&id)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let member = |u: Id| a.view(&id, |s| s.kem(&u).is_some()) == Some(true);
+    assert!(!member(e.id()), "a stale key makes no member");
+    a.rekey(&id).await.unwrap(); // was boxed to every member with a kem
+    say(&a, &id, ch, "secret").await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(e.locked(&id) && texts(&e, &id, &ch).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_space_id_alone_gets_nothing_stored() {
     let s = start(&dir("s"), "s", None, true).await;
     let a = node("a").await;

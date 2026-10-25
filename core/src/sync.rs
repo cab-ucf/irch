@@ -78,7 +78,9 @@ pub async fn respond(n: &Arc<Node>, c: &Connection) -> Result<()> {
 
 async fn session(n: &Arc<Node>, c: &Connection) -> Result<()> {
     let (mut tx, mut rx) = c.accept_bi().await?;
-    let hello: Hello = read(&mut rx).await?;
+    // From anyone, before we know the space: small (2,000 devices).
+    let hello: Hello =
+        postcard::from_bytes(&unframe(&mut rx, 64 << 10).await?)?;
     let sp = n
         .find(&hello, c.remote_id())
         .ok_or_else(|| anyhow!("unknown space"))?;

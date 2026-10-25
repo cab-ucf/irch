@@ -141,6 +141,8 @@ pub struct Signed {
     pub device: EndpointId,
     pub ts: u64,
     pub op: Op,
+    /// The epoch whose key sealed it.
+    pub epoch: [u8; 8],
 }
 
 pub fn tag(key: &Key) -> [u8; 8] {
@@ -174,7 +176,7 @@ pub fn seal(
     let pt = postcard::to_allocvec(&inner).expect("op");
     e.ct = crypto::seal(key, &aad(space, &e), &pt);
     let id = op_id(&author, &msg);
-    let s = Signed { id, author, device, ts, op: inner.op };
+    let s = Signed { id, author, device, ts, op: inner.op, epoch: e.epoch };
     (s, postcard::to_allocvec(&e).expect("env"))
 }
 
@@ -189,7 +191,7 @@ pub fn open(space: &Id, key: &Key, e: &Env, verify: bool) -> Option<Signed> {
     }
     let (id, author, device, op) =
         (op_id(&i.author, &msg), i.author, i.device, i.op);
-    Some(Signed { id, author, device, ts: e.ts, op })
+    Some(Signed { id, author, device, ts: e.ts, op, epoch: e.epoch })
 }
 
 #[test]

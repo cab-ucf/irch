@@ -36,6 +36,8 @@ const BEAT: Duration = Duration::from_secs(60);
 const ONLINE: Duration = Duration::from_secs(150);
 // Someone in a call says so every 15 s.
 const CALLER: Duration = Duration::from_secs(45);
+const RELAYS: [&str; 2] =
+    ["https://iroh.cxn.center./", "https://use1-1.relay.n0.iroh.link./"];
 pub const MAX_TEXT: usize = 4000;
 pub const MAX_NAME: usize = 64;
 pub const MAX_FILE: usize = 25 << 20;
@@ -46,7 +48,8 @@ const LOCKED: &str = "keys changed without you: ask for a new invite";
 /// How to reach peers beyond the LAN.
 #[derive(Clone, Debug, Default)]
 pub enum Net {
-    /// n0's relays and DNS, plus the Mainline DHT.
+    /// The lab's relay, then n0's US East one (as irp and tydig); n0's
+    /// DNS, plus the Mainline DHT.
     #[default]
     Default,
     /// Your own relays, plus the Mainline DHT; nothing of n0's.
@@ -211,6 +214,16 @@ impl Book {
                 Op::Back { key } => {
                     self.backs.entry(e.epoch).or_default().push(tag(key));
                     Some(*key)
+                }
+                Op::Knock { .. }
+                    if self.st.role(&s.author) == Role::Banned
+                        || self.st.stale(
+                            &e.epoch,
+                            &(s.ts, s.id),
+                            &s.author,
+                        ) =>
+                {
+                    None
                 }
                 Op::Knock { sealed } => {
                     let inv = kem_open(&me.kem, &sp.0, sealed);
@@ -430,9 +443,14 @@ impl Node {
         local.peers.values().for_each(|a| lookup.add_endpoint_info(a.clone()));
         let bind = async |port: u16| {
             let b = match &cfg.net {
-                Net::Default => Endpoint::builder(presets::N0).address_lookup(
-                    iroh_mainline_address_lookup::DhtAddressLookup::builder(),
-                ),
+                Net::Default => Endpoint::builder(presets::N0)
+                    .relay_mode(RelayMode::custom(
+                        RELAYS.map(|r| r.parse().expect("relay url")),
+                    ))
+                    .address_lookup(
+                        iroh_mainline_address_lookup::DhtAddressLookup::builder(
+                        ),
+                    ),
                 Net::Relay(urls) => Endpoint::builder(presets::Minimal)
                     .relay_mode(RelayMode::custom(urls.clone()))
                     .address_lookup(
@@ -1419,7 +1437,9 @@ impl Node {
     /// Answer a blob request.
     async fn give(&self, c: &Connection) -> Result<()> {
         let (mut tx, mut rx) = c.accept_bi().await?;
-        match postcard::from_bytes(&rx.read_to_end(MAX_FILE + 1024).await?)? {
+        // Only a storage node takes a file; others read a 64-byte ask.
+        let max = if self.serve.is_some() { MAX_FILE + 1024 } else { 64 };
+        match postcard::from_bytes(&rx.read_to_end(max).await?)? {
             Ask::Get(h) => {
                 tx.write_all(&std::fs::read(self.blob(&h)).unwrap_or_default())
                     .await?
@@ -1536,10 +1556,16 @@ impl Node {
             self.ingest(sp, vec![raw.to_vec()], false);
             return;
         }
-        let key = lock(&sp.book).keys.get(&e.epoch).copied();
-        let Some(s) = key.and_then(|k| op::open(&sp.id, &k, &e, true)) else {
-            return;
+        let s = {
+            let b = lock(&sp.book);
+            let s = b
+                .keys
+                .get(&e.epoch)
+                .and_then(|k| op::open(&sp.id, k, &e, true));
+            // Presence, typing and calls only from who holds the key now.
+            s.filter(|s| !b.st.stale(&s.epoch, &(s.ts, s.id), &s.author))
         };
+        let Some(s) = s else { return };
         if s.ts.abs_diff(now()) > 120_000 {
             return;
         }
@@ -1703,6 +1729,7 @@ mod tests {
             device,
             ts: n as u64,
             op: Op::Rekey { epoch: tag(&k[n]), boxes: vec![] },
+            epoch: [0; 8],
         }));
         b.keys.extend(k.map(|k| (tag(&k), k)));
         // Both rekeys replaced the first key; the second lost the race.
