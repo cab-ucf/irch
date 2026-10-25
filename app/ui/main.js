@@ -1135,8 +1135,9 @@ function modal(build) {
       if (e.target === d) finish(null);
     };
     d.showModal();
-    d.querySelector("input:not([readonly]),textarea")
-      ?.focus({ preventScroll: true });
+    // Phones: the keyboard only where typing is the point (one field).
+    const f = d.querySelectorAll("input[type=text]:not([readonly]),textarea");
+    if (!mobile() || f.length === 1) f[0]?.focus({ preventScroll: true });
   });
 }
 
