@@ -6,7 +6,6 @@ mod android;
 use irch_core::{Config, File, Id, Net, Node, api};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::ipc::{Channel, InvokeBody, InvokeResponseBody as Body, Request};
@@ -15,6 +14,37 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{broadcast::error::RecvError, watch};
 
 type Started = Option<Result<Arc<Node>, String>>;
+
+/// The node, whoever started it: the app, or a push wake (android.rs).
+static NODE: std::sync::Mutex<Option<Arc<Node>>> = std::sync::Mutex::new(None);
+/// The app runs (and its events notify).
+static APP: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn running() -> Option<Arc<Node>> {
+    NODE.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+fn adopt(n: Arc<Node>) {
+    *NODE.lock().unwrap_or_else(|e| e.into_inner()) = Some(n);
+}
+
+fn config(
+    dir: std::path::PathBuf,
+    link: Option<String>,
+    notes: Option<std::path::PathBuf>,
+) -> anyhow::Result<Config> {
+    let net = match (std::env::var("IRCH_RELAY"), std::env::var_os("IRCH_LAN"))
+    {
+        (Ok(r), _) => {
+            Net::Relay(r.split(',').map(str::parse).collect::<Result<_, _>>()?)
+        }
+        (_, Some(_)) => Net::Lan,
+        _ => Net::Default,
+    };
+    let (name, serve) = ("anon".into(), false);
+    Ok(Config { dir, name, net, link, serve, notes })
+}
 
 /// The node once it started, or why it could not.
 struct App(watch::Sender<Started>);
@@ -50,6 +80,7 @@ async fn link(
     }
     n.shutdown().await;
     s.0.send_replace(None);
+    *NODE.lock().unwrap_or_else(|e| e.into_inner()) = None;
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     for f in ["seed", "local", "spaces"] {
         let p = dir.join(f);
@@ -142,16 +173,6 @@ async fn share(app: AppHandle, text: String) -> Result<(), String> {
     Err("no share sheet here".into())
 }
 
-/// Android: keep running in the background (desktops always do).
-#[tauri::command]
-async fn background(app: AppHandle, on: bool) {
-    #[cfg(target_os = "android")]
-    if let Some(b) = app.try_state::<android::Bridge>() {
-        b.background(on).await;
-    }
-    let _ = (app, on);
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Calls ask for the camera, the microphone or the screen only after
@@ -204,7 +225,7 @@ pub fn run() {
         Ok(())
     });
     let b = b.invoke_handler(tauri::generate_handler![
-        irch, link, qr, save, share, background, media, tune, opened
+        irch, link, qr, save, share, media, tune, opened
     ]);
     let app = b.build(tauri::generate_context!()).expect("tauri builds");
     app.run(|app, e| {
@@ -237,28 +258,25 @@ pub fn run() {
 /// Start the node off the UI thread; failures reach the page as text.
 async fn start(app: &AppHandle, link: Option<String>) -> Result<(), String> {
     let r = async {
+        // Started by a push before the app opened: the same node.
+        if let Some(n) = running().filter(|_| link.is_none()) {
+            return Ok(n);
+        }
         let dir = app.path().app_data_dir()?;
         log_to(&dir);
-        let net =
-            match (std::env::var("IRCH_RELAY"), std::env::var_os("IRCH_LAN")) {
-                (Ok(r), _) => Net::Relay(
-                    r.split(',').map(str::parse).collect::<Result<_, _>>()?,
-                ),
-                (_, Some(_)) => Net::Lan,
-                _ => Net::Default,
-            };
         // Desktop: notes go to loroh's vault (LOROH_VAULT, else ~/notes).
         let notes =
             std::env::var_os("LOROH_VAULT").map(Into::into).or_else(|| {
                 let home = app.path().home_dir().ok();
                 home.filter(|_| cfg!(desktop)).map(|h| h.join("notes"))
             });
-        let (name, serve) = ("anon".into(), false);
-        let cfg = Config { dir, name, net, link, serve, notes };
-        tokio::spawn(Node::start(cfg)).await?
+        let n = tokio::spawn(Node::start(config(dir, link, notes)?)).await??;
+        adopt(n.clone());
+        anyhow::Ok(n)
     };
     let r = r.await.map_err(err);
     if let Ok(n) = &r {
+        APP.store(true, std::sync::atomic::Ordering::SeqCst);
         forward(app.clone(), n.clone());
         #[cfg(target_os = "android")]
         if let Some(b) = app.try_state::<android::Bridge>() {
@@ -274,7 +292,6 @@ async fn start(app: &AppHandle, link: Option<String>) -> Result<(), String> {
 fn forward(app: AppHandle, n: Arc<Node>) {
     let mut rx = n.subscribe();
     tauri::async_runtime::spawn(async move {
-        let mut seen = HashMap::new();
         loop {
             let e = match rx.recv().await {
                 Ok(e) => e,
@@ -284,40 +301,15 @@ fn forward(app: AppHandle, n: Arc<Node>) {
                 }
                 Err(RecvError::Closed) => break,
             };
-            if let irch_core::Event::Changed { space } = &e {
-                mentions(&app, &n, *space, &mut seen).await;
+            if let irch_core::Event::Changed { .. } = &e {
+                for x in n.notices() {
+                    let tag = format!("{}{}", x.space, x.room);
+                    notify(&app, &tag, &x.title, &x.body).await;
+                }
             }
             let _ = app.emit("irch", e);
         }
     });
-}
-
-/// Notify about mentions newer than any seen before in `space`, so
-/// history arriving by sync stays quiet.
-async fn mentions(
-    app: &AppHandle,
-    n: &Node,
-    space: Id,
-    seen: &mut HashMap<Id, u64>,
-) {
-    let after = *seen.entry(space).or_insert_with(irch_core::now);
-    let hits = n.mentions(&space, after);
-    let Some((name, dm, chans, newest)) = n.view(&space, |s| {
-        let chans = s.rooms();
-        let newest = chans.iter().filter_map(|c| s.latest(&c.0)).max();
-        (s.name().to_string(), s.dm.is_some(), chans, newest.unwrap_or(0))
-    }) else {
-        return;
-    };
-    seen.insert(space, after.max(newest));
-    for (ch, m) in hits {
-        let channel = chans.iter().find(|c| c.0 == ch).map_or("", |c| &c.1);
-        let title = match dm {
-            true => m.name.clone(),
-            false => format!("{} in #{channel} ({name})", m.name),
-        };
-        notify(app, &format!("{space:?}{ch:?}"), &title, &m.text).await;
-    }
 }
 
 #[cfg(target_os = "android")]

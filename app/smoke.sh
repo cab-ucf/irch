@@ -1,8 +1,8 @@
 #!/bin/sh
 # Emulator smoke test (CI): install the APK, launch it, and prove that the
 # node starts on a real Android system, the UI works (create a space),
-# Back plus relaunch keep the same process with the UI intact, the Stay
-# connected switch starts the background service, and a call starts.
+# Back plus relaunch keep the same process with the UI intact, and a call
+# starts.
 # Usage: smoke.sh APK [EVIDENCE_DIR]
 set -eu
 apk=$1
@@ -75,27 +75,7 @@ front || fail "not in front after returning"
 [ "$(pid)" = "$first" ] || fail "returning restarted the process"
 adb exec-out screencap -p >"$out/3-resumed.png"
 
-# My Account › Stay connected: the switch starts a foreground service that
-# keeps the node running in the background.
-tap 'Online'
-see 'Stay connected in the background' 20 || fail "settings did not open"
-tap 'Stay connected in the background'
-service() { adb shell dumpsys activity services "$pkg" | grep -q IrchService; }
-i=0
-until service; do
-  i=$((i + 1))
-  [ "$i" -lt 20 ] || fail "the switch did not start the background service"
-  sleep 1
-done
-adb exec-out screencap -p >"$out/4-switch.png"
-adb shell input keyevent KEYCODE_HOME
-sleep 5
-service || fail "the background service stopped"
-[ "$(pid)" = "$first" ] || fail "the node did not stay running"
-
 # A call, alone: the web view's codecs, audio worklet and permissions.
-adb shell am start -W -n "$pkg/.MainActivity"
-adb shell input keyevent KEYCODE_BACK
 tap 'general'
 tap 'Join call'
 see 'Leave call' 30 || fail "could not join a call"

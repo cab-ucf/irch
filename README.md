@@ -120,13 +120,21 @@ a paste attaches files; hover a message to react, reply, edit or delete;
 click a member to message, ban or promote them. The arrow on a message
 replies in its thread, listed under its channel. The phone in a channel's
 header joins its call; mute, camera, screen and hang up sit under the
-tiles (the terminal shows how many are in one: 🔊2). Mentions and direct
-messages notify while irch is out of sight.
+tiles (the terminal shows how many are in one: 🔊2). New messages notify
+while irch is out of sight (the space's menu: all, @mentions, or none).
 Ctrl+K switches, Alt+↑/↓ moves between channels, ↑ edits your last
 message. On phones, swipe right for channels and left for members; Back
 closes the topmost thing (a thread returns to its channel), then sends
-irch to the background; My Account › Stay connected keeps it receiving
-(there is no push server to wake a peer-to-peer app).
+irch to the background.
+
+Phones sleep: holding iroh connections open would wake the radio every
+few seconds. Instead, whoever writes wakes the others: a phone with a
+UnifiedPush app ([ntfy](https://ntfy.sh): from F-Droid, or from Google
+Play on ntfy.sh, which rides Google's own connection at no battery cost)
+tells its spaces, sealed like any op, where to reach it; the writer's
+device sends that address a ping with nothing in it (at most every 30 s),
+and the phone wakes for a few seconds, fetches from the writer over iroh,
+and notifies. Push servers learn only that a ping went to an address.
 
 Notes: the bookmark on a message adds it (or its whole thread) to your
 notes as a task, with an optional due date, or as a quote: plain Markdown

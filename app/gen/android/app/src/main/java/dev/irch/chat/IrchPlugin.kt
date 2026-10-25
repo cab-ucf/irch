@@ -10,6 +10,7 @@ import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
 import android.os.Build
+import android.webkit.WebView
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationCompat
@@ -25,6 +26,7 @@ import app.tauri.plugin.Channel
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import org.unifiedpush.android.connector.UnifiedPush
 
 @InvokeArg
 class WatchArgs {
@@ -48,14 +50,19 @@ class FileArgs {
   var path = ""
 }
 
-@InvokeArg
-class BackgroundArgs {
-  var on = false
-}
-
-/** What the Rust side (src-tauri/src/android.rs) needs from Android. */
+/** What the Rust side (src/android.rs) needs from Android. */
 @TauriPlugin
 class IrchPlugin(private val activity: Activity) : Plugin(activity) {
+  /** Ask for notifications once, and be woken through UnifiedPush. */
+  override fun load(webView: WebView) {
+    if (!notificationsAllowed(activity) && Build.VERSION.SDK_INT >= 33) {
+      ActivityCompat.requestPermissions(activity, arrayOf(POST_NOTIFICATIONS), 1)
+    }
+    UnifiedPush.tryUseCurrentOrDefaultDistributor(activity) { ok ->
+      if (ok) UnifiedPush.register(activity)
+    }
+  }
+
   /** Native code cannot observe network changes on Android; iroh needs them. */
   @Command
   fun watchNetwork(invoke: Invoke) {
@@ -76,7 +83,9 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
   fun mention(invoke: Invoke) {
     val args = invoke.parseArgs(MentionArgs::class.java)
     val state = ProcessLifecycleOwner.get().lifecycle.currentState
-    if (!state.isAtLeast(Lifecycle.State.STARTED)) postMention(activity, args)
+    if (!state.isAtLeast(Lifecycle.State.STARTED)) {
+      postMessage(activity, args.tag, args.title, args.body)
+    }
     invoke.resolve()
   }
 
@@ -103,31 +112,9 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     activity.startActivity(Intent.createChooser(send, null))
     invoke.resolve()
   }
-
-  /** Keep the node running in the background: a foreground service. */
-  @Command
-  fun background(invoke: Invoke) {
-    val on = invoke.parseArgs(BackgroundArgs::class.java).on
-    val service = Intent(activity, IrchService::class.java)
-    try {
-      if (on) {
-        if (!notificationsAllowed(activity)) {
-          val perm = arrayOf(POST_NOTIFICATIONS)
-          ActivityCompat.requestPermissions(activity, perm, 1)
-        }
-        ContextCompat.startForegroundService(activity, service)
-      } else {
-        activity.stopService(service)
-      }
-      invoke.resolve()
-    } catch (e: Exception) {
-      invoke.reject(e.message)
-    }
-  }
 }
 
-const val MENTIONS = "mentions"
-const val CONNECTED = "connected"
+const val MESSAGES = "messages"
 
 fun notificationsAllowed(ctx: Context) = Build.VERSION.SDK_INT < 33 ||
   ContextCompat.checkSelfPermission(ctx, POST_NOTIFICATIONS) ==
@@ -144,24 +131,24 @@ fun notificationChannel(ctx: Context, id: String, name: String, level: Int) =
   )
 
 /** Locked, the screen shows only "New message"; the text needs unlocking. */
-private fun postMention(ctx: Context, args: MentionArgs) {
+fun postMessage(ctx: Context, tag: String, title: String, body: String) {
   if (!notificationsAllowed(ctx)) return
   val high = NotificationManagerCompat.IMPORTANCE_HIGH
-  notificationChannel(ctx, MENTIONS, "Mentions", high)
-  val hidden = NotificationCompat.Builder(ctx, MENTIONS)
+  notificationChannel(ctx, MESSAGES, "Messages", high)
+  val hidden = NotificationCompat.Builder(ctx, MESSAGES)
     .setSmallIcon(R.drawable.ic_stat)
     .setContentTitle("New message")
     .build()
-  val n = NotificationCompat.Builder(ctx, MENTIONS)
+  val n = NotificationCompat.Builder(ctx, MESSAGES)
     .setSmallIcon(R.drawable.ic_stat)
-    .setContentTitle(args.title)
-    .setContentText(args.body)
-    .setStyle(NotificationCompat.BigTextStyle().bigText(args.body))
+    .setContentTitle(title)
+    .setContentText(body)
+    .setStyle(NotificationCompat.BigTextStyle().bigText(body))
     .setCategory(NotificationCompat.CATEGORY_MESSAGE)
     .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
     .setPublicVersion(hidden)
     .setContentIntent(openAppIntent(ctx))
     .setAutoCancel(true)
     .build()
-  NotificationManagerCompat.from(ctx).notify(args.tag, 0, n)
+  NotificationManagerCompat.from(ctx).notify(tag, 0, n)
 }

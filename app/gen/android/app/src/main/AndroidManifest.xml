@@ -3,10 +3,9 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Read the device's DNS servers and follow network changes (iroh cannot on its own). -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <!-- Mention notifications and the optional background connection. -->
+    <!-- Notifications, and a few seconds of catching up when a push wakes irch. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- Calls: asked for when one is joined, or a camera turned on. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
@@ -53,14 +52,16 @@
             <!-- DEEP LINK PLUGIN. AUTO-GENERATED. DO NOT REMOVE. -->
         </activity>
 
-        <service
-            android:name=".IrchService"
-            android:exported="false"
-            android:foregroundServiceType="specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Keeps peer-to-peer chat connections open; there is no server to deliver messages later." />
+        <!-- UnifiedPush: someone wrote; then a short catch-up. -->
+        <service android:name=".IrchPush" android:exported="false">
+            <intent-filter>
+                <action android:name="org.unifiedpush.android.connector.PUSH_EVENT" />
+            </intent-filter>
         </service>
+        <service
+            android:name=".IrchWake"
+            android:exported="false"
+            android:foregroundServiceType="shortService" />
 
         <provider
           android:name="androidx.core.content.FileProvider"

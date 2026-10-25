@@ -86,6 +86,8 @@ pub struct State {
     index: HashMap<Id, (Ch, Pos)>,
     // The epoch each op was sealed under.
     sealed: HashMap<Id, [u8; 8]>,
+    // Each device's push endpoint, by who says so: newest wins.
+    pushes: HashMap<(Id, EndpointId), (Pos, Option<String>)>,
     // Every post's would-be thread, back to the post.
     roots: HashMap<Ch, Id>,
     edits: HashMap<Id, BTreeMap<Pos, (Id, Option<String>)>>,
@@ -154,6 +156,13 @@ impl State {
                     ),
                 }
             }
+            Op::Push { url } => match self.pushes.get(&(s.author, s.device)) {
+                Some((p, _)) if *p >= at => (false, false),
+                _ => {
+                    let k = (s.author, s.device);
+                    (self.pushes.insert(k, (at, url)).is_none(), false)
+                }
+            },
             Op::Back { .. }
             | Op::Knock { .. }
             | Op::Typing { .. }
@@ -246,6 +255,20 @@ impl State {
 
     fn stale_at(&self, at: &Pos, a: &Id) -> bool {
         self.sealed.get(&at.1).is_some_and(|t| self.stale(t, at, a))
+    }
+
+    /// Where `a` said to wake device `d`.
+    pub fn push(&self, a: &Id, d: &EndpointId) -> Option<&str> {
+        self.pushes.get(&(*a, *d))?.1.as_deref()
+    }
+
+    /// Every device to wake when someone writes: members', not banned.
+    pub fn pushes(&self) -> Vec<(EndpointId, String)> {
+        let ok = |((a, _), (at, _)): &(&(Id, EndpointId), &(Pos, _))| {
+            self.role(a) != Role::Banned && !self.stale_at(at, a)
+        };
+        let p = self.pushes.iter().filter(ok);
+        p.filter_map(|((_, d), (_, u))| Some((*d, u.clone()?))).collect()
     }
 
     /// Who a direct-message space is with, seen by `me`.
@@ -483,6 +506,11 @@ impl State {
         self.after(ch, since, me).take(100).fold((0, 0), |(n, m), (_, p)| {
             (n + 1, m + self.mentions(p, me, &tag) as usize)
         })
+    }
+
+    /// The newest message by someone else after `since`.
+    pub fn last_from(&self, ch: &Ch, since: u64, me: &Id) -> Option<Message> {
+        self.after(ch, since, me).find_map(|(k, p)| self.view(k, p))
     }
 
     /// The newest mention of `me` after `since` (in a DM, any message).

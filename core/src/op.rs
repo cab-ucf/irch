@@ -43,6 +43,8 @@ pub enum Op {
     // In a channel's call (or out of any); offline (invisible, or quit).
     Call { channel: Option<Ch> },
     Gone,
+    // Where to wake the signing device when someone writes (UnifiedPush).
+    Push { url: Option<String> },
 }
 
 impl Op {

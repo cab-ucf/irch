@@ -1071,6 +1071,12 @@ function spaceMenu(anchor) {
     s.admin && ["Rename Space", "pencil", renameSpace],
     s.admin && ["Reset Invite Links", "key", resetInvites],
     "-",
+    ...[["All", "All messages"], ["Mentions", "Only @mentions"],
+      ["Off", "Nothing"]].map(([level, text]) => [
+      (s.level === level ? "● " : "○ ") + "Notify: " + text, "chat",
+      () => quiet(call("set_level", { space: s.id, level })
+        .then(() => schedule("side")))]),
+    "-",
     ["Leave Space", "logout", leaveSpace, "danger"],
   ]);
 }
@@ -1337,14 +1343,12 @@ function settings() {
             onclick: () => copy(S.me.id, "ID copied") }, "Copy")),
         sw("Invisible", "Others see you offline; typing stays private.",
           S.me.invisible, (on) => setInvisible(on)),
-        android && sw("Stay connected in the background",
-          "Messages and mentions keep arriving while irch is in the " +
-          "background (swiping it away quits). No server can wake it, so " +
-          "it keeps running, and uses more battery.",
-          store.get("bg") === "1", (on) => {
-            store.set("bg", on ? "1" : "0");
-            quiet(invoke("background", { on }));
-          }),
+        android && h("p", { class: "note" }, S.me.push
+          ? "Notifications arrive while irch sleeps: whoever writes wakes " +
+            "this phone through your push app (a ping with nothing in it)."
+          : "To be notified while irch sleeps, install a UnifiedPush app " +
+            "(ntfy: on F-Droid, or on Google Play, which uses Google's " +
+            "connection and costs no battery), then reopen irch."),
         h("label", {}, "Storage node"), storage,
         h("p", { class: "note" }, "Paste the code `irch --serve` prints " +
           "on an always-on machine: it keeps your spaces' ciphertext, " +

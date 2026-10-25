@@ -95,6 +95,10 @@ pub enum Call {
         file: Option<String>,
     },
     Hangup,
+    SetLevel {
+        space: Id,
+        level: crate::Level,
+    },
 }
 
 pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
@@ -105,6 +109,7 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
                 n.in_call().map(|(s, c)| json!({ "space": s, "channel": c }));
             json!({
                 "id": id, "name": name, "invisible": invisible, "call": call,
+                "push": n.pushed(),
             })
         }
         Call::SetName { name } => json!(n.set_name(&name).await?),
@@ -161,6 +166,7 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
             json!(n.call(Some((space, channel))).await?)
         }
         Call::Hangup => json!(n.call(None).await?),
+        Call::SetLevel { space, level } => json!(n.set_level(&space, level)),
         // Notes in the notes folder, or null where there is none (Android).
         Call::Notes => json!(n.notes()),
         // The Markdown, added to `file` if given.
@@ -237,5 +243,6 @@ fn space(n: &Node, id: &Id) -> Option<Value> {
     Some(json!({
         "id": id, "name": name, "dm": dm, "with": with, "owner": owner,
         "admin": admin, "peers": peers, "locked": locked, "channels": channels,
+        "level": n.level(id),
     }))
 }

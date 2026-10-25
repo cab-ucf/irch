@@ -387,3 +387,52 @@ async fn calls_carry_frames_between_members_only() {
     a.call(None).await.unwrap();
     assert!(a.calls(&id).is_empty() && a.in_call().is_none());
 }
+
+/// b's phone sleeps: a, writing, wakes it through the endpoint b told the
+/// space (a ping with nothing in it), and b then notifies once.
+#[tokio::test(flavor = "multi_thread")]
+async fn writing_wakes_a_sleeping_device() {
+    use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // A push server (ntfy, say) that counts what it is asked to deliver.
+    let pushes = Arc::new(AtomicUsize::new(0));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/up", l.local_addr().unwrap());
+    let p = pushes.clone();
+    tokio::spawn(async move {
+        while let Ok((mut c, _)) = l.accept().await {
+            let mut b = [0; 4096];
+            let n = c.read(&mut b).await.unwrap_or(0);
+            if b[..n].starts_with(b"POST /up") && b[..n].ends_with(b"\r\n\r\n1")
+            {
+                p.fetch_add(1, Relaxed);
+            }
+            let ok = b"HTTP/1.1 201 Created\r\ncontent-length: 0\r\n\r\n";
+            let _ = c.write_all(ok).await;
+        }
+    });
+    let (a, b) = (node("a").await, node("b").await);
+    let id = a.create("lab").await.unwrap();
+    let ch = general(&a, &id);
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    b.set_push(Some(url.clone())).await;
+    let told = |n: &Node| n.view(&id, |s| s.pushes().len()) == Some(1);
+    until("a knows where to wake b", || told(&a)).await;
+    assert!(b.notices().is_empty(), "history stays quiet");
+
+    say(&a, &id, ch, "@b the samples are in").await;
+    until("a woke b", || pushes.load(Relaxed) == 1).await;
+    until("b has it", || !texts(&b, &id, &ch).is_empty()).await;
+    let n = b.notices();
+    assert_eq!(n.len(), 1);
+    assert_eq!((n[0].room, &*n[0].body), (ch, "@b the samples are in"));
+    assert!(n[0].title.starts_with("a in #general"));
+    assert!(b.notices().is_empty(), "once");
+
+    say(&a, &id, ch, "and the scope is free").await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(pushes.load(Relaxed), 1, "held back for 30 s, not dropped");
+    b.set_level(&id, irch_core::Level::Mentions);
+    until("b has it", || texts(&b, &id, &ch).len() == 2).await;
+    assert!(b.notices().is_empty(), "mentions only");
+}

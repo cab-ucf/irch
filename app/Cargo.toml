@@ -36,3 +36,8 @@ tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = "2"
+
+# A push wake with no activity running (android.rs, Push.kt).
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"

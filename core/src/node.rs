@@ -94,6 +94,35 @@ struct Local {
     token: Option<[u8; 16]>,
 }
 
+/// Notifications, a separate file from `Local` (postcard is positional:
+/// a field added there would reset it).
+#[derive(Serialize, Deserialize, Default)]
+struct Prefs {
+    level: BTreeMap<Id, Level>,
+    // Per space, everything up to here was notified (or seen) already.
+    told: BTreeMap<Id, u64>,
+    // This device's UnifiedPush endpoint.
+    push: Option<String>,
+}
+
+/// What a space notifies about.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub enum Level {
+    #[default]
+    All,
+    Mentions,
+    Off,
+}
+
+/// A notification to show: one per channel or thread, its newest.
+#[derive(Serialize, Debug, Clone)]
+pub struct Notice {
+    pub space: Id,
+    pub room: Ch,
+    pub title: String,
+    pub body: String,
+}
+
 pub struct Space {
     pub id: Id,
     inv: Option<Invite>,
@@ -364,6 +393,10 @@ pub struct Node {
     lookup: MemoryLookup,
     spaces: RwLock<HashMap<Id, Arc<Space>>>,
     local: Mutex<Local>,
+    prefs: Mutex<Prefs>,
+    // Endpoints we woke: when last, and whether one more is held back.
+    wake: Mutex<HashMap<String, (Option<Instant>, bool)>>,
+    http: OnceLock<reqwest::Client>,
     name: Mutex<String>,
     events: broadcast::Sender<Event>,
     clock: AtomicU64,
@@ -439,6 +472,7 @@ impl Node {
         let dev =
             SecretKey::from_bytes(&secret(&cfg.dir.join("device"), None)?);
         let mut local: Local = store::load(&cfg.dir.join("local"));
+        let prefs: Prefs = store::load(&cfg.dir.join("prefs"));
         let lookup = MemoryLookup::new();
         local.peers.values().for_each(|a| lookup.add_endpoint_info(a.clone()));
         let bind = async |port: u16| {
@@ -504,6 +538,9 @@ impl Node {
             spaces: RwLock::default(),
             invisible: AtomicBool::new(local.invisible),
             local: Mutex::new(local),
+            prefs: Mutex::new(prefs),
+            wake: Mutex::default(),
+            http: OnceLock::new(),
             name: Mutex::new(cfg.name),
             events: broadcast::channel(1024).0,
             clock: AtomicU64::new(0),
@@ -575,6 +612,135 @@ impl Node {
         let l = lock(&self.local);
         if let Err(e) = store::save(&self.dir.join("local"), &*l) {
             warn!("saving local state: {e}");
+        }
+    }
+
+    fn save_prefs(&self) {
+        let p = lock(&self.prefs);
+        if let Err(e) = store::save(&self.dir.join("prefs"), &*p) {
+            warn!("saving prefs: {e}");
+        }
+    }
+
+    pub fn level(&self, id: &Id) -> Level {
+        lock(&self.prefs).level.get(id).copied().unwrap_or_default()
+    }
+
+    pub fn set_level(&self, id: &Id, l: Level) {
+        lock(&self.prefs).level.insert(*id, l);
+        self.save_prefs();
+    }
+
+    /// What to notify about that was not yet: per channel or thread, the
+    /// newest message by someone else (or mentioning us, by the space's
+    /// level), unread here. History from before a space's first ask stays
+    /// quiet. The app and a push wake share the marks: never twice.
+    pub fn notices(&self) -> Vec<Notice> {
+        let (me, mut out) = (self.id(), vec![]);
+        for id in self.spaces() {
+            let (level, mark) = {
+                let mut p = lock(&self.prefs);
+                let l = p.level.get(&id).copied().unwrap_or_default();
+                (l, *p.told.entry(id).or_insert_with(now))
+            };
+            let Some((name, dm, rooms, newest)) = self.view(&id, |s| {
+                let rooms = s.rooms();
+                let newest = rooms.iter().filter_map(|r| s.latest(&r.0)).max();
+                (s.name().to_string(), s.dm.is_some(), rooms, newest)
+            }) else {
+                continue;
+            };
+            for (ch, room) in rooms.iter().filter(|_| level != Level::Off) {
+                let since = self.since(&id, ch).max(mark);
+                let m = self.view(&id, |s| match level {
+                    Level::All => s.last_from(ch, since, &me),
+                    _ => s.last_mention(ch, since, &me),
+                });
+                let Some(m) = m.flatten() else { continue };
+                let title = match dm {
+                    true => m.name.clone(),
+                    false => format!("{} in #{room} ({name})", m.name),
+                };
+                let body =
+                    if m.text.is_empty() { "(file)".into() } else { m.text };
+                out.push(Notice { space: id, room: *ch, title, body });
+            }
+            let p = &mut lock(&self.prefs).told;
+            p.insert(id, mark.max(newest.unwrap_or(0)));
+        }
+        self.save_prefs();
+        out
+    }
+
+    /// Whether others can wake this device (it has a push endpoint).
+    pub fn pushed(&self) -> bool {
+        lock(&self.prefs).push.is_some()
+    }
+
+    /// Where others wake this device when they write (UnifiedPush), or
+    /// none: told every space we are in, sealed like any op.
+    pub async fn set_push(self: &Arc<Self>, url: Option<String>) {
+        let old = std::mem::replace(&mut lock(&self.prefs).push, url.clone());
+        self.save_prefs();
+        if old != url {
+            for id in self.spaces() {
+                let _ = self.tell_push(&id).await;
+            }
+        }
+    }
+
+    async fn tell_push(self: &Arc<Self>, id: &Id) -> Result<()> {
+        let Some(url) = lock(&self.prefs).push.clone() else { return Ok(()) };
+        let (me, dev) = (self.id(), self.ep.id());
+        let has = self.view(id, |s| s.push(&me, &dev).map(str::to_string));
+        if has.flatten().as_deref() == Some(&url) {
+            return Ok(());
+        }
+        self.post(&self.get(id)?, Op::Push { url: Some(url) }).await?;
+        Ok(())
+    }
+
+    /// We wrote in `id`: wake its members' sleeping devices (a ping with
+    /// nothing in it; they fetch from us), each at most every 30 s, a
+    /// held-back one when that is up.
+    fn wake(self: &Arc<Self>, id: &Id) {
+        let dev = self.ep.id();
+        let urls = self.view(id, |s| s.pushes()).unwrap_or_default();
+        // https only (a member names the URL: never our LAN); tests, local.
+        let ok = |u: &String| {
+            u.starts_with("https://")
+                || cfg!(debug_assertions) && u.starts_with("http://127.0.0.1:")
+        };
+        for (_, url) in urls.into_iter().filter(|u| u.0 != dev && ok(&u.1)) {
+            let wait = {
+                let mut w = lock(&self.wake);
+                let (last, held) =
+                    w.entry(url.clone()).or_insert((None, false));
+                let since =
+                    last.map_or(Duration::MAX, |t: Instant| t.elapsed());
+                let wait = Duration::from_secs(30).saturating_sub(since);
+                match (wait.is_zero(), *held) {
+                    (_, true) => continue,
+                    (true, _) => *last = Some(Instant::now()),
+                    (false, _) => *held = true,
+                }
+                wait
+            };
+            let n = Arc::downgrade(self);
+            tokio::spawn(async move {
+                tokio::time::sleep(wait).await;
+                let Some(n) = n.upgrade() else { return };
+                if !wait.is_zero() {
+                    lock(&n.wake)
+                        .insert(url.clone(), (Some(Instant::now()), false));
+                }
+                let http = n.http.get_or_init(http);
+                let r = http.post(&url).header("TTL", "86400");
+                let r = r.header("Urgency", "high").body("1").send().await;
+                if let Err(e) = r {
+                    warn!("push: {e}");
+                }
+            });
         }
     }
 
@@ -942,7 +1108,11 @@ impl Node {
         ensure!(ok, "that cannot be sent (empty, too long, or not allowed)");
         ensure!(*id != self.own, "not a space");
         let role = matches!(op, Op::Role { .. });
+        let msg = matches!(op, Op::Post { .. });
         let r = self.post(&self.get(id)?, op).await?;
+        if msg {
+            self.wake(id);
+        }
         // Demoting whoever set the current epoch can bring back an older
         // one: replace it now, not after a jittered while.
         if role {
@@ -962,6 +1132,7 @@ impl Node {
         let sp = self.open(Some(inv), id, vec![])?;
         let (name, kem) = (self.name(), self.me.pk());
         self.post(&sp, Op::Profile { name, kem }).await?;
+        let _ = self.tell_push(&id).await;
         let stores = self.view(&self.own, |s| s.storage()).unwrap_or_default();
         for (addr, _) in stores {
             self.host(&sp, addr).await;
@@ -1664,6 +1835,15 @@ async fn pump(n: Arc<Node>, sp: Weak<Space>, boot: Vec<EndpointId>) {
 
 /// Presence every minute; re-dial spaces we are alone in; reconcile with
 /// a neighbor every few minutes; a late tick means we slept: resume.
+/// For push endpoints: TLS as iroh sets it up, roots compiled in.
+fn http() -> reqwest::Client {
+    let tls = iroh::tls::CaTlsConfig::embedded()
+        .client_config(iroh::tls::default_provider())
+        .expect("TLS roots");
+    let b = reqwest::Client::builder().tls_backend_preconfigured(tls);
+    b.timeout(Duration::from_secs(20)).build().expect("HTTP client")
+}
+
 async fn heartbeat(n: Weak<Node>) {
     let mut t = tokio::time::interval(BEAT);
     t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

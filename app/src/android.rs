@@ -1,10 +1,16 @@
 //! Android, through `IrchPlugin.kt` in `gen/android`: network changes
-//! (which iroh cannot see from native code there), mention notifications,
-//! the share sheet, and the opt-in background service.
+//! (which iroh cannot see from native code there), notifications, the share
+//! sheet; and through `Push.kt`, push wakes when no activity is running.
 
-use irch_core::Node;
+use irch_core::{Node, Notice};
+use jni::JNIEnv;
+use jni::objects::{JClass, JObject, JString};
+use jni::sys::jstring;
 use serde::Serialize;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
 use tauri::plugin::{Builder, PluginHandle, TauriPlugin};
 use tauri::{Manager, Wry};
@@ -44,11 +50,6 @@ struct FilePath<'a> {
     path: &'a str,
 }
 
-#[derive(Serialize)]
-struct On {
-    on: bool,
-}
-
 impl Bridge {
     /// Every network change: re-probe, re-dial, catch up.
     pub async fn watch_network(&self, n: Arc<Node>) {
@@ -74,13 +75,87 @@ impl Bridge {
         self.call("shareFile", FilePath { path }).await;
     }
 
-    pub async fn background(&self, on: bool) {
-        self.call("background", On { on }).await;
-    }
-
     async fn call(&self, cmd: &str, args: impl Serialize) {
         if let Err(e) = self.0.run_mobile_plugin_async::<()>(cmd, args).await {
             tracing::warn!("android {cmd}: {e}");
         }
     }
+}
+
+// We gave ndk-context Android's context (no activity had); the activity's
+// runtime (tao) sets it once and asserts nobody did before.
+static OURS: AtomicBool = AtomicBool::new(false);
+
+/// `Wake.run`: a push came. Start the node if irch was not running (or
+/// wake it), catch up, and return what to notify about, as JSON; while
+/// the app runs, it notifies itself and this returns `[]`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_irch_chat_Wake_run<'l>(
+    mut env: JNIEnv<'l>,
+    _: JClass<'l>,
+    ctx: JObject<'l>,
+    dir: JString<'l>,
+    push: JString<'l>,
+) -> jstring {
+    let mut text = |s: &JString| -> Option<String> {
+        (!s.is_null()).then(|| env.get_string(s).ok().map(Into::into))?
+    };
+    let (dir, push) = (text(&dir).unwrap_or_default(), text(&push));
+    let set = std::panic::catch_unwind(ndk_context::android_context).is_ok();
+    if !set
+        && let (Ok(vm), Ok(g)) = (env.get_java_vm(), env.new_global_ref(ctx))
+    {
+        let (vm, c) =
+            (vm.get_java_vm_pointer().cast(), g.as_obj().as_raw().cast());
+        unsafe { ndk_context::initialize_android_context(vm, c) };
+        std::mem::forget(g);
+        OURS.store(true, SeqCst);
+    }
+    let r = tauri::async_runtime::block_on(wake(dir.into(), push));
+    let r =
+        r.inspect_err(|e| tracing::warn!("wake: {e:#}")).unwrap_or_default();
+    let json = serde_json::to_string(&r).unwrap_or_else(|_| "[]".into());
+    env.new_string(json).map_or(std::ptr::null_mut(), |s| s.into_raw())
+}
+
+/// `Wake.release`: the activity is about to start; it brings its own.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_irch_chat_Wake_release(_: JNIEnv, _: JClass) {
+    if OURS.swap(false, SeqCst) {
+        unsafe { ndk_context::release_android_context() };
+    }
+}
+
+async fn wake(
+    dir: PathBuf,
+    push: Option<String>,
+) -> anyhow::Result<Vec<Notice>> {
+    static ONE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one = ONE.lock().await;
+    let n = match crate::running() {
+        Some(n) => n,
+        None => {
+            crate::log_to(&dir);
+            let n = Node::start(crate::config(dir, None, None)?).await?;
+            crate::adopt(n.clone());
+            n
+        }
+    };
+    if let Some(p) = push {
+        n.set_push((!p.is_empty()).then_some(p)).await;
+    }
+    n.resume().await;
+    if crate::APP.load(SeqCst) {
+        return Ok(vec![]); // the app's own events notify
+    }
+    // Catch up until a few quiet seconds, at most half a minute.
+    let (mut rx, end) =
+        (n.subscribe(), Instant::now() + Duration::from_secs(30));
+    while Instant::now() < end
+        && matches!(
+            tokio::time::timeout(Duration::from_secs(4), rx.recv()).await,
+            Ok(Ok(_))
+        )
+    {}
+    Ok(n.notices())
 }

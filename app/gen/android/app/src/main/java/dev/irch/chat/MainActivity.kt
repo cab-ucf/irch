@@ -15,6 +15,7 @@ class MainActivity : TauriActivity() {
     // The UI is dark: light system-bar icons whatever the system theme.
     val bars = SystemBarStyle.dark(Color.TRANSPARENT)
     enableEdgeToEdge(bars, bars)
+    Wake.release() // a push may have started irch without us: our turn
     super.onCreate(savedInstanceState)
     // Edge to edge, the page would sit under the status and navigation bars,
     // cutouts and the keyboard: inset the web view's frame by all of them.
