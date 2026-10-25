@@ -1,0 +1,85 @@
+# A tag `vX.Y.Z` publishes a release the apps update from: signed desktop
+# bundles with Tauri's latest.json, and an APK under irch's signing key.
+# Secrets: TAURI_SIGNING_PRIVATE_KEY(_PASSWORD), ANDROID_KEYSTORE (base64),
+# ANDROID_KEYSTORE_PASSWORD.
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y
+          libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev
+          libjavascriptcoregtk-4.1-dev librsvg2-dev
+      - run: cargo install tauri-cli --version 2.12.4 --locked
+      - name: The tag is the version
+        shell: bash
+        run: |
+          v='"version": "'${GITHUB_REF_NAME#v}'"'
+          sed -i.bak "s/\"version\": \"[^\"]*\"/$v/" app/tauri.conf.json
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+            ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: app
+          tauriScript: cargo tauri
+          tagName: ${{ github.ref_name }}
+          releaseName: irch ${{ github.ref_name }}
+          includeUpdaterJson: true
+
+  android:
+    needs: desktop
+    runs-on: ubuntu-latest
+    steps:
+      - name: Room for the build
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - run: cargo install tauri-cli --version 2.12.4 --locked
+      - name: The tag is the version
+        run: |
+          v='"version": "'${GITHUB_REF_NAME#v}'"'
+          sed -i "s/\"version\": \"[^\"]*\"/$v/" app/tauri.conf.json
+      - working-directory: app
+        run: NDK_HOME="$ANDROID_NDK_LATEST_HOME" cargo tauri android build
+          --ci --apk --target aarch64 --target x86_64
+      - name: Sign with irch's key, attach to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KS: ${{ secrets.ANDROID_KEYSTORE }}
+          PW: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          echo "$KS" | base64 -d > irch.jks
+          apk=$(ls app/gen/android/app/build/outputs/apk/*/release/*.apk)
+          "$tools/zipalign" -f 4 "$apk" a.apk
+          "$tools/apksigner" sign --ks irch.jks --ks-pass env:PW \
+            --ks-key-alias irch --out irch.apk a.apk
+          rm irch.jks
+          gh release upload "$GITHUB_REF_NAME" irch.apk --clobber

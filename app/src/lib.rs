@@ -146,6 +146,38 @@ async fn tune(s: State<'_, App>, to: Channel<Body>) -> Result<(), String> {
     Ok(())
 }
 
+/// Releases: `latest.json` (Tauri's updater format) and `irch.apk`. On
+/// desktops the updater has it from tauri.conf.json.
+#[cfg(target_os = "android")]
+const LATEST: &str =
+    "https://github.com/cab-ucf/irch/releases/latest/download/";
+
+/// A newer irch, if there is one; with `install`, install it. Desktop: in
+/// place, its signature checked against ours, then restart. Android: the
+/// system installer, which takes an update only under our signing key.
+#[tauri::command]
+async fn update(
+    app: AppHandle,
+    install: bool,
+) -> Result<Option<String>, String> {
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_updater::UpdaterExt;
+        let u = app.updater().map_err(|e| e.to_string())?;
+        let Some(u) = u.check().await.map_err(|e| e.to_string())? else {
+            return Ok(None);
+        };
+        if install {
+            let got = u.download_and_install(|_, _| {}, || {}).await;
+            got.map_err(|e| e.to_string())?;
+            app.restart();
+        }
+        Ok(Some(u.version))
+    }
+    #[cfg(target_os = "android")]
+    android::update(&app, install).await.map_err(err)
+}
+
 /// The irch:// link irch was opened with, if any.
 #[tauri::command]
 fn opened(app: AppHandle) -> Option<String> {
@@ -186,6 +218,8 @@ pub fn run() {
             let _ = (w.unminimize(), w.set_focus());
         }
     }));
+    #[cfg(desktop)]
+    let b = b.plugin(tauri_plugin_updater::Builder::new().build());
     let b = b
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -225,7 +259,7 @@ pub fn run() {
         Ok(())
     });
     let b = b.invoke_handler(tauri::generate_handler![
-        irch, link, qr, save, share, media, tune, opened
+        irch, link, qr, save, share, media, tune, opened, update
     ]);
     let app = b.build(tauri::generate_context!()).expect("tauri builds");
     app.run(|app, e| {

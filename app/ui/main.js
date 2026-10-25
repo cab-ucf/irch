@@ -442,6 +442,28 @@ const threadRow = (t) => h("div", {
 }, icon("thread"), h("span", { class: "name" }, t.name),
 t.id !== S.ch && badge(t.mentions));
 
+/** A newer irch: offered once at launch (`quietly`), or on request. */
+async function updates(quietly) {
+  let v;
+  try {
+    v = await invoke("update", { install: false });
+  } catch (e) {
+    return quietly || toast(`Could not check: ${e}`, true);
+  }
+  if (!v) return quietly || toast("irch is up to date");
+  const ok = await modal((finish) => h("div", {},
+    h("div", { class: "m-body" }, h("h2", {}, `irch ${v} is out`),
+      h("p", { class: "sub" }, android
+        ? "It downloads, then Android asks to install it over this one."
+        : "It downloads, checks its signature, and irch restarts.")),
+    foot(cancel(finish),
+      h("button", { class: "btn", onclick: () => finish(true) }, "Update"))));
+  if (!ok) return;
+  toast(`Downloading irch ${v}…`);
+  await invoke("update", { install: true })
+    .catch((e) => toast(`Update failed: ${e}`, true));
+}
+
 /** irch://open/SPACE/CHANNEL/MESSAGE, from a note: there, if we can. */
 async function openUrl(url) {
   if (!String(url).startsWith("irch://open/")) return;
@@ -1134,7 +1156,9 @@ function modal(build) {
       resolve(v);
     };
     d.replaceChildren(build(finish));
-    d.onclose = () => finish(null);
+    // A dialog closed just before this one fires its close event late,
+    // on this one: only a close that left it closed counts.
+    d.onclose = () => d.open || finish(null);
     // A click outside closes; never return false here, which would
     // cancel every click inside (checkboxes would not toggle).
     d.onclick = (e) => {
@@ -1356,6 +1380,9 @@ function settings() {
         h("button", {
           class: "choice", onclick: () => { finish(null); linkDevice(); },
         }, icon("phone"), "Link a device"),
+        h("button", {
+          class: "choice", onclick: () => { finish(null); updates(false); },
+        }, icon("down"), "Check for updates"),
         h("p", { class: "note" }, "Your identity is a key on your devices. " +
           "Messages are end-to-end encrypted; read positions stay here.")),
       foot(cancel(finish),
@@ -1729,6 +1756,7 @@ async function start() {
   if (!S.spaces.length) renderHeader();
   const url = await invoke("opened").catch(() => null);
   if (url) openUrl(url);
+  updates(true);
   $("boot").remove();
 }
 

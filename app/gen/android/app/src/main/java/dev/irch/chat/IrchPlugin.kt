@@ -98,6 +98,32 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     invoke.resolve()
   }
 
+  /**
+   * A newer irch (downloaded by the Rust side) to Android's installer,
+   * which takes it only if signed with the same key as this one.
+   */
+  @Command
+  fun install(invoke: Invoke) {
+    val ok = Build.VERSION.SDK_INT < 26 ||
+      activity.packageManager.canRequestPackageInstalls()
+    if (!ok) {
+      val uri = android.net.Uri.parse("package:" + activity.packageName)
+      val allow = Intent(
+        android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, uri
+      )
+      activity.startActivity(allow)
+      return invoke.reject("allow irch to install updates, then try again")
+    }
+    val file = java.io.File(invoke.parseArgs(FileArgs::class.java).path)
+    val authority = activity.packageName + ".fileprovider"
+    val uri = FileProvider.getUriForFile(activity, authority, file)
+    val apk = "application/vnd.android.package-archive"
+    val i = Intent(Intent.ACTION_VIEW).setDataAndType(uri, apk)
+      .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    activity.startActivity(i)
+    invoke.resolve()
+  }
+
   /** Hand a saved attachment to another app: Files, Photos, a messenger. */
   @Command
   fun shareFile(invoke: Invoke) {

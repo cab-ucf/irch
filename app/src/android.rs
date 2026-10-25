@@ -45,6 +45,38 @@ struct Text<'a> {
     text: &'a str,
 }
 
+/// The latest release, if newer than us; with `install`, its APK handed to
+/// Android's installer.
+pub async fn update(
+    app: &tauri::AppHandle,
+    install: bool,
+) -> anyhow::Result<Option<String>> {
+    let http = irch_core::http();
+    let get = |f: &str| http.get(format!("{}{f}", crate::LATEST)).send();
+    let json: serde_json::Value = serde_json::from_slice(
+        &get("latest.json").await?.error_for_status()?.bytes().await?,
+    )?;
+    let latest =
+        json["version"].as_str().unwrap_or_default().trim_start_matches('v');
+    let v = |s: &str| {
+        s.split('.').map(|x| x.parse().unwrap_or(0)).collect::<Vec<u64>>()
+    };
+    if v(latest) <= v(&app.package_info().version.to_string()) {
+        return Ok(None);
+    }
+    if install {
+        let apk = get("irch.apk").await?.error_for_status()?.bytes().await?;
+        let dir = app.path().app_cache_dir()?.join("shared");
+        std::fs::create_dir_all(&dir)?;
+        let f = dir.join("irch.apk");
+        std::fs::write(&f, &apk)?;
+        if let Some(b) = app.try_state::<Bridge>() {
+            b.call("install", FilePath { path: &f.to_string_lossy() }).await;
+        }
+    }
+    Ok(Some(latest.into()))
+}
+
 #[derive(Serialize)]
 struct FilePath<'a> {
     path: &'a str,

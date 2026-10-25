@@ -107,6 +107,15 @@ every space of everyone who adds its code, ciphertext only. On NixOS,
 hourly (as tydig's): import it, `systemctl start irch-update` once, and
 `journalctl -u irch | grep -A1 'Storage code'` prints the code to hand out.
 
+## Updates
+
+The apps check for a newer release at launch (and in My Account) and
+install it: desktops in place, the update's signature checked against
+the key in `tauri.conf.json`; Android through its installer, which takes
+only an APK signed with irch's own key. A tag publishes a release:
+`git tag v0.2.0 && git push origin v0.2.0` (`release.yml`; its four
+secrets are named at its top).
+
 ## Using it
 
 Terminal: `/create NAME`, `/join CODE`, `/invite`, `/channel NAME`,

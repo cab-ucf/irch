@@ -1835,8 +1835,9 @@ async fn pump(n: Arc<Node>, sp: Weak<Space>, boot: Vec<EndpointId>) {
 
 /// Presence every minute; re-dial spaces we are alone in; reconcile with
 /// a neighbor every few minutes; a late tick means we slept: resume.
-/// For push endpoints: TLS as iroh sets it up, roots compiled in.
-fn http() -> reqwest::Client {
+/// For push endpoints and updates: TLS as iroh sets it up, roots compiled
+/// in.
+pub fn http() -> reqwest::Client {
     let tls = iroh::tls::CaTlsConfig::embedded()
         .client_config(iroh::tls::default_provider())
         .expect("TLS roots");

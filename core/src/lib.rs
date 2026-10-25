@@ -12,7 +12,7 @@ pub mod state;
 mod store;
 mod sync;
 
-pub use node::{Config, Event, Level, Net, Node, Notice};
+pub use node::{Config, Event, Level, Net, Node, Notice, http};
 pub use op::{File, Invite, Op, Role};
 pub use state::{Member, Message, State, Thread};
 

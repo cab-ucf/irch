@@ -28,7 +28,8 @@
       "icons/icon.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "createUpdaterArtifacts": true
   },
   "plugins": {
     "deep-link": {
@@ -44,6 +45,12 @@
           ],
           "appLink": false
         }
+      ]
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg1Q0MxRkNENzAzQjdGOEYKUldTUGZ6dHd6Ui9NaGFrUkw2Y0E3MHBOMDNuL25NQ2RUdm9ZNVVIQzJJY1p1aGNSKzQxUlFJOTUK",
+      "endpoints": [
+        "https://github.com/cab-ucf/irch/releases/latest/download/latest.json"
       ]
     }
   }
