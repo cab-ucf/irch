@@ -1,7 +1,7 @@
 /* irch: neon on black. No external fonts or assets (CSP). */
 
 :root {
-  --bg-1: #000; /* rail */
+  --bg-1: #000; /* dialog footers */
   --bg-2: #000; /* sidebars */
   --bg-3: #000; /* chat */
   --bg-4: #150b24; /* composer, chips */
@@ -79,108 +79,11 @@ svg.icon {
   position: fixed;
   inset: 0;
   display: grid;
-  grid-template-columns: 72px 240px minmax(0, 1fr) auto;
+  grid-template-columns: 220px minmax(0, 1fr) auto;
   /* One row exactly the viewport tall; panes scroll inside, never the page. */
   grid-template-rows: minmax(0, 1fr);
 }
 
-/* ===== Server rail ===== */
-#rail {
-  background: var(--bg-1);
-  border-right: 1px solid var(--line);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 0;
-  overflow-y: auto;
-  scrollbar-width: none;
-}
-#rail::-webkit-scrollbar { display: none; }
-.rail-sep {
-  width: 32px;
-  height: 2px;
-  border-radius: 1px;
-  background: var(--bg-4);
-  flex: none;
-}
-.server {
-  position: relative;
-  width: 72px;
-  display: flex;
-  justify-content: center;
-  flex: none;
-}
-.server .pill {
-  position: absolute;
-  left: 0;
-  top: 50%;
-  width: 4px;
-  height: 0;
-  border-radius: 0 4px 4px 0;
-  background: var(--pink);
-  box-shadow: var(--glow);
-  transform: translateY(-50%);
-  transition: height 0.15s;
-}
-.server.unread .pill { height: 8px; }
-.server:hover .pill { height: 20px; }
-.server.active .pill { height: 40px; }
-.server .icon-btn {
-  width: 48px;
-  height: 48px;
-  border-radius: 50%;
-  background: var(--bg-4);
-  color: var(--text);
-  display: grid;
-  place-items: center;
-  font-weight: 600;
-  font-size: 16px;
-  transition: border-radius 0.15s, background 0.15s;
-  overflow: hidden;
-}
-.server:hover .icon-btn,
-.server.active .icon-btn {
-  border-radius: 16px;
-  background: var(--neon);
-  box-shadow: var(--glow);
-  color: #fff;
-}
-.server.add .icon-btn { color: var(--pink); }
-.server.add:hover .icon-btn { color: #fff; }
-.badge {
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  border-radius: 8px;
-  background: var(--red);
-  color: #fff;
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 16px;
-  text-align: center;
-}
-.server .badge {
-  position: absolute;
-  right: 10px;
-  bottom: -2px;
-  box-shadow: 0 0 0 4px var(--bg-1);
-}
-#tooltip {
-  position: fixed;
-  z-index: 50;
-  pointer-events: none;
-  background: var(--bg-float);
-  color: var(--text-strong);
-  font-size: 14px;
-  font-weight: 600;
-  padding: 6px 10px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  white-space: nowrap;
-}
-
-/* ===== Channel sidebar ===== */
 #sidebar {
   background: var(--bg-2);
   border-right: 1px solid var(--line);
@@ -207,7 +110,52 @@ svg.icon {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-#channels { flex: 1; overflow-y: auto; padding: 16px 8px; }
+#channels { flex: 1; overflow-y: auto; padding: 4px 6px 12px; }
+#server-header .brand {
+  background: var(--neon);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  font: 700 18px var(--mono);
+  letter-spacing: 0.04em;
+}
+#server-header button { display: grid; color: var(--muted); }
+#server-header button:hover { color: var(--pink); }
+/* A space: its name folds its channels. */
+.space {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  margin-top: 10px;
+  padding: 0 4px 0 2px;
+  border-radius: 4px;
+  font: 600 12px var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.space:hover { background: var(--hover); color: var(--text); }
+.space > svg.icon { width: 14px; height: 14px; transform: rotate(-90deg); }
+.space.open > svg.icon { transform: none; }
+.space .name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.space.here .name { color: var(--pink); }
+.space.unread .name { color: var(--text-strong); }
+.space .gear { display: none; color: var(--muted); }
+.space:hover .gear, .space.here .gear { display: grid; }
+/* No hover on touch screens: their buttons always show. */
+@media (hover: none) {
+  .space .gear, .channel.dm .gear { display: grid; }
+}
+.space .gear svg.icon { width: 14px; height: 14px; }
+.space.dms { cursor: default; padding-left: 20px; }
 .category {
   display: flex;
   align-items: center;
@@ -405,7 +353,8 @@ svg.icon {
   overflow-anchor: none;
   padding-bottom: 16px;
 }
-#welcome { padding: 16px 16px 8px; margin-top: 16px; }
+#welcome { padding: 8px 16px 4px; margin-top: 8px; }
+
 #welcome .big {
   width: 68px;
   height: 68px;
@@ -465,13 +414,35 @@ svg.icon {
   text-transform: uppercase;
 }
 
+/* IRC-dense: time, nick, text; a new speaker gets a little air. */
 .msg {
   position: relative;
-  padding: 2px 48px 2px 72px;
-  margin-top: 17px;
-  min-height: 44px;
+  display: grid;
+  grid-template-columns: 3.4em minmax(0, 7em) minmax(0, 1fr);
+  column-gap: 10px;
+  padding: 1px 48px 1px 8px;
+  margin-top: 6px;
+  font-size: 15px;
 }
-.msg.cont { margin-top: 0; min-height: 0; }
+.msg.cont { margin-top: 0; }
+.msg.sel { background: var(--hover); box-shadow: inset 2px 0 0 var(--cyan); }
+table.keys { border-collapse: collapse; width: 100%; }
+table.keys td { padding: 4px 6px; vertical-align: top; color: var(--muted); }
+table.keys kbd {
+  font: 12px var(--mono);
+  color: var(--cyan);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+.msg > .head { display: contents; }
+.msg .head .time, .msg .side-time {
+  grid-column: 1;
+  text-align: right;
+  font: 12px/22px var(--mono);
+}
+.msg > :not(.head, .side-time, .toolbar) { grid-column: 3; }
 .msg:hover { background: var(--msg-hover); }
 .msg.mentioned {
   background: var(--mention-bg);
@@ -481,27 +452,20 @@ svg.icon {
   background: rgba(180, 77, 255, 0.12);
   box-shadow: inset 2px 0 0 var(--brand);
 }
-.msg > .avatar { position: absolute; left: 16px; top: 2px; cursor: pointer; }
-.msg.has-reply > .avatar { top: 26px; }
-.msg .head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .msg .author {
-  font-weight: 500;
+  grid-column: 2;
+  text-align: right;
+  font-weight: 600;
   color: var(--text-strong);
   cursor: pointer;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .msg .author:hover { text-decoration: underline; }
 .msg .author.admin { color: var(--cyan); }
 .time { font-size: 12px; color: var(--muted); white-space: nowrap; }
-.msg .side-time {
-  position: absolute;
-  left: 0;
-  width: 72px;
-  text-align: center;
-  top: 4px;
-  font-size: 11px;
-  visibility: hidden;
-}
+.msg .side-time { visibility: hidden; }
 .msg.cont:hover .side-time { visibility: visible; }
 .content { overflow-wrap: anywhere; user-select: text; }
 .content p { margin: 0; white-space: pre-wrap; }
@@ -1084,18 +1048,16 @@ dialog .m-foot .spacer { flex: 1; }
 /* ===== Mobile: one pane at a time ===== */
 @media (max-width: 760px) {
   #app { grid-template-columns: minmax(0, 1fr); }
-  #rail,
   #sidebar {
     position: fixed;
     top: 0;
     bottom: 0;
+    left: 0;
+    width: min(280px, 85vw);
     z-index: 30;
-    transform: translateX(-312px);
+    transform: translateX(-100%);
     transition: transform 0.2s;
   }
-  #rail { left: 0; width: 72px; }
-  #sidebar { left: 72px; width: min(240px, calc(100vw - 72px)); }
-  body.drawer #rail,
   body.drawer #sidebar { transform: none; }
   body.drawer #chat::after {
     content: "";
@@ -1113,12 +1075,15 @@ dialog .m-foot .spacer { flex: 1; }
     box-shadow: -8px 0 16px rgba(0, 0, 0, 0.3);
   }
   #menu-btn { display: grid; }
-  .msg { padding-right: 16px; }
+  /* Narrow: time and nick above, the text the full width. */
+  .msg { padding-right: 16px; grid-template-columns: auto minmax(0, 1fr); }
+  .msg .author { text-align: left; }
+  .msg > :not(.head, .side-time, .toolbar) { grid-column: 1 / -1; }
+  .msg .side-time { display: none; }
   .toolbar { right: 8px; }
 }
 
 /* ===== irch additions ===== */
-.server.home .icon-btn svg.icon { width: 24px; height: 24px; }
 .channel.dm { gap: 8px; }
 .channel.dm .avatar.xs { width: 24px; height: 24px; font-size: 12px; }
 .avatar.big { width: 68px; height: 68px; font-size: 30px; margin-bottom: 8px; }
@@ -1296,3 +1261,15 @@ img.attachment {
 }
 .caller .avatar.xs { width: 20px; height: 20px; font-size: 10px; }
 .channel .live { width: 16px; height: 16px; color: var(--green); }
+
+/* File previews */
+.file-chip .meta { cursor: pointer; }
+.file-chip .meta:hover b { text-decoration: underline; }
+dialog:has(.preview) { width: min(900px, calc(100vw - 32px)); }
+.preview .m-body { max-height: 75vh; overflow: auto; }
+.preview :is(video, audio) { width: 100%; max-height: 60vh; }
+.preview pre { font: 13px/1.45 var(--mono); white-space: pre-wrap; margin: 0; }
+
+/* Chat first: a channel's start is one modest line, not a banner. */
+#welcome .big, #welcome .avatar.big { display: none; }
+#welcome h1 { font-size: 20px; margin: 0 0 2px; }

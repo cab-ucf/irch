@@ -113,10 +113,6 @@ function avatar(id, name, cls = "", online) {
   return a;
 }
 
-const initials = (name) =>
-  name.split(/\s+/).filter(Boolean).slice(0, 3).map((w) => [...w][0])
-    .join("").toUpperCase() || "?";
-
 const fmtTime = (ts) =>
   new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 // All timestamps in one 15-minute slot share a calendar day.
@@ -129,15 +125,6 @@ const fmtDay = (ts) => {
   }
   return days.get(slot);
 };
-function fmtStamp(ts) {
-  const day = (d) =>
-    new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-  const diff = Math.round((day(new Date()) - day(new Date(ts))) / 864e5);
-  if (diff === 0) return `Today at ${fmtTime(ts)}`;
-  if (diff === 1) return `Yesterday at ${fmtTime(ts)}`;
-  return `${new Date(ts).toLocaleDateString()} ${fmtTime(ts)}`;
-}
-
 function toast(text, error) {
   const t = h("div", { class: "toast" + (error ? " error" : "") }, text);
   $("toasts").append(t);
@@ -217,7 +204,6 @@ async function loadSidebar() {
   if (!cur().channels.some((c) => c.id === S.thread?.parent)) S.thread = null;
   adopt();
   if (!chan() && cur().channels.length) return select(S.sid);
-  renderRail();
   renderSidebar();
   renderHeader();
 }
@@ -289,8 +275,7 @@ function markRead() {
   quiet(rpc("mark_read", { space: s.id, channel: ch.id }));
   if (ch.unread) {
     ch.unread = ch.mentions = 0;
-    renderRail();
-    renderSidebar();
+      renderSidebar();
   }
 }
 
@@ -321,7 +306,6 @@ function select(sid, ch) {
   S.ch = ch;
   if (ch) store.set("ch." + sid, inThread() ? S.thread.parent : ch);
   document.body.classList.remove("drawer");
-  renderRail();
   renderSidebar();
   renderHeader();
   renderTyping();
@@ -343,64 +327,39 @@ const mentions = (s) => s.channels.reduce((n, x) =>
 const badge = (n) =>
   n ? h("span", { class: "badge" }, String(Math.min(n, 99))) : null;
 
-function railItem({ label, active, unread: u, count, onclick, kids, cls }) {
-  return h("div", {
-    class: `server ${cls ?? ""}${active ? " active" : ""}${u ? " unread" : ""}`,
-  },
-  h("i", { class: "pill" }),
-  h("button", {
-    class: "icon-btn", "data-tip": label, onmouseenter: tip,
-    onmouseleave: untip, onclick: () => { untip(); onclick(); },
-  }, kids),
-  badge(count));
-}
-
-function renderRail() {
-  const d = dms();
-  const inDm = !!cur()?.dm;
-  const others = (s) =>
-    s.channels.filter((x) => s.id !== S.sid || x.id !== S.ch);
-  const dmCount = d.reduce((n, s) =>
-    n + others(s).reduce((m, x) => m + x.unread, 0), 0);
-  put($("rail"),
-    d.length > 0 && railItem({
-      label: "Direct Messages", active: inDm, unread: dmCount, count: dmCount,
-      kids: icon("chat"), cls: "home", onclick: () => select(d[0].id),
-    }),
-    d.length > 0 && h("div", { class: "rail-sep" }),
-    S.spaces.filter((s) => !s.dm).map((s) => {
-      const rest = { ...s, channels: others(s) };
-      return railItem({
-        label: s.name, active: s.id === S.sid, unread: unread(rest),
-        count: mentions(rest), kids: initials(s.name),
-        onclick: () => select(s.id),
-      });
-    }),
-    S.spaces.some((s) => !s.dm) && h("div", { class: "rail-sep" }),
-    railItem({ label: "Add a Space", kids: icon("plus"), cls: "add",
-      onclick: addSpace }),
-  );
-}
-
-function tip(e) {
-  const t = $("tooltip") ??
-    document.body.appendChild(h("div", { id: "tooltip" }));
-  const r = e.currentTarget.getBoundingClientRect();
-  t.textContent = e.currentTarget.dataset.tip;
-  t.style.left = `${r.right + 14}px`;
-  t.style.top = `${r.top + r.height / 2 - 16}px`;
-  t.classList.remove("hidden");
-}
-const untip = () => $("tooltip")?.classList.add("hidden");
-
+/** One list, as weechat's: each space and its channels and threads,
+ *  then direct messages. A space folds by its name. */
 function renderSidebar() {
-  const s = cur();
-  const hdr = $("server-header");
-  const title = s?.dm ? "Direct Messages" : s?.name ?? "irch";
-  put(hdr, h("span", {}, title), s && icon("chevron"));
-  hdr.onclick = s ? () => (s.dm ? dmMenu : spaceMenu)(hdr) : null;
-  put($("channels"), s?.dm ? dmList() : s ? channelList(s) : []);
+  put($("server-header"), h("span", { class: "brand" }, "irch"),
+    h("button", { title: "Add a space (create or join)", onclick: addSpace },
+      icon("plus")));
+  const d = dms();
+  put($("channels"), S.spaces.filter((s) => !s.dm).map(spaceTree),
+    d.length > 0 && [h("div", { class: "space dms" },
+      h("span", { class: "name" }, "Direct messages")), dmList()]);
   renderUserPanel();
+}
+
+function spaceTree(s) {
+  const open = store.get("fold." + s.id) !== "1";
+  const fold = () => {
+    store.set("fold." + s.id, open ? "1" : "0");
+    renderSidebar();
+  };
+  const menu = (e) => {
+    e.stopPropagation();
+    if (s.id !== S.sid) select(s.id);
+    spaceMenu(e.currentTarget);
+  };
+  return [h("div", {
+    class: "space" + (s.id === S.sid ? " here" : "") + (open ? " open" : "") +
+      (!open && unread(s) ? " unread" : ""),
+    onclick: fold,
+  }, icon("chevron"), h("span", { class: "name" }, s.name),
+  !open && badge(mentions(s)),
+  h("button", { class: "gear", title: "Space menu", onclick: menu },
+    icon("gear"))),
+  open && channelList(s)];
 }
 
 function dmList() {
@@ -410,20 +369,22 @@ function dmList() {
     onclick: () => select(d.id),
   }, avatar(d.with ?? d.id, d.name, "xs"), h("span", { class: "name" }, d.name),
   d.channels.some((c) => c.call.length) && icon("speaker"),
-  badge(d.id !== S.sid && mentions(d))));
+  badge(d.id !== S.sid && mentions(d)),
+  h("button", { class: "gear", title: "Close conversation", onclick: (e) => {
+    e.stopPropagation();
+    select(d.id);
+    leaveSpace();
+  } }, icon("x"))));
 }
 
 function channelList(s) {
   return [
-    h("div", { class: "category" }, h("span", {}, "Text Channels"),
-      s.admin && h("button",
-        { title: "Create Channel", onclick: createChannel }, icon("plus"))),
     ...s.channels.map((ch) => {
-      const active = ch.id === S.ch;
+      const active = s.id === S.sid && ch.id === S.ch;
       return h("div", {
         class: `channel${active ? " active" : ""}` +
           (ch.unread && !active ? " unread" : ""),
-        onclick: () => select(S.sid, ch.id),
+        onclick: () => select(s.id, ch.id),
       }, icon("hash"), h("span", { class: "name" }, ch.name),
       !active && badge(ch.mentions),
       s.admin && h("button", {
@@ -431,14 +392,17 @@ function channelList(s) {
         onclick: (e) => { e.stopPropagation(); editChannel(ch); },
       }, icon("gear")), ch.call.length > 0 && icon("speaker"));
     }).flatMap((row, i) => [row, callers(s.channels[i].call),
-      ...s.channels[i].threads.map(threadRow)]),
+      ...s.channels[i].threads.map((t) => threadRow(s, t))]),
   ];
 }
 
-const threadRow = (t) => h("div", {
+const threadRow = (s, t) => h("div", {
   class: `channel thread${t.id === S.ch ? " active" : ""}` +
     (t.unread && t.id !== S.ch ? " unread" : ""),
-  onclick: () => openThread(t.root),
+  onclick: () => {
+    S.sid = s.id;
+    openThread(t.root);
+  },
 }, icon("thread"), h("span", { class: "name" }, t.name),
 t.id !== S.ch && badge(t.mentions));
 
@@ -695,6 +659,8 @@ function renderMessages(keepScroll) {
     prev = m;
   }
   reconcile($("list"), items);
+  if (S.sel) $("list").querySelector(`[data-id="${S.sel}"]`)
+    ?.classList.add("sel");
   $("welcome").classList.toggle("hidden", S.more);
   if (stick) $("scroller").scrollTop = $("scroller").scrollHeight;
 }
@@ -741,13 +707,13 @@ function msgRow(m, { cont, mentioned, editing, authorAdmin }) {
       fmtTime(m.ts)));
   } else {
     const card = (e) => memberCard(m.author, e.currentTarget, "right");
-    const av = avatar(m.author, m.name);
-    av.addEventListener("click", card);
-    row.append(av, h("div", { class: "head" },
-      h("span", {
-        class: "author" + (authorAdmin ? " admin" : ""), onclick: card,
-      }, m.name),
-      h("span", { class: "time", title: at }, fmtStamp(m.ts))));
+    const nick = h("span", {
+      class: "author" + (authorAdmin ? " admin" : ""), onclick: card,
+      title: authorAdmin ? `${m.name} (admin)` : m.name,
+    }, m.name);
+    if (!authorAdmin) nick.style.color = color(m.author);
+    row.append(h("div", { class: "head" },
+      h("span", { class: "time", title: at }, fmtTime(m.ts)), nick));
   }
   if (editing) row.append(editBox(m));
   else if (m.text || m.edited) row.append(content(m.text, m.edited));
@@ -826,7 +792,8 @@ function spoiler() {
 }
 
 // @names, marked.
-const tagged = (text) => text.split(/((?<![\p{L}\p{N}_])@[\p{L}\p{N}_.-]*[\p{L}\p{N}_])/u)
+const AT = /((?<![\p{L}\p{N}_])@[\p{L}\p{N}_.-]*[\p{L}\p{N}_])/u;
+const tagged = (text) => text.split(AT)
   .map((x, i) => i % 2 ? h("span", { class: "mention" }, x) : x);
 
 /** Prism's token tree as spans (its HTML output is never used). */
@@ -891,7 +858,8 @@ function attachments(files) {
 }
 
 const fileChip = (f) => h("div", { class: "file-chip" }, icon("file"),
-  h("div", { class: "meta" }, h("b", {}, f.name), h("small", {}, size(f.size))),
+  h("div", { class: "meta", title: "Preview", onclick: () => preview(f) },
+    h("b", {}, f.name), h("small", {}, size(f.size))),
   h("button", { title: android ? "Share" : "Save to Downloads",
     onclick: () => saveFile(f) }, icon("down")));
 
@@ -899,6 +867,51 @@ async function saveFile(f) {
   const at = await invoke("save", { space: S.sid, file: f })
     .catch((e) => toast(String(e), true));
   if (at && !android) toast(`Saved to ${at}`);
+}
+
+const MEDIA = { mp3: "audio/mpeg", ogg: "audio/ogg", oga: "audio/ogg",
+  opus: "audio/ogg", wav: "audio/wav", m4a: "audio/mp4", flac: "audio/flac",
+  mp4: "video/mp4", m4v: "video/mp4", webm: "video/webm",
+  mov: "video/quicktime" };
+
+/** Text as UTF-8, or null for anything binary. */
+function utf8(b) {
+  try {
+    const t = new TextDecoder("utf-8", { fatal: true }).decode(b);
+    return t.includes("\0") ? null : t;
+  } catch {
+    return null;
+  }
+}
+
+/** A file, opened in irch: media plays, text and code show (Markdown
+ *  rendered); anything else is for saving. */
+async function preview(f) {
+  if (mime(f.name)) return image(f).then((src) => lightbox(src, f));
+  const ext = f.name.split(".").pop().toLowerCase();
+  let b;
+  try {
+    const b64 = await rpc("file", { space: S.sid, file: f });
+    b = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  } catch (e) {
+    return toast(String(e?.message ?? e), true);
+  }
+  let body, url;
+  if (MEDIA[ext]) {
+    url = URL.createObjectURL(new Blob([b], { type: MEDIA[ext] }));
+    const tag = MEDIA[ext].startsWith("audio") ? "audio" : "video";
+    body = h(tag, { src: url, controls: true, autoplay: true });
+  } else {
+    const text = utf8(b.subarray(0, 512 << 10));
+    if (text == null) return toast("No preview for this file: save it", true);
+    body = ext === "md" ? content(text) : code(text, ext);
+  }
+  await modal((finish) => h("div", { class: "preview" },
+    h("div", { class: "m-body" }, h("h2", {}, f.name), body),
+    foot(h("button", { class: "btn grey", onclick: () => saveFile(f) },
+      android ? "Share" : "Save"),
+    h("button", { class: "btn", onclick: () => finish(null) }, "Close"))));
+  if (url) URL.revokeObjectURL(url);
 }
 
 function lightbox(src, f) {
@@ -1151,8 +1164,6 @@ function spaceMenu(anchor) {
   ]);
 }
 
-const dmMenu = (anchor) =>
-  menu(anchor, [["Close Conversation", "logout", leaveSpace, "danger"]]);
 
 function memberCard(id, anchor, align) {
   const s = cur();
@@ -1275,7 +1286,6 @@ async function showCode({ title, label, code, note }) {
 }
 
 async function addSpace() {
-  untip();
   const v = await modal((finish) => h("div", { class: "m-body" },
     h("h2", {}, "Add a space"),
     h("p", { class: "sub" }, "Spaces live only on their members' devices. " +
@@ -1593,12 +1603,118 @@ function insert(t, text) {
   autosize(t);
 }
 
+/** The composer's commands, as the terminal's: /nick, /join, /dm, ... */
+const SLASH = {
+  nick: async (name) => {
+    if (!name) return toast("/nick NAME", true);
+    await call("set_name", { name });
+    S.me = await rpc("me");
+    renderUserPanel();
+    schedule("members", "msgs");
+  },
+  join: async (code) => {
+    if (!code) return joinFlow();
+    const id = await call("join", { code });
+    if (id) await open(id);
+  },
+  dm: (who) => {
+    const q = who.replace(/^@/, "").toLowerCase();
+    const m = S.members.find((x) => x.name.toLowerCase() === q && !isMe(x.id));
+    return m ? startDm(m.id) : toast(`Nobody called ${who} here`, true);
+  },
+  me: (text) => text && say(`_${text}_`),
+  shrug: (text) => say(`${text} ¯\\\\_(ツ)\\_/¯`.trim()),
+  thread: (text) => {
+    const m = S.msgs.findLast((x) => !isMe(x.author)) ?? S.msgs.at(-1);
+    if (!m || inThread()) return toast("Nothing to reply to here", true);
+    return openThread(m.id).then(() => text && say(text));
+  },
+  invite: () => invitePeople(),
+  leave: () => leaveSpace(),
+  notes: () => S.msgs.at(-1) && toNotes(S.msgs.at(-1)),
+  help: () => keysHelp(),
+};
+
+const say = (text) => {
+  $("input").value = text;
+  return send();
+};
+
+// ---------- vim ----------
+// Esc in the composer is normal mode: keys act on a selected message.
+
+const KEYS = [
+  ["Esc", "out of the composer: pick messages (normal mode)"],
+  ["j / k", "next / previous message"], ["gg / G", "first / last"],
+  ["r", "reply"], ["t", "reply in its thread"], ["e", "edit (yours)"],
+  ["dd", "delete"], ["y", "copy its text"], ["+", "react"],
+  ["n", "add to notes"], ["i, a, Enter", "back to typing"],
+  ["Ctrl+K", "jump to a channel or DM"], ["Alt+↑/↓", "previous / next channel"],
+  ["/nick, /join, /dm, /me, /shrug, /thread, /invite, /leave, /notes",
+    "in the composer"],
+];
+
+function keysHelp() {
+  modal((finish) => h("div", {},
+    h("div", { class: "m-body" }, h("h2", {}, "Keys"),
+      h("table", { class: "keys" }, KEYS.map(([k, v]) =>
+        h("tr", {}, h("td", {}, h("kbd", {}, k)), h("td", {}, v))))),
+    foot(h("button", { class: "btn", onclick: () => finish(null) }, "OK"))));
+}
+
+const sel = () => S.msgs.find((m) => m.id === S.sel);
+
+function pick(m) {
+  $("list").querySelector(".msg.sel")?.classList.remove("sel");
+  S.sel = m?.id ?? null;
+  const el = m && $("list").querySelector(`[data-id="${m.id}"]`);
+  el?.classList.add("sel");
+  el?.scrollIntoView({ block: "nearest" });
+}
+
+/** A key in normal mode; true if it did something. */
+function vim(e) {
+  const k = e.key, m = sel(), i = S.msgs.indexOf(m), last = S.vimLast;
+  S.vimLast = k;
+  const at = (j) => pick(S.msgs[Math.max(0, Math.min(S.msgs.length - 1, j))]);
+  const row = () => $("list").querySelector(`[data-id="${m.id}"]`);
+  const act = {
+    j: () => at(i + 1), k: () => at(i - 1), ArrowDown: () => at(i + 1),
+    ArrowUp: () => at(i - 1), G: () => at(S.msgs.length - 1),
+    g: () => last === "g" && at(0),
+    r: () => m && (typeMode(), startReply(m)),
+    t: () => m && !inThread() && openThread(m.id),
+    e: () => m && isMe(m.author) && (typeMode(), startEdit(m)),
+    d: () => m && last === "d" && (isMe(m.author) || cur()?.admin) && del(m),
+    y: () => m && copy(m.text, "Copied"),
+    "+": () => m && picker(row(), (em) => react(m, em, true)),
+    n: () => m && toNotes(m),
+    i: () => typeMode(), a: () => typeMode(), Enter: () => typeMode(),
+    "?": () => keysHelp(),
+  }[k];
+  if (!act) return false;
+  act();
+  return true;
+}
+
+function typeMode() {
+  pick(null);
+  S.normal = false;
+  $("input").focus({ preventScroll: true });
+}
+
 async function send() {
   const input = $("input");
   const text = input.value.trim();
   const s = cur();
   const ch = chan();
   const files = S.files;
+  const cmd = /^\/(\w+)\s*([\s\S]*)$/.exec(text);
+  if (cmd && SLASH[cmd[1]]) {
+    input.value = "";
+    autosize(input);
+    return quiet(Promise.resolve(SLASH[cmd[1]](cmd[2].trim())));
+  }
   if ((!text && !files.length) || !s || !ch) return;
   const reply = S.reply?.id ?? null;
   input.value = "";
@@ -1632,7 +1748,7 @@ function wire() {
     $("members").classList.toggle("hidden-panel", !on);
     $("members-btn").classList.toggle("on", on);
   };
-  showMembers(store.get("members") ? store.get("members") === "1" : !mobile());
+  showMembers(store.get("members") === "1"); // chat first: shown on request
   // Phones: swipe right for channels (or away from members), left away
   // from channels (or to members), as in Discord. Not in text or code.
   let touch = null;
@@ -1740,14 +1856,25 @@ function wire() {
     } else if (e.key === "Escape" && !$("modal").open) {
       if (closePop) closePop();
       else if (S.reply) cancelReply();
-      else if (inThread()) select(S.sid, S.thread.parent);
+      else if (S.normal) {
+        S.normal = false;
+        pick(null);
+      }
+      else if (e.target === input && S.msgs.length) {
+        input.blur(); // vim: normal mode, on the newest message
+        S.normal = true;
+        pick(S.msgs.at(-1));
+      } else if (inThread()) select(S.sid, S.thread.parent);
       else {
         sc.scrollTop = sc.scrollHeight;
         markRead();
       }
+    } else if (S.normal && !typing && !$("modal").open && !e.ctrlKey &&
+      !e.metaKey && !e.altKey) {
+      if (vim(e)) e.preventDefault();
     } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey &&
       !typing && !$("modal").open && !input.disabled) {
-      input.focus({ preventScroll: true }); // like Discord: type anywhere
+      input.focus({ preventScroll: true }); // type anywhere
     }
   });
 }

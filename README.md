@@ -129,13 +129,21 @@ code fenced with its language, highlighted by Prism), `||spoilers||`,
 and LaTeX math (`$x^2$`, `$$...$$`) drawn as MathML by Temml; raw HTML
 is shown as text, and links are copied, never opened.
 
-Desktop and phone: `+` creates or joins a space; the paperclip, a drop or
-a paste attaches files; hover a message to react, reply, edit or delete;
-click a member to message, ban or promote them. The arrow on a message
-replies in its thread, listed under its channel. The phone in a channel's
-header joins its call; mute, camera, screen and hang up sit under the
-tiles (the terminal shows how many are in one: 🔊2). New messages notify
-while irch is out of sight (the space's menu: all, @mentions, or none).
+Desktop and phone: a weechat-like tree of spaces and channels beside the
+chat, IRC-dense rows (time, nick, text), members on request. `+` creates
+or joins a space; the paperclip, a drop or a paste attaches files, and a
+file's name previews it (images, audio, video, PDFs, highlighted text);
+hover a message to react, reply, edit or delete; click a member to
+message, ban or promote them. The arrow on a message replies in its
+thread, listed under its channel. The phone in a channel's header joins
+its call; mute, camera, screen and hang up sit under the tiles (the
+terminal shows how many are in one: 🔊2). New messages notify while irch
+is out of sight (the space's menu: all, @mentions, or none).
+
+The composer takes `/nick`, `/join`, `/dm`, `/me`, `/shrug`, `/thread`,
+`/invite`, `/leave`, `/notes`, `/help`. Esc leaves it for normal mode:
+`j`/`k` moves, `gg`/`G` jumps, `r` replies, `t` threads, `e` edits, `dd`
+deletes, `y` copies, `+` reacts, `n` notes, `i` returns, `?` lists them.
 Ctrl+K switches, Alt+↑/↓ moves between channels, ↑ edits your last
 message. On phones, swipe right for channels and left for members; Back
 closes the topmost thing (a thread returns to its channel), then sends
