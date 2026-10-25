@@ -31,3 +31,6 @@ tauri-plugin-clipboard-manager = "2"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 tauri-plugin-notification = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = "2"

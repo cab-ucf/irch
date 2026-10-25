@@ -14,6 +14,7 @@
       <aside id="sidebar">
         <button id="server-header"><span>irch</span></button>
         <div id="channels"></div>
+        <div id="voice"></div>
         <div id="user-panel"></div>
       </aside>
       <main id="chat">
@@ -21,8 +22,11 @@
           <button class="hdr-btn" id="menu-btn" title="Channels"></button>
           <div class="title"></div>
           <div id="net" title="Peers connected directly. No servers."></div>
+          <button class="hdr-btn hidden" id="call-btn" title="Join call">
+          </button>
           <button class="hdr-btn on" id="members-btn" title="Members"></button>
         </header>
+        <div id="call" class="hidden"></div>
         <div id="scroller">
           <div id="welcome"></div>
           <div id="list"></div>

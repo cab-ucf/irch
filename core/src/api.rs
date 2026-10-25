@@ -32,16 +32,22 @@ pub enum Call {
     AddStorage { code: String },
     Attach { name: String, data: String },
     File { space: Id, file: File },
+    Ring { space: Id, channel: Ch },
+    Hangup,
 }
 
 pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
     Ok(match c {
         Call::Me => {
             let (id, name, invisible) = (n.id(), n.name(), n.invisible());
-            json!({ "id": id, "name": name, "invisible": invisible })
+            let call =
+                n.in_call().map(|(s, c)| json!({ "space": s, "channel": c }));
+            json!({
+                "id": id, "name": name, "invisible": invisible, "call": call,
+            })
         }
         Call::SetName { name } => json!(n.set_name(&name).await?),
-        Call::SetInvisible { on } => json!(n.set_invisible(on)),
+        Call::SetInvisible { on } => json!(n.set_invisible(on).await),
         Call::Spaces => json!(
             n.spaces().iter().filter_map(|s| space(n, s)).collect::<Vec<_>>()
         ),
@@ -82,6 +88,10 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
         Call::File { space, file } => {
             json!(BASE64.encode(&n.file(&space, &file).await?))
         }
+        Call::Ring { space, channel } => {
+            json!(n.call(Some((space, channel))).await?)
+        }
+        Call::Hangup => json!(n.call(None).await?),
     })
 }
 
@@ -110,9 +120,14 @@ fn space(n: &Node, id: &Id) -> Option<Value> {
         )
     })?;
     let (name, dm, owner, admin, chans, with) = v;
+    let mut calls = n.calls(id);
     let chan = |(c, name): (Ch, String)| {
         let (unread, mentions) = n.unread(id, &c);
-        json!({ "id": c, "name": name, "unread": unread, "mentions": mentions })
+        let call = calls.remove(&c).unwrap_or_default();
+        json!({
+            "id": c, "name": name, "unread": unread, "mentions": mentions,
+            "call": call,
+        })
     };
     let channels: Vec<_> = chans.into_iter().map(chan).collect();
     let (peers, locked) = (n.peers(id), n.locked(id));

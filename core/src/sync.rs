@@ -143,12 +143,15 @@ async fn read<T: DeserializeOwned>(rx: &mut RecvStream) -> Result<T> {
     Ok(postcard::from_bytes(&unframe(rx, MAX_FRAME).await?)?)
 }
 
-async fn frame(tx: &mut SendStream, b: &[u8]) -> Result<()> {
+pub(crate) async fn frame(tx: &mut SendStream, b: &[u8]) -> Result<()> {
     tx.write_all(&(b.len() as u32).to_be_bytes()).await?;
     Ok(tx.write_all(b).await?)
 }
 
-async fn unframe(rx: &mut RecvStream, max: usize) -> Result<Vec<u8>> {
+pub(crate) async fn unframe(
+    rx: &mut RecvStream,
+    max: usize,
+) -> Result<Vec<u8>> {
     let mut len = [0; 4];
     rx.read_exact(&mut len).await?;
     let len = u32::from_be_bytes(len) as usize;

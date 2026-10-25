@@ -5,6 +5,7 @@
 // User content only ever becomes text nodes; links are copied, not opened.
 
 import { inline, markdown } from "./markdown.js";
+import * as av from "./call.js";
 
 const T = window.__TAURI__;
 const invoke = T?.core?.invoke;
@@ -71,6 +72,18 @@ const ICONS = {
   clip: "M8 12.5 14 6.5a3 3 0 0 1 4.2 4.2l-7.6 7.6a5 5 0 0 1-7-7L11 3.8",
   file: "M6 3h8l4 4v14H6zM14 3v4h4",
   down: "M12 4v11M7 10l5 5 5-5M5 20h14",
+  ring: "M6 3h3l2 5-2 1.5a11 11 0 0 0 5.5 5.5L16 13l5 2v3a2 2 0 0 1-2 " +
+    "2C10.7 20 4 13.3 4 5a2 2 0 0 1 2-2",
+  hangup: "M3 14.5c5-5 13-5 18 0l-2.5 2.5-3.5-2v-2.5a12 12 0 0 0-6 0V15l-3.5 " +
+    "2z",
+  mic: "M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3M5 11a7 7 0 0 0 " +
+    "14 0M12 18v3",
+  micOff: "M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3M5 11a7 7 0 0 " +
+    "0 14 0M12 18v3M3 3l18 18",
+  cam: "M3 7h12v10H3zM15 10.5 21 7v10l-6-3.5",
+  camOff: "M3 7h12v10H3zM15 10.5 21 7v10l-6-3.5M3 3l18 18",
+  screen: "M3 4h18v12H3zM8 20h8M12 16v4",
+  speaker: "M4 9h4l5-4v14l-5-4H4zM16 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12",
 };
 
 function icon(name) {
@@ -84,8 +97,8 @@ function icon(name) {
   return svg;
 }
 
-const COLORS = ["#5865f2", "#3ba55c", "#faa61a", "#ed4245",
-  "#eb459e", "#747f8d", "#1abc9c", "#9b59b6"];
+const COLORS = ["#b44dff", "#ff2bd6", "#00b8d9", "#7c4dff",
+  "#ff4d8d", "#00c983", "#ff8a3d", "#d24dff"];
 const color = (id) => COLORS[parseInt(id.slice(0, 2), 16) % COLORS.length];
 
 function avatar(id, name, cls = "", online) {
@@ -383,6 +396,7 @@ function dmList() {
       (unread(d) && d.id !== S.sid ? " unread" : ""),
     onclick: () => select(d.id),
   }, avatar(d.with ?? d.id, d.name, "xs"), h("span", { class: "name" }, d.name),
+  d.channels.some((c) => c.call.length) && icon("speaker"),
   badge(d.id !== S.sid && mentions(d))));
 }
 
@@ -402,10 +416,17 @@ function channelList(s) {
       s.admin && h("button", {
         class: "gear", title: "Edit Channel",
         onclick: (e) => { e.stopPropagation(); editChannel(ch); },
-      }, icon("gear")));
-    }),
+      }, icon("gear")), ch.call.length > 0 && icon("speaker"));
+    }).flatMap((row, i) => [row, callers(s.channels[i].call)]),
   ];
 }
+
+/** Who is in a channel's call, under it. */
+const callers = (ids) => ids.length > 0 && h("div", { class: "callers" },
+  ids.map((id) => h("div", { class: "caller" },
+    avatar(id, isMe(id) ? S.me.name : nameOf(id), "xs"),
+    isMe(id) ? S.me.name : nameOf(id),
+    isMe(id) && !av.call.mic && icon("micOff"))));
 
 function renderUserPanel() {
   const me = S.me;
@@ -443,6 +464,7 @@ function renderHeader() {
   }
   $("members-btn").classList.toggle("hidden", !s || s.dm);
   $("empty").classList.toggle("hidden", !!s);
+  renderCall();
   put($("welcome"),
     s?.dm ? [avatar(s.with ?? s.id, s.name, "big"), h("h1", {}, s.name),
       h("p", {}, `The beginning of your messages with ${s.name}.`)]
@@ -467,6 +489,94 @@ function renderEmpty() {
       "Join with an invite"),
     h("p", { class: "note" }, "Already use irch elsewhere? ",
       h("span", { class: "link", onclick: linkFlow }, "Link this device"))));
+}
+
+// ---------- calls ----------
+
+const callOf = (sid, cid) =>
+  S.spaces.find((x) => x.id === sid)?.channels.find((c) => c.id === cid);
+const here = () =>
+  av.call.on?.space === S.sid && av.call.on?.channel === S.ch;
+
+async function ring() {
+  if (here()) return av.leave(rpc);
+  if (!av.supported()) return toast("Calls need a newer system web view", 1);
+  try {
+    await av.join(S.sid, S.ch, rpc);
+  } catch (e) {
+    toast(String(e?.message ?? e), true);
+    await av.leave(rpc);
+  }
+}
+
+async function camera(kind) {
+  try {
+    await av.video(av.call[kind] ? null : kind);
+  } catch (e) {
+    toast(String(e?.message ?? e), true);
+  }
+}
+
+const mute = () => {
+  av.call.mic = !av.call.mic;
+  renderCall();
+};
+
+const control = (ic, title, onclick, cls = "") =>
+  h("button", { title, onclick, class: cls }, icon(ic));
+
+function tile(id) {
+  const me = isMe(id);
+  const p = av.call.peers.get(id);
+  const live = me ? av.call.self : Date.now() - (p?.video ?? 0) < 3000;
+  const level = me ? av.call.level
+    : Date.now() - (p?.spoke ?? 0) < 300 ? p.level : 0;
+  const name = me ? S.me.name : nameOf(id);
+  return h("div", {
+    class: "tile" + (level > 0.02 ? " speaking" : "") +
+      (me && av.call.cam ? " mirror" : ""),
+  }, live ? (me ? av.call.self : p.canvas) : avatar(id, name, "big"),
+  h("span", { class: "who" }, name, me && !av.call.mic && icon("micOff")));
+}
+
+function renderCall() {
+  const on = av.call.on;
+  const ch = on && callOf(on.space, on.channel);
+  if (ch) av.keep(ch.call);
+  const btn = $("call-btn");
+  btn.classList.toggle("hidden", !chan());
+  btn.classList.toggle("live", here());
+  btn.title = here() ? "Leave call" : "Join call";
+  put(btn, icon(here() ? "hangup" : "ring"));
+  $("call").classList.toggle("hidden", !here());
+  const c = av.call;
+  if (here()) {
+    put($("call"), h("div", { class: "tiles" }),
+      h("div", { class: "controls" },
+        control(c.mic ? "mic" : "micOff", c.mic ? "Mute" : "Unmute", mute,
+          c.mic ? "" : "off"),
+        control(c.cam ? "cam" : "camOff", "Camera", () => camera("cam"),
+          c.cam ? "on" : ""),
+        av.canShare() && control("screen", "Share your screen",
+          () => camera("screen"), c.screen ? "on" : ""),
+        control("hangup", "Leave call", () => av.leave(rpc), "hangup")));
+    renderTiles();
+  }
+  const s = on && S.spaces.find((x) => x.id === on.space);
+  put($("voice"), on && h("div", { class: "voice" },
+    h("div", { class: "names", onclick: () => select(on.space, on.channel) },
+      h("b", {}, "Voice connected"),
+      h("small", {}, s?.dm ? s.name : `#${ch?.name ?? "…"} · ${s?.name}`)),
+    control(c.mic ? "mic" : "micOff", c.mic ? "Mute" : "Unmute", mute,
+      "panel-btn" + (c.mic ? "" : " off")),
+    control("hangup", "Leave call", () => av.leave(rpc), "panel-btn off")));
+}
+
+/** Just the tiles, often: controls stay put under the pointer. */
+function renderTiles() {
+  const on = av.call.on;
+  const tiles = here() && $("call").querySelector(".tiles");
+  if (tiles) put(tiles, (callOf(on.space, on.channel)?.call ?? []).map(tile));
 }
 
 // ---------- rendering: messages ----------
@@ -907,7 +1017,11 @@ function modal(build) {
     };
     d.replaceChildren(build(finish));
     d.onclose = () => finish(null);
-    d.onclick = (e) => e.target === d && finish(null);
+    // A click outside closes; never return false here, which would
+    // cancel every click inside (checkboxes would not toggle).
+    d.onclick = (e) => {
+      if (e.target === d) finish(null);
+    };
     d.showModal();
     d.querySelector("input:not([readonly]),textarea")
       ?.focus({ preventScroll: true });
@@ -1079,21 +1193,11 @@ async function banFlow(m, on) {
 function settings() {
   modal((finish) => {
     const name = h("input", { type: "text", value: S.me.name, maxLength: 64 });
-    const invisible = h("input", { type: "checkbox", checked: S.me.invisible });
-    const bg = android &&
-      h("input", { type: "checkbox", checked: store.get("bg") === "1" });
     const storage = h("input",
       { type: "text", placeholder: "irch:host:…", maxLength: 8192 });
     const save = async () => {
       const n = name.value.trim();
       if (n && n !== S.me.name) await quiet(call("set_name", { name: n }));
-      if (invisible.checked !== S.me.invisible) {
-        await quiet(call("set_invisible", { on: invisible.checked }));
-      }
-      if (bg && bg.checked !== (store.get("bg") === "1")) {
-        store.set("bg", bg.checked ? "1" : "0");
-        await quiet(invoke("background", { on: bg.checked }));
-      }
       const code = storage.value.trim();
       if (code) await quiet(call("add_storage", { code })
         .then(() => toast("Your spaces now also live on that storage node")));
@@ -1103,8 +1207,11 @@ function settings() {
       finish(true);
     };
     name.addEventListener("keydown", (e) => e.key === "Enter" && save());
-    const sw = (input, title, small) => h("label", { class: "switch" },
-      h("span", {}, title, h("small", {}, small)), input);
+    // Switches act at once, like the eye in the user panel.
+    const sw = (title, small, checked, change) => h("label",
+      { class: "switch" }, h("span", {}, title, h("small", {}, small)),
+      h("input", { type: "checkbox", checked,
+        onchange: (e) => change(e.target.checked) }), h("i"));
     return h("div", {},
       h("div", { class: "m-body" },
         h("h2", {}, "My Account"),
@@ -1115,10 +1222,16 @@ function settings() {
             readOnly: true }),
           h("button", { class: "btn grey",
             onclick: () => copy(S.me.id, "ID copied") }, "Copy")),
-        sw(invisible, "Invisible", "Send no presence or typing signals."),
-        bg && sw(bg, "Stay connected in the background",
-          "Receive messages and mentions while irch is closed. No server " +
-          "can wake it, so it keeps running. Uses more battery."),
+        sw("Invisible", "Others see you offline; typing stays private.",
+          S.me.invisible, (on) => setInvisible(on)),
+        android && sw("Stay connected in the background",
+          "Messages and mentions keep arriving while irch is in the " +
+          "background (swiping it away quits). No server can wake it, so " +
+          "it keeps running, and uses more battery.",
+          store.get("bg") === "1", (on) => {
+            store.set("bg", on ? "1" : "0");
+            quiet(invoke("background", { on }));
+          }),
         h("label", {}, "Storage node"), storage,
         h("p", { class: "note" }, "Paste the code `irch --serve` prints " +
           "on an always-on machine: it keeps your spaces' ciphertext, " +
@@ -1266,8 +1379,10 @@ async function leaveSpace() {
   schedule("side");
 }
 
-async function toggleInvisible() {
-  await quiet(call("set_invisible", { on: !S.me.invisible }));
+const toggleInvisible = () => setInvisible(!S.me.invisible);
+
+async function setInvisible(on) {
+  await quiet(call("set_invisible", { on }));
   S.me = await rpc("me");
   renderUserPanel();
   schedule("members");
@@ -1317,6 +1432,10 @@ function wire() {
   $("menu-btn").append(icon("menu"));
   $("menu-btn").onclick = () => document.body.classList.toggle("drawer");
   $("members-btn").append(icon("users"));
+  $("call-btn").onclick = ring;
+  av.call.changed = renderCall;
+  // Tiles follow who speaks and whose video still arrives.
+  setInterval(renderTiles, 400);
   const showMembers = (on) => {
     $("members").classList.toggle("hidden-panel", !on);
     $("members-btn").classList.toggle("on", on);
@@ -1453,6 +1572,8 @@ async function start() {
       }
     } else if (e.t === "presence" && e.space === S.sid) {
       members();
+    } else if (e.t === "call") {
+      schedule("side");
     } else if (e.t === "typing" && !isMe(e.user)) {
       const k = `${e.space}|${e.channel}`;
       if (!S.typing.has(k)) S.typing.set(k, new Map());

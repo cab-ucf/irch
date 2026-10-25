@@ -1,9 +1,10 @@
 # irch
 
 Private, peer-to-peer community chat: spaces with channels, roles,
-replies, reactions, mentions and direct messages, shaped like Discord,
-with no server. A small Rust core over [iroh](https://iroh.computer),
-one terminal client, one app for the desktop and Android.
+replies, reactions, mentions, direct messages and voice and video calls,
+shaped like Discord, with no server. A small Rust core over
+[iroh](https://iroh.computer), one terminal client, one app for the
+desktop and Android.
 
 ```sh
 cargo run --release -p irch                 # terminal; /help lists commands
@@ -14,19 +15,22 @@ cd app && cargo tauri android build --apk   # Android (SDK and NDK installed)
 ```
 
 Linux needs `libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev
-libjavascriptcoregtk-4.1-dev` for the app. CI builds an APK on every
-pull request, runs it on an emulator, and keeps the terminal and desktop
-binaries for Linux, macOS and Windows as artifacts.
+libjavascriptcoregtk-4.1-dev` for the app, and
+`gstreamer1.0-plugins-base` and `-good` for calls. CI builds an APK on
+every pull request, runs it on an emulator, and keeps the terminal and
+desktop binaries for Linux, macOS and Windows as artifacts.
 
 ## How it works
 
 ```text
 op     = Profile | Rename | Channel | Role | Post | Edit | React | Rekey
-       | Back | Host | Knock | Joined | Left | Storage    (Typing, Here: live)
+       | Back | Host | Knock | Joined | Left | Storage
+       | Typing | Here | Call | Gone              (live: gossiped, not kept)
 env    = { epoch tag, time, XChaCha20-Poly1305(author ‖ device ‖ sig ‖ op) }
 space  = a grow-only set of envs          state = a deterministic fold of it
 live   : iroh-gossip, one topic per space
 repair : set reconciliation on every new neighbor, one QUIC stream
+calls  : QUIC between callers; audio as datagrams, video a stream per GOP
 disk   : one append-only log of envs per space; nothing else to migrate
 ```
 
@@ -64,6 +68,14 @@ disk   : one append-only log of envs per space; nothing else to migrate
 - **Files** (up to 25 MiB) are sealed under a fresh key that travels only
   inside the post; their ciphertext is named by its BLAKE3 hash, fetched
   from whoever has it and kept by your storage nodes too.
+- **Calls are a mesh.** Everyone in a channel's call connects straight to
+  everyone else in it: to devices a member's signed `Call` names, which
+  must then sign as that member. The page captures and codes (WebCodecs:
+  Opus, VP8 or H.264); the core only carries frames: audio as QUIC
+  datagrams, never resent; video as one stream per group of pictures,
+  each outranking the last, as in Media over QUIC, so a peer that falls
+  behind skips to the newest keyframe instead of lagging. Nothing of a
+  call is stored.
 
 Sync sends per-day bucket fingerprints (BLAKE3 of the sorted ids, so
 colliding sets cannot be crafted), then ids of the days that differ, then
@@ -92,7 +104,9 @@ Ctrl-N/P switches channel; PgUp/PgDn scrolls.
 
 Desktop and phone: `+` creates or joins a space; the paperclip, a drop or
 a paste attaches files; hover a message to react, reply, edit or delete;
-click a member to message, ban or promote them. Mentions and direct
+click a member to message, ban or promote them. The phone in a channel's
+header joins its call; mute, camera, screen and hang up sit under the
+tiles (the terminal shows how many are in one: 🔊2). Mentions and direct
 messages notify while irch is out of sight.
 Ctrl+K switches, Alt+↑/↓ moves between channels, ↑ edits your last
 message. On Android, Back closes the topmost thing, then sends irch to the
@@ -113,6 +127,11 @@ push server to wake a peer-to-peer app).
 - Authors date their own ops, at most a day ahead. Whoever ever held an
   epoch's key can still add ops dated inside it: a banned member's stay
   hidden, but a demoted admin's backdated bans and renames stand.
+- Calls: every caller sends to every other, so a handful of people, not
+  a stage. QUIC encrypts them between the two devices (classical); the
+  space's key does not. Invisible hides you everywhere but in a call you
+  join. A Mac needs Safari 26's WebKit (WebCodecs audio); Android
+  cannot share its screen.
 - A storage code is a password: whoever has it can make the node store
   anything. Members are trusted not to flood. Unaudited.
 
@@ -121,10 +140,13 @@ push server to wake a peer-to-peer app).
 Quiet (Tor and OrbitDB), Keet (Hypercore, closed source), Briar, Cwtch,
 SimpleX and Jami groups, Matrix's peer-to-peer experiments, and
 [p2panda](https://p2panda.org), whose spaces and DCGKA group encryption
-are the closest research. irch's niche: Discord's shape on a core small
-enough to read (`core/`, about 2,200 lines), with keys that change on
-bans, storage that never sees plaintext, and the same code in a
-terminal, on desktops and on Android.
+are the closest research. Calls take their shape from n0's
+[iroh-live](https://github.com/n0-computer/iroh-live) (Media over QUIC
+on iroh), without its native codec stack: the page has WebCodecs.
+irch's niche: Discord's shape on a core small enough to read (`core/`,
+about 2,500 lines), with keys that change on bans, storage that never
+sees plaintext, calls with no server, and the same code in a terminal,
+on desktops and on Android.
 
 | | |
 |---|---|

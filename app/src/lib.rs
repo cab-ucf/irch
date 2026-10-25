@@ -4,10 +4,13 @@
 mod android;
 
 use irch_core::{Config, File, Id, Net, Node, api};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tauri::ipc::{Channel, InvokeBody, InvokeResponseBody as Body, Request};
+use tauri::webview::{PermissionKind as Kind, PermissionResponse};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{broadcast::error::RecvError, watch};
 
@@ -78,6 +81,40 @@ async fn save(
     Ok(f.display().to_string())
 }
 
+/// One encoded frame from the page, to everyone in our call. Android's IPC
+/// carries no bytes: there they arrive as a JSON array of numbers.
+#[tauri::command]
+async fn media(s: State<'_, App>, req: Request<'_>) -> Result<(), String> {
+    let n = node(&s).await?;
+    match req.body() {
+        InvokeBody::Raw(f) => n.send_media(f),
+        InvokeBody::Json(v) => {
+            n.send_media(&Vec::deserialize(v).map_err(|e| e.to_string())?)
+        }
+    }
+    Ok(())
+}
+
+/// Frames from our call, to the page: the sender's id, then the frame.
+#[tauri::command]
+async fn tune(s: State<'_, App>, to: Channel<Body>) -> Result<(), String> {
+    let mut rx = node(&s).await?.media();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok((who, f)) => {
+                    if to.send(Body::Raw([&who.0[..], &f].concat())).is_err() {
+                        break;
+                    }
+                }
+                Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
+    Ok(())
+}
+
 /// A QR code, as SVG, for codes shown to a camera.
 #[tauri::command]
 fn qr(text: String) -> Result<String, String> {
@@ -109,20 +146,38 @@ async fn background(app: AppHandle, on: bool) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Calls ask for the camera, the microphone or the screen only after
+    // a click on irch's own page; the operating system may still ask too.
     let b = tauri::Builder::default()
-        .plugin(tauri_plugin_clipboard_manager::init());
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .on_permission_request(|_, kind| match kind {
+            Kind::Camera | Kind::Microphone | Kind::DisplayCapture => {
+                PermissionResponse::Allow
+            }
+            _ => PermissionResponse::Default,
+        });
     #[cfg(not(target_os = "android"))]
     let b = b.plugin(tauri_plugin_notification::init());
     #[cfg(target_os = "android")]
     let b = b.plugin(android::init());
     let b = b.setup(|app| {
         app.manage(App(watch::channel(None).0));
+        // WebKitGTK keeps getUserMedia off unless asked.
+        #[cfg(target_os = "linux")]
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.with_webview(|w| {
+                use webkit2gtk::{SettingsExt, WebViewExt};
+                if let Some(s) = w.inner().settings() {
+                    s.set_enable_media_stream(true);
+                }
+            });
+        }
         let h = app.handle().clone();
         tauri::async_runtime::spawn(async move { start(&h, None).await });
         Ok(())
     });
     let b = b.invoke_handler(tauri::generate_handler![
-        irch, link, qr, save, share, background
+        irch, link, qr, save, share, background, media, tune
     ]);
     let app = b.build(tauri::generate_context!()).expect("tauri builds");
     app.run(|app, e| {

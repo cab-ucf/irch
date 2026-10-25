@@ -288,7 +288,7 @@ impl App {
                 self.status = "your spaces now also live there".into();
             }
             "invisible" => {
-                n.set_invisible(!n.invisible());
+                n.set_invisible(!n.invisible()).await;
                 let on = if n.invisible() { "invisible" } else { "visible" };
                 self.status = on.into();
             }
@@ -346,7 +346,7 @@ impl App {
             Ok((s, c)) => format!(" {} ", self.channel_name(&s, &c)),
             Err(_) => " /help ".into(),
         };
-        let b = Block::bordered().title(title);
+        let b = panel(title);
         f.render_widget(Paragraph::new(self.input.as_str()).block(b), input);
         let x = input.x + 1 + self.input.chars().count() as u16;
         f.set_cursor_position((x.min(input.right() - 2), input.y + 1));
@@ -356,7 +356,7 @@ impl App {
         );
         if let Some(text) = &self.notice {
             let area = center(f.area(), 74, 18);
-            let b = Block::bordered().title(" esc to close ");
+            let b = panel(" esc to close ");
             let p = Paragraph::new(text.as_str()).wrap(Wrap { trim: false });
             f.render_widget(Clear, area);
             f.render_widget(p.block(b), area);
@@ -390,7 +390,7 @@ impl App {
                 let peers = self.n.peers(&s);
                 let dot = if peers > 0 { "●" } else { "○" };
                 let name = format!("{dot} {}", self.space_name(&s));
-                lines.push(Line::from(name).bold());
+                lines.push(Line::from(name).bold().magenta());
                 last = Some(s);
             }
             let Some(c) = c else { continue };
@@ -399,9 +399,14 @@ impl App {
             if mentions > 0 {
                 l += &format!(" ({mentions})");
             }
+            // Calls happen in the app; here, who is in one.
+            let calls = self.n.calls(&s).get(&c).map_or(0, Vec::len);
+            if calls > 0 {
+                l += &format!(" 🔊{calls}");
+            }
             let mut style = Style::new();
             if Some((s, Some(c))) == self.at {
-                style = style.reversed();
+                style = style.black().on_magenta();
             } else if unread > 0 {
                 style = style.bold().white();
             } else {
@@ -409,7 +414,7 @@ impl App {
             }
             lines.push(Line::styled(l, style));
         }
-        let b = Block::bordered().title(" irch ");
+        let b = panel(" irch ");
         f.render_widget(Paragraph::new(lines).block(b), area);
     }
 
@@ -419,7 +424,7 @@ impl App {
                       /join CODE enters one.\n/link puts you on another \
                       device. /help lists everything.";
             let p = Paragraph::new(hi).wrap(Wrap { trim: false });
-            return f.render_widget(p.block(Block::bordered()), area);
+            return f.render_widget(p.block(panel("")), area);
         };
         let msgs = self.n.view(&s, |st| st.messages(&c, None, 300));
         let lines: Vec<Line> = msgs
@@ -431,7 +436,7 @@ impl App {
         let (w, h) =
             (area.width.saturating_sub(2), area.height.saturating_sub(2));
         let top = (p.line_count(w) as u16).saturating_sub(h + self.scroll);
-        let b = Block::bordered().title(format!(" {} ", self.space_name(&s)));
+        let b = panel(format!(" {} ", self.space_name(&s)));
         f.render_widget(p.scroll((top, 0)).block(b), area);
     }
 
@@ -480,7 +485,7 @@ impl App {
 
     fn members(&self, f: &mut Frame, area: Rect) {
         let Ok(s) = self.space() else {
-            return f.render_widget(Block::bordered(), area);
+            return f.render_widget(panel(""), area);
         };
         let on = self.n.online(&s);
         let ms = self.n.view(&s, |st| st.members()).unwrap_or_default();
@@ -496,7 +501,7 @@ impl App {
                 if on.contains(&m.id) { l.white() } else { l.dark_gray() }
             })
             .collect();
-        let b = Block::bordered().title(format!(" {} online ", on.len()));
+        let b = panel(format!(" {} online ", on.len()));
         f.render_widget(Paragraph::new(lines).block(b), area);
     }
 
@@ -525,8 +530,8 @@ fn size(n: u64) -> String {
 }
 
 fn hue(id: &Id) -> Color {
-    let c =
-        [Color::Green, Color::Yellow, Color::Magenta, Color::Blue, Color::Red];
+    use Color::*;
+    let c = [Magenta, LightMagenta, Cyan, LightBlue, LightRed];
     c[id.0[0] as usize % c.len()]
 }
 
@@ -545,4 +550,9 @@ fn osc52(text: &str) {
     let b64 = data_encoding::BASE64.encode(text.as_bytes());
     let mut out = std::io::stdout();
     let _ = write!(out, "\x1b]52;c;{b64}\x07").and_then(|_| out.flush());
+}
+
+/// Neon edges, as in the app.
+fn panel<'a>(title: impl Into<Line<'a>>) -> Block<'a> {
+    Block::bordered().border_style(Color::Magenta).title(title)
 }

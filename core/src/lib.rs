@@ -3,6 +3,7 @@
 //! deterministic fold of that set; peers reconcile sets over iroh.
 
 pub mod api;
+mod call;
 pub mod crypto;
 mod node;
 pub mod op;

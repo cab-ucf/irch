@@ -2,6 +2,7 @@
 //! space. Every op, local or remote, takes the same path: open with a
 //! known epoch key, check, append to the space's log, fold, notify.
 
+use crate::call::{self, Call};
 use crate::crypto::{Key, Me, kem_open, kem_seal, rand};
 use crate::op::{self, Env, File, Invite, Op, Role, Signed, code, tag, uncode};
 use crate::state::{Message, State};
@@ -33,6 +34,8 @@ const DAY: u64 = 86_400_000;
 const GOSSIP_MAX: usize = 128 << 10;
 const BEAT: Duration = Duration::from_secs(60);
 const ONLINE: Duration = Duration::from_secs(150);
+// Someone in a call says so every 15 s.
+const CALLER: Duration = Duration::from_secs(45);
 pub const MAX_TEXT: usize = 4000;
 pub const MAX_NAME: usize = 64;
 pub const MAX_FILE: usize = 25 << 20;
@@ -71,6 +74,7 @@ pub enum Event {
     Typing { space: Id, channel: Ch, user: Id },
     Presence { space: Id },
     Synced { space: Id, count: usize },
+    Call { space: Id },
 }
 
 /// This device's own state, never shared.
@@ -92,6 +96,8 @@ pub struct Space {
     tx: Mutex<Option<GossipSender>>,
     nbrs: Mutex<HashSet<EndpointId>>,
     seen: Mutex<HashMap<Id, Instant>>,
+    // Who is in which channel's call, on which device, last heard when.
+    calls: Mutex<HashMap<Id, (Ch, EndpointId, Instant)>>,
     busy: Mutex<HashSet<EndpointId>>,
     task: OnceLock<AbortOnDropHandle<()>>,
 }
@@ -347,6 +353,8 @@ pub struct Node {
     clock: AtomicU64,
     invisible: AtomicBool,
     serve: Option<[u8; 16]>,
+    call: Mutex<Option<Call>>,
+    media: call::Media,
 }
 
 /// Serves sync and blobs; the ALPN says which.
@@ -357,9 +365,13 @@ impl ProtocolHandler for Proto {
     async fn accept(&self, c: Connection) -> Result<(), AcceptError> {
         let gone = || AcceptError::from_err(std::io::Error::other("closing"));
         let n = self.0.upgrade().ok_or_else(gone)?;
-        let r = match c.alpn() == sync::ALPN {
-            true => sync::respond(&n, &c).await,
-            false => n.give(&c).await,
+        let r = match c.alpn() {
+            sync::ALPN => sync::respond(&n, &c).await,
+            call::ALPN => {
+                n.answer(c).await;
+                Ok(())
+            }
+            _ => n.give(&c).await,
         };
         r.map_err(|e| {
             AcceptError::from_err(std::io::Error::other(e.to_string()))
@@ -474,11 +486,14 @@ impl Node {
             events: broadcast::channel(1024).0,
             clock: AtomicU64::new(0),
             serve,
+            call: Mutex::new(None),
+            media: broadcast::channel(512).0,
         });
         let router = Router::builder(n.ep.clone())
             .accept(iroh_gossip::ALPN, n.gossip.clone())
             .accept(sync::ALPN, Proto(Arc::downgrade(&n)))
             .accept(BLOB, Proto(Arc::downgrade(&n)))
+            .accept(call::ALPN, Proto(Arc::downgrade(&n)))
             .spawn();
         let _ = n.router.set(router);
         n.persist();
@@ -605,10 +620,14 @@ impl Node {
         self.invisible.load(Relaxed)
     }
 
-    pub fn set_invisible(&self, on: bool) {
+    /// Peers see the change at once: gone, or here again.
+    pub async fn set_invisible(&self, on: bool) {
         self.invisible.store(on, Relaxed);
         lock(&self.local).invisible = on;
         self.persist();
+        for sp in self.all() {
+            self.signal(&sp, if on { Op::Gone } else { Op::Here }).await;
+        }
     }
 
     fn since(&self, id: &Id, ch: &Ch) -> u64 {
@@ -683,6 +702,7 @@ impl Node {
             tx,
             nbrs,
             seen: Mutex::default(),
+            calls: Mutex::default(),
             busy: Mutex::default(),
             task: OnceLock::new(),
         });
@@ -1078,15 +1098,162 @@ impl Node {
         }
     }
 
+    /// Live ops; invisible, only leaving and calls (joining one shows).
     async fn signal(&self, sp: &Space, op: Op) {
         let Some(inv) = &sp.inv else { return };
         let (key, locked) = lock(&sp.book).key(inv);
-        if locked || self.invisible() {
+        let quiet = !matches!(op, Op::Call { .. } | Op::Gone);
+        if locked || quiet && self.invisible() {
             return;
         }
         if let Some(tx) = sp.tx() {
             let raw = self.seal(sp, &key, self.tick(), op).1;
             let _ = tx.broadcast(raw.into()).await;
+        }
+    }
+
+    /// Join a channel's call (leaving any other), or with `None` leave.
+    pub async fn call(self: &Arc<Self>, to: Option<(Id, Ch)>) -> Result<()> {
+        let old = lock(&self.call).take();
+        if let Some(c) = old {
+            let sp = self.get(&c.space);
+            sp.iter().for_each(|sp| self.emit(Event::Call { space: sp.id }));
+            if let Ok(sp) = sp {
+                self.signal(&sp, Op::Call { channel: None }).await;
+            }
+        }
+        let Some((id, ch)) = to else { return Ok(()) };
+        let sp = self.get(&id)?;
+        ensure!(!self.locked(&id), LOCKED);
+        let run = u64::from_le_bytes(rand());
+        *lock(&self.call) = Some(Call::new(id, ch, run));
+        self.signal(&sp, Op::Call { channel: Some(ch) }).await;
+        self.emit(Event::Call { space: id });
+        tokio::spawn(self.clone().ring(run));
+        Ok(())
+    }
+
+    /// The call we are in.
+    pub fn in_call(&self) -> Option<(Id, Ch)> {
+        lock(&self.call).as_ref().map(|c| (c.space, c.channel))
+    }
+
+    /// Who is in each channel's call, us included.
+    pub fn calls(&self, id: &Id) -> HashMap<Ch, Vec<Id>> {
+        let Ok(sp) = self.get(id) else { return HashMap::new() };
+        let mut v: HashMap<Ch, Vec<Id>> = HashMap::new();
+        for (d, ch, u) in self.callers(&sp, None) {
+            if d != self.ep.id() {
+                v.entry(ch).or_default().push(u);
+            }
+        }
+        if let Some((_, ch)) = self.in_call().filter(|c| c.0 == *id) {
+            v.entry(ch).or_default().insert(0, self.id());
+        }
+        v
+    }
+
+    /// One encoded frame from the page, to everyone in our call.
+    pub fn send_media(&self, f: &[u8]) {
+        lock(&self.call).iter_mut().for_each(|c| c.send(f));
+    }
+
+    /// Frames from everyone else in our call.
+    pub fn media(&self) -> broadcast::Receiver<(Id, Vec<u8>)> {
+        self.media.subscribe()
+    }
+
+    /// Who says they are in a call (`ch`'s only, if given), on which
+    /// device: members not banned, heard from lately.
+    fn callers(&self, sp: &Space, ch: Option<Ch>) -> Vec<(EndpointId, Ch, Id)> {
+        // Keys moved on without us (a ban, say): out of every call.
+        if self.locked(&sp.id) {
+            return vec![];
+        }
+        let calls = lock(&sp.calls).clone();
+        let ok = |u: &Id| self.view(&sp.id, |s| s.role(u) != Role::Banned);
+        let live = |c: &Ch, t: &Instant| {
+            t.elapsed() < CALLER && ch.is_none_or(|ch| ch == *c)
+        };
+        let v = calls
+            .into_iter()
+            .filter(|(u, (c, _, t))| live(c, t) && ok(u) == Some(true));
+        v.map(|(u, (c, d, _))| (d, c, u)).collect()
+    }
+
+    /// While in a call: say so every 15 s, and keep one connection to each
+    /// device in it (the lower id dials) and none to anyone else.
+    async fn ring(self: Arc<Self>, run: u64) {
+        let mut t = tokio::time::interval(Duration::from_secs(1));
+        for i in 1u64.. {
+            t.tick().await;
+            let cur = {
+                let c = lock(&self.call);
+                c.as_ref()
+                    .filter(|c| c.run == run)
+                    .map(|c| (c.space, c.channel))
+            };
+            let Some((id, ch)) = cur else { return };
+            let Ok(sp) = self.get(&id) else { return };
+            if i % 15 == 0 {
+                self.signal(&sp, Op::Call { channel: Some(ch) }).await;
+            }
+            let want = self.callers(&sp, Some(ch));
+            let dial: HashSet<_> = {
+                let mut c = lock(&self.call);
+                let Some(c) = c.as_mut().filter(|c| c.run == run) else {
+                    return;
+                };
+                c.retain(|d| want.iter().any(|w| w.0 == *d));
+                let me = self.ep.id();
+                let new = want.into_iter().map(|w| w.0);
+                new.filter(|d| *d > me && !c.has(d)).collect()
+            };
+            for d in dial {
+                let hi = async {
+                    let conn = self.ep.connect(d, call::ALPN).await.ok()?;
+                    let user = self.hello(&conn).await?;
+                    Some((user, conn))
+                };
+                let ten = Duration::from_secs(10);
+                if let Ok(Some((user, conn))) =
+                    tokio::time::timeout(ten, hi).await
+                {
+                    self.admit(user, conn);
+                }
+            }
+        }
+    }
+
+    /// A device dialing into our call, if someone says it is in it.
+    async fn answer(&self, conn: Connection) {
+        let Some((id, ch)) = self.in_call() else { return };
+        let Ok(sp) = self.get(&id) else { return };
+        let d = conn.remote_id();
+        if self.callers(&sp, Some(ch)).iter().any(|w| w.0 == d)
+            && let Some(user) = self.hello(&conn).await
+        {
+            self.admit(user, conn);
+        }
+    }
+
+    async fn hello(&self, conn: &Connection) -> Option<Id> {
+        call::hello(conn, &self.me.user, self.ep.id()).await
+    }
+
+    /// Into our call: a device whose user proved it theirs and said, from
+    /// it, that they are in the call.
+    fn admit(&self, user: Id, conn: Connection) {
+        let Some((id, ch)) = self.in_call() else { return };
+        let Ok(sp) = self.get(&id) else { return };
+        if !self.callers(&sp, Some(ch)).contains(&(conn.remote_id(), ch, user))
+        {
+            return;
+        }
+        let mut c = lock(&self.call);
+        if let Some(c) = c.as_mut().filter(|c| (c.space, c.channel) == (id, ch))
+        {
+            c.add(user, conn, self.media.clone());
         }
     }
 
@@ -1361,11 +1528,31 @@ impl Node {
         if s.ts.abs_diff(now()) > 120_000 {
             return;
         }
-        if sp.saw(s.author) {
+        let gone = s.op == Op::Gone;
+        if gone && lock(&sp.seen).remove(&s.author).is_some()
+            || !gone && sp.saw(s.author)
+        {
             self.emit(Event::Presence { space: sp.id });
         }
-        if let Op::Typing { channel } = s.op {
-            self.emit(Event::Typing { space: sp.id, channel, user: s.author });
+        match s.op {
+            Op::Typing { channel } => {
+                let user = s.author;
+                self.emit(Event::Typing { space: sp.id, channel, user });
+            }
+            Op::Call { channel } => {
+                let mut c = lock(&sp.calls);
+                let was = match channel {
+                    Some(ch) => {
+                        c.insert(s.author, (ch, s.device, Instant::now()))
+                    }
+                    None => c.remove(&s.author),
+                };
+                drop(c);
+                if was.map(|w| w.0) != channel {
+                    self.emit(Event::Call { space: sp.id });
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1384,6 +1571,13 @@ impl Node {
     }
 
     pub async fn shutdown(&self) {
+        let call = lock(&self.call).take();
+        if let Some(sp) = call.and_then(|c| self.get(&c.space).ok()) {
+            self.signal(&sp, Op::Call { channel: None }).await;
+        }
+        for sp in self.all() {
+            self.signal(&sp, Op::Gone).await;
+        }
         self.spaces.write().unwrap_or_else(|e| e.into_inner()).clear();
         if let Some(r) = self.router.get() {
             let _ = r.shutdown().await;

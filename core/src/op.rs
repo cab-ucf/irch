@@ -40,12 +40,18 @@ pub enum Op {
     // Live only: never stored, synced or folded.
     Typing { channel: Ch },
     Here,
+    // In a channel's call (or out of any); offline (invisible, or quit).
+    Call { channel: Option<Ch> },
+    Gone,
 }
 
 impl Op {
     /// Gossip only: never stored, synced or folded.
     pub fn live(&self) -> bool {
-        matches!(self, Op::Typing { .. } | Op::Here)
+        matches!(
+            self,
+            Op::Typing { .. } | Op::Here | Op::Call { .. } | Op::Gone
+        )
     }
 }
 

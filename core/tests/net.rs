@@ -3,6 +3,7 @@
 use irch_core::{Ch, Config, Event, Id, Invite, Net, Node, Op};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::broadcast::Receiver;
 
 fn dir(name: &str) -> std::path::PathBuf {
     let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
@@ -321,4 +322,48 @@ async fn attachments_live_on_storage_too() {
     c.join(&code).await.unwrap();
     until("c sees the file", || first(&c).is_some()).await;
     assert_eq!(c.file(&id, &f).await.unwrap(), data, "fetched from storage");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn calls_carry_frames_between_members_only() {
+    let (a, b) = (node("a").await, node("b").await);
+    let id = a.create("home").await.unwrap();
+    let ch = general(&a, &id);
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let keyed = || a.view(&id, |s| s.kem(&b.id()).is_some()) == Some(true);
+    until("b's key", keyed).await;
+    let (mut at_a, mut at_b) = (a.media(), b.media());
+    a.call(Some((id, ch))).await.unwrap();
+    b.call(Some((id, ch))).await.unwrap();
+    let n = |x: &Node| x.calls(&id).get(&ch).map_or(0, Vec::len);
+    until("both in the call", || n(&a) == 2 && n(&b) == 2).await;
+    // Video goes in groups, from a keyframe; audio as datagrams.
+    let hear = async |from: &Arc<Node>, rx: &mut Receiver<_>, tries| {
+        for _ in 0..tries {
+            from.send_media(&[2, 9]);
+            from.send_media(&[1, 8]);
+            from.send_media(&[0, 7]);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let mut got = vec![];
+            while let Ok((who, f)) = rx.try_recv() {
+                got.push((who, f));
+            }
+            if got.iter().any(|(w, f)| *w == from.id() && f == &[0, 7])
+                && got.iter().any(|(w, f)| *w == from.id() && f == &[1, 8])
+            {
+                return true;
+            }
+        }
+        false
+    };
+    assert!(hear(&a, &mut at_b, 200).await, "b hears a");
+    assert!(hear(&b, &mut at_a, 200).await, "a hears b");
+
+    a.ban(&id, &b.id(), true).await.unwrap();
+    until("b out of a's call", || n(&a) == 1).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    while at_a.try_recv().is_ok() {}
+    assert!(!hear(&b, &mut at_a, 40).await, "a banned member is unheard");
+    a.call(None).await.unwrap();
+    assert!(a.calls(&id).is_empty() && a.in_call().is_none());
 }

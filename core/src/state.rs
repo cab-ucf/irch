@@ -138,7 +138,9 @@ impl State {
             Op::Back { .. }
             | Op::Knock { .. }
             | Op::Typing { .. }
-            | Op::Here => (false, false),
+            | Op::Here
+            | Op::Call { .. }
+            | Op::Gone => (false, false),
             op => {
                 let new = self.control.insert(at, (s.author, op)).is_none();
                 (new, new)
