@@ -770,43 +770,91 @@ function replyRef(m) {
       : h("span", {}, "Original message was deleted"));
 }
 
+// Block and inline tags a message may make: anything else is a span.
+const TAGS = new Set(("p h1 h2 h3 h4 h5 h6 ul ol li blockquote strong em s " +
+  "table thead tbody tr th td").split(" "));
+const LANG = { rs: "rust", py: "python", js: "javascript", ts: "typescript",
+  sh: "bash", shell: "bash", zsh: "bash", yml: "yaml", tex: "latex",
+  "c++": "cpp", html: "markup", xml: "markup", svg: "markup", kt: "kotlin",
+  rb: "ruby", jl: "julia", dockerfile: "docker", make: "makefile" };
+
 function content(text, edited) {
   const div = h("div", { class: "content" });
-  for (const b of markdown(text)) {
-    if (b.t === "pre") div.append(h("pre", {}, h("code", {}, b.v)));
-    else if (b.t === "quote") {
-      div.append(h("div", { class: "quote" }, inl(b.c)));
-    }
-    else div.append(h("div", {}, b.c.length ? inl(b.c) : h("br")));
-  }
+  render(markdown(text), div);
   if (edited) {
-    const last = div.lastChild;
-    (last?.tagName === "DIV" ? last : div)
+    const last = div.lastElementChild;
+    (last?.tagName === "P" ? last : div)
       .append(h("span", { class: "edited", title: "edited" }, "(edited)"));
   }
   return div;
 }
 
-function inl(nodes) {
-  return nodes.map((n) => {
-    switch (n.t) {
-      case "text": return n.v;
-      case "code": return h("code", {}, n.v);
-      case "link": return h("span", {
-        class: "link", title: "Copy link (irch never opens links itself)",
-        onclick: () => copy(n.v, "Link copied"),
-      }, n.v);
-      case "mention": return h("span", { class: "mention" }, n.v);
-      case "spoiler": {
-        const s = h("span", { class: "spoiler", title: "Spoiler" }, inl(n.c));
-        s.addEventListener("click", () => s.classList.add("shown"));
-        return s;
-      }
-      default:
-        return h({ b: "strong", i: "em", u: "u", s: "s" }[n.t], {}, inl(n.c));
-    }
-  });
+/** markdown-it's tokens as elements; text only ever as text nodes. */
+function render(tokens, root) {
+  const stack = [root];
+  const add = (...n) => stack.at(-1).append(...n);
+  for (const t of tokens) {
+    if (t.type === "inline") render(t.children ?? [], stack.at(-1));
+    else if (t.nesting === 1) {
+      const el = t.type === "link_open"
+        ? link(t.attrGet("href") ?? "")
+        : t.type === "spoiler_open" ? spoiler()
+        : h(TAGS.has(t.tag) ? t.tag : "span", {});
+      add(el);
+      stack.push(el);
+    } else if (t.nesting === -1) stack.pop();
+    else if (t.type === "text") add(...tagged(t.content));
+    else if (t.type === "code_inline") add(h("code", {}, t.content));
+    else if (t.type === "fence" || t.type === "code_block") {
+      add(code(t.content.replace(/\n$/, ""), t.info.trim().split(/\s/)[0]));
+    } else if (t.type === "math") add(math(t.content, t.markup === "$$"));
+    else if (t.type === "softbreak" || t.type === "hardbreak") add(h("br"));
+    else if (t.type === "hr") add(h("hr"));
+    else if (t.content) add(t.content);
+  }
+  return root;
 }
+
+// Links are copied, never opened: irch opens nothing on its own.
+const link = (href) => h("span", { class: "link", title: `Copy ${href}`,
+  onclick: () => copy(href, "Link copied") });
+
+function spoiler() {
+  const s = h("span", { class: "spoiler", title: "Spoiler" });
+  s.addEventListener("click", () => s.classList.add("shown"));
+  return s;
+}
+
+// @names, marked.
+const tagged = (text) => text.split(/((?<![\p{L}\p{N}_])@[\p{L}\p{N}_.-]*[\p{L}\p{N}_])/u)
+  .map((x, i) => i % 2 ? h("span", { class: "mention" }, x) : x);
+
+/** Prism's token tree as spans (its HTML output is never used). */
+function code(src, lang) {
+  const P = window.Prism;
+  const name = LANG[lang?.toLowerCase()] ?? lang?.toLowerCase();
+  const g = name && P?.languages[name];
+  const spans = (ts) => ts.map((t) => typeof t === "string" ? t
+    : h("span", { class: ["tok", t.type, ...[t.alias ?? []].flat()].join(" ") },
+      spans([t.content].flat())));
+  return h("pre", { "data-lang": g ? name : null },
+    h("code", {}, g ? spans(P.tokenize(src, g)) : src));
+}
+
+/** LaTeX as MathML (Temml builds nodes; browsers draw MathML). */
+function math(src, display) {
+  const el = h(display ? "div" : "span", { class: "math" });
+  try {
+    window.temml.render(src, el, { displayMode: display, trust: false,
+      throwOnError: true });
+  } catch {
+    el.className = "math bad";
+    el.textContent = display ? `$$${src}$$` : `$${src}$`;
+  }
+  return el;
+}
+
+const inl = (tokens) => [...render(tokens, h("span", {})).childNodes];
 
 // ---------- attachments ----------
 

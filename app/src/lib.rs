@@ -17,9 +17,46 @@ type Started = Option<Result<Arc<Node>, String>>;
 
 /// The node, whoever started it: the app, or a push wake (android.rs).
 static NODE: std::sync::Mutex<Option<Arc<Node>>> = std::sync::Mutex::new(None);
-/// The app runs (and its events notify).
-static APP: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+/// irch is in sight (phones; desktops always are).
+#[cfg(target_os = "android")]
+static FG: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// Android: in sight, the node runs; out of it for a minute, it stops
+/// (no keepalives: they wake the radio every few seconds). Pushes wake it.
+#[cfg(target_os = "android")]
+async fn seen(app: &AppHandle, fg: bool) {
+    use std::sync::atomic::Ordering::SeqCst;
+    // Only a change counts: "in sight" at launch, the app is starting.
+    if FG.swap(fg, SeqCst) == fg {
+        return;
+    }
+    if fg {
+        let shown = app.state::<App>().0.borrow().clone();
+        match (running(), shown.and_then(Result::ok)) {
+            (Some(n), Some(m)) if Arc::ptr_eq(&n, &m) => n.resume().await,
+            _ => drop(start(app, None).await),
+        }
+    } else {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        if !FG.load(SeqCst) {
+            app.state::<App>().0.send_replace(None);
+            nap().await;
+        }
+    }
+}
+
+/// Stop the node, out of sight and out of any call; it starts again on
+/// return, or on a push.
+#[cfg(target_os = "android")]
+async fn nap() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let n = running().filter(|n| n.in_call().is_none() && !FG.load(SeqCst));
+    if let Some(n) = n {
+        *NODE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        n.shutdown().await;
+    }
+}
 
 fn running() -> Option<Arc<Node>> {
     NODE.lock().unwrap_or_else(|e| e.into_inner()).clone()
@@ -255,7 +292,13 @@ pub fn run() {
             }
         });
         let h = app.handle().clone();
-        tauri::async_runtime::spawn(async move { start(&h, None).await });
+        tauri::async_runtime::spawn(async move {
+            #[cfg(target_os = "android")]
+            if let Some(b) = h.try_state::<android::Bridge>() {
+                b.watch_network(h.clone()).await;
+            }
+            start(&h, None).await
+        });
         Ok(())
     });
     let b = b.invoke_handler(tauri::generate_handler![
@@ -310,12 +353,7 @@ async fn start(app: &AppHandle, link: Option<String>) -> Result<(), String> {
     };
     let r = r.await.map_err(err);
     if let Ok(n) = &r {
-        APP.store(true, std::sync::atomic::Ordering::SeqCst);
         forward(app.clone(), n.clone());
-        #[cfg(target_os = "android")]
-        if let Some(b) = app.try_state::<android::Bridge>() {
-            b.watch_network(n.clone()).await;
-        }
     }
     let done = r.as_ref().map(drop).map_err(Clone::clone);
     app.state::<App>().0.send_replace(Some(r));
@@ -324,7 +362,8 @@ async fn start(app: &AppHandle, link: Option<String>) -> Result<(), String> {
 
 /// Core events to the page; a lagging receiver means "refresh everything".
 fn forward(app: AppHandle, n: Arc<Node>) {
-    let mut rx = n.subscribe();
+    // Weak: a node stopped (on Android, out of sight) goes, and this ends.
+    let (mut rx, n) = (n.subscribe(), Arc::downgrade(&n));
     tauri::async_runtime::spawn(async move {
         loop {
             let e = match rx.recv().await {
@@ -335,7 +374,10 @@ fn forward(app: AppHandle, n: Arc<Node>) {
                 }
                 Err(RecvError::Closed) => break,
             };
-            if let irch_core::Event::Changed { .. } = &e {
+            let n = n
+                .upgrade()
+                .filter(|_| matches!(e, irch_core::Event::Changed { .. }));
+            if let Some(n) = n {
                 for x in n.notices() {
                     let tag = format!("{}{}", x.space, x.room);
                     notify(&app, &tag, &x.title, &x.body).await;

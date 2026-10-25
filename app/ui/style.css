@@ -503,7 +503,39 @@ svg.icon {
   visibility: hidden;
 }
 .msg.cont:hover .side-time { visibility: visible; }
-.content { white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.content { overflow-wrap: anywhere; user-select: text; }
+.content p { margin: 0; white-space: pre-wrap; }
+.content :is(h1, h2, h3, h4, h5, h6) { margin: 6px 0 2px; line-height: 1.25; }
+.content h1 { font-size: 1.5em; }
+.content h2 { font-size: 1.3em; }
+.content :is(h3, h4, h5, h6) { font-size: 1.1em; }
+.content :is(ul, ol) { margin: 2px 0; padding-left: 1.5em; }
+.content blockquote {
+  border-left: 3px solid var(--brand);
+  margin: 2px 0;
+  padding-left: 10px;
+  color: var(--soft);
+}
+.content hr { border: 0; border-top: 1px solid var(--line); margin: 6px 0; }
+.content table { border-collapse: collapse; margin: 4px 0; font-size: 0.95em; }
+.content :is(th, td) { border: 1px solid var(--line); padding: 2px 8px; }
+.content th { background: var(--bg-4); }
+.content .math { font-size: 1.1em; }
+.content div.math { margin: 4px 0; overflow-x: auto; }
+.content .math.bad { font-family: var(--mono); color: var(--red); }
+/* Code: Prism's token types, in the neon palette. */
+.tok.comment, .tok.prolog, .tok.doctype, .tok.cdata { color: var(--dim); }
+.tok.keyword, .tok.important, .tok.atrule, .tok.selector { color: var(--pink); }
+.tok.string, .tok.char, .tok.regex, .tok.attr-value { color: var(--cyan); }
+.tok.number, .tok.boolean, .tok.constant, .tok.symbol { color: var(--yellow); }
+.tok.function, .tok.class-name, .tok.macro { color: var(--brand-hover); }
+.tok.operator, .tok.punctuation { color: var(--muted); }
+.tok.property, .tok.tag, .tok.builtin, .tok.attr-name { color: #7cf; }
+.tok.variable, .tok.lifetime-annotation { color: var(--soft); }
+.tok.inserted { color: var(--green); }
+.tok.deleted { color: var(--red); }
+.tok.bold { font-weight: 700; }
+.tok.italic { font-style: italic; }
 .content .edited { font-size: 10px; color: var(--muted); margin-left: 4px; }
 .content code {
   font: 0.85em/1.2 var(--mono);
@@ -523,11 +555,6 @@ svg.icon {
   overflow-wrap: anywhere;
 }
 .content pre code { background: none; padding: 0; font: inherit; }
-.content .quote {
-  border-left: 4px solid var(--brand);
-  padding-left: 12px;
-  margin: 2px 0;
-}
 .content .link { color: var(--link); cursor: pointer; }
 .content .link:hover { text-decoration: underline; }
 .content .mention {

@@ -1,63 +1,61 @@
-// Discord-flavoured markdown as a token tree. Pure: no DOM, no HTML strings,
-// so it is unit-testable and rendering can only ever create text nodes.
-//
-// Blocks: ```code```, > quote, plain lines.
-// Inline: `code`, ||spoiler||, **bold**, __underline__, *italic*/_italic_,
-//         ~~strike~~, http(s) links, @mentions.
+// Markdown as tokens: markdown-it (CommonMark, tables, ~~strike~~; raw HTML
+// off), plus ||spoilers|| and $math$ / $$display math$$. Pure: no DOM and no
+// HTML strings, so the page builds elements from tokens and user content
+// only ever becomes text nodes (or MathML that Temml builds as nodes).
 
-const INLINE = [
-  ["code", /`([^`\n]+)`/],
-  ["spoiler", /\|\|(.+?)\|\|/],
-  ["b", /\*\*(.+?)\*\*/],
-  ["u", /__(.+?)__/],
-  ["i", /\*([^*\s](?:[^*]*[^*\s])?)\*|\b_([^_\s](?:[^_]*[^_\s])?)_\b/],
-  ["s", /~~(.+?)~~/],
-  ["link", /https?:\/\/[^\s<>]*[^\s<>.,:;"')\]!?]/],
-  ["mention", /(?<![\p{L}\p{N}_])@[\p{L}\p{N}_.-]*[\p{L}\p{N}_]/u],
-];
+const md = globalThis.markdownit({ html: false, linkify: true, breaks: true })
+  .disable("image");
 
-/** Inline tokens: {t:"text"|"code"|"link"|"mention", v} or
- *  {t:"b"|"i"|"u"|"s"|"spoiler", c:[...]}. */
-export function inline(text) {
-  const out = [];
-  while (text) {
-    let best = null;
-    for (const [t, re] of INLINE) {
-      const m = re.exec(text);
-      if (m && (!best || m.index < best.m.index)) best = { t, m };
-    }
-    if (!best) {
-      out.push({ t: "text", v: text });
-      break;
-    }
-    const { t, m } = best;
-    if (m.index) out.push({ t: "text", v: text.slice(0, m.index) });
-    const inner = m[1] ?? m[2];
-    if (t === "code") out.push({ t, v: inner });
-    else if (t === "link" || t === "mention") out.push({ t, v: m[0] });
-    else out.push({ t, c: inline(inner) });
-    text = text.slice(m.index + m[0].length);
+// Pandoc's rule, so "$5 and $6" stays text: no space inside the dollars,
+// no digit right after the closing one.
+md.inline.ruler.after("escape", "math", (state, silent) => {
+  const { src, pos } = state;
+  if (src[pos] !== "$") return false;
+  const d = src.startsWith("$$", pos) ? "$$" : "$";
+  const from = pos + d.length;
+  const end = src.indexOf(d, from);
+  if (end <= from || /\d/.test(src[end + d.length] ?? "")) return false;
+  if (d === "$" && (/\s/.test(src[from]) || /\s/.test(src[end - 1]))) {
+    return false;
   }
-  return out;
-}
-
-/** Block tokens: {t:"pre", v} | {t:"quote", c} | {t:"line", c}. */
-export function markdown(src) {
-  const blocks = [];
-  const lines = String(src).split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const one = /^```(.+)```$/.exec(line);
-    if (one) blocks.push({ t: "pre", v: one[1] });
-    else if (line.startsWith("```")) {
-      const body = [];
-      while (++i < lines.length && !lines[i].startsWith("```")) {
-        body.push(lines[i]);
-      }
-      blocks.push({ t: "pre", v: body.join("\n") });
-    } else if (line.startsWith("> ")) {
-      blocks.push({ t: "quote", c: inline(line.slice(2)) });
-    } else blocks.push({ t: "line", c: inline(line) });
+  if (!silent) {
+    const t = state.push("math", "", 0);
+    [t.content, t.markup] = [src.slice(from, end), d];
   }
-  return blocks;
-}
+  state.pos = end + d.length;
+  return true;
+});
+
+// markdown-it's "text" rule, stopping at "|" too, so ||spoilers|| parse.
+md.inline.ruler.at("text", (state, silent) => {
+  let pos = state.pos;
+  const stop = /[\n!#$%&*+\-:<=>@[\\\]^_`{}~|]/;
+  while (pos < state.posMax && !stop.test(state.src[pos])) pos++;
+  if (pos === state.pos) return false;
+  if (!silent) state.pending += state.src.slice(state.pos, pos);
+  state.pos = pos;
+  return true;
+});
+
+md.inline.ruler.after("escape", "spoiler", (state, silent) => {
+  const { src, pos } = state;
+  if (!src.startsWith("||", pos)) return false;
+  const end = src.indexOf("||", pos + 2);
+  if (end <= pos + 2) return false;
+  if (!silent) {
+    state.push("spoiler_open", "span", 1);
+    const max = state.posMax;
+    [state.pos, state.posMax] = [pos + 2, end];
+    state.md.inline.tokenize(state);
+    state.posMax = max;
+    state.push("spoiler_close", "span", -1);
+  }
+  state.pos = end + 2;
+  return true;
+});
+
+/** Block tokens, with inline ones as `children` (markdown-it's shape). */
+export const markdown = (src) => md.parse(String(src), {});
+
+/** Inline tokens only: a reply's quoted first line. */
+export const inline = (src) => md.parseInline(String(src), {})[0].children;

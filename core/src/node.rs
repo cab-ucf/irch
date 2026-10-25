@@ -477,6 +477,15 @@ impl Node {
         local.peers.values().for_each(|a| lookup.add_endpoint_info(a.clone()));
         let bind = async |port: u16| {
             let b = match &cfg.net {
+                // Phones skip the DHT, which keeps a routing table alive:
+                // relays and n0's DNS find peers for them.
+                Net::Default if cfg!(target_os = "android") => {
+                    Endpoint::builder(presets::N0).relay_mode(
+                        RelayMode::custom(
+                            RELAYS.map(|r| r.parse().expect("relay url")),
+                        ),
+                    )
+                }
                 Net::Default => Endpoint::builder(presets::N0)
                     .relay_mode(RelayMode::custom(
                         RELAYS.map(|r| r.parse().expect("relay url")),

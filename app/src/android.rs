@@ -8,7 +8,6 @@ use jni::objects::{JClass, JObject, JString};
 use jni::sys::jstring;
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
@@ -83,11 +82,26 @@ struct FilePath<'a> {
 }
 
 impl Bridge {
-    /// Every network change: re-probe, re-dial, catch up.
-    pub async fn watch_network(&self, n: Arc<Node>) {
-        let channel = Channel::new(move |_| {
-            let n = n.clone();
-            tauri::async_runtime::spawn(async move { n.resume().await });
+    /// Every network change: re-probe, re-dial, catch up. And irch in
+    /// sight or out of it: the node wakes, or soon sleeps. Once.
+    pub async fn watch_network(&self, app: tauri::AppHandle) {
+        static ONCE: AtomicBool = AtomicBool::new(false);
+        if ONCE.swap(true, SeqCst) {
+            return;
+        }
+        let channel = Channel::new(move |b| {
+            let v: serde_json::Value = b.deserialize().unwrap_or_default();
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                match v["fg"].as_bool() {
+                    Some(fg) => crate::seen(&app, fg).await,
+                    None => {
+                        if let Some(n) = crate::running() {
+                            n.resume().await
+                        }
+                    }
+                }
+            });
             Ok(())
         });
         self.call("watchNetwork", Watch { channel }).await;
@@ -177,8 +191,8 @@ async fn wake(
         n.set_push((!p.is_empty()).then_some(p)).await;
     }
     n.resume().await;
-    if crate::APP.load(SeqCst) {
-        return Ok(vec![]); // the app's own events notify
+    if crate::FG.load(SeqCst) {
+        return Ok(vec![]); // in sight: the app shows it
     }
     // Catch up until a few quiet seconds, at most half a minute.
     let (mut rx, end) =
@@ -189,5 +203,7 @@ async fn wake(
             Ok(Ok(_))
         )
     {}
-    Ok(n.notices())
+    let notices = n.notices();
+    crate::nap().await; // and back to sleep, unless irch came into sight
+    Ok(notices)
 }

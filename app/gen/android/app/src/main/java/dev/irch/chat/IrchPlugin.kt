@@ -17,7 +17,9 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -63,7 +65,10 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     }
   }
 
-  /** Native code cannot observe network changes on Android; iroh needs them. */
+  /**
+   * Native code cannot observe network changes on Android; iroh needs them.
+   * Nor whether irch is in sight: out of it, the node sleeps (battery).
+   */
   @Command
   fun watchNetwork(invoke: Invoke) {
     val channel = invoke.parseArgs(WatchArgs::class.java).channel
@@ -75,6 +80,15 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
         channel.send(JSObject())
     }
     cm.registerDefaultNetworkCallback(ping)
+    val seen = object : DefaultLifecycleObserver {
+      override fun onStart(owner: LifecycleOwner) =
+        channel.send(JSObject().put("fg", true))
+      override fun onStop(owner: LifecycleOwner) =
+        channel.send(JSObject().put("fg", false))
+    }
+    activity.runOnUiThread {
+      ProcessLifecycleOwner.get().lifecycle.addObserver(seen)
+    }
     invoke.resolve()
   }
 

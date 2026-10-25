@@ -124,6 +124,11 @@ Terminal: `/create NAME`, `/join CODE`, `/invite`, `/channel NAME`,
 `/store CODE`, `/note [FILE]`, `/todo [FILE]`, `/invisible`, `/help`.
 Ctrl-N/P switches channel; PgUp/PgDn scrolls.
 
+Messages are Markdown (markdown-it: headings, lists, tables, quotes,
+code fenced with its language, highlighted by Prism), `||spoilers||`,
+and LaTeX math (`$x^2$`, `$$...$$`) drawn as MathML by Temml; raw HTML
+is shown as text, and links are copied, never opened.
+
 Desktop and phone: `+` creates or joins a space; the paperclip, a drop or
 a paste attaches files; hover a message to react, reply, edit or delete;
 click a member to message, ban or promote them. The arrow on a message
@@ -144,6 +149,8 @@ tells its spaces, sealed like any op, where to reach it; the writer's
 device sends that address a ping with nothing in it (at most every 30 s),
 and the phone wakes for a few seconds, fetches from the writer over iroh,
 and notifies. Push servers learn only that a ping went to an address.
+Out of sight for a minute (and in no call), the node stops altogether;
+phones skip the Mainline DHT (relays and n0's DNS find peers for them).
 
 Notes: the bookmark on a message adds it (or its whole thread) to your
 notes as a task, with an optional due date, or as a quote: plain Markdown
