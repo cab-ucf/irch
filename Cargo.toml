@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["core", "tui", "app"]
-default-members = ["core", "tui", "app"]
+members = ["core", "math", "tui", "app"]
+default-members = ["core", "math", "tui", "app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ repository = "https://github.com/cab-ucf/irch"
 
 [workspace.dependencies]
 irch-core = { path = "core" }
+irch-math = { path = "math" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

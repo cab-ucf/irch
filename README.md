@@ -126,8 +126,11 @@ Ctrl-N/P switches channel; PgUp/PgDn scrolls.
 
 Messages are Markdown (markdown-it: headings, lists, tables, quotes,
 code fenced with its language, highlighted by Prism), `||spoilers||`,
-and LaTeX math (`$x^2$`, `$$...$$`) drawn as MathML by Temml; raw HTML
-is shown as text, and links are copied, never opened.
+and math, `$...$` inline and `$$...$$` displayed: Typst's (`$sum_(k=1)^n
+k = (n(n+1))/2$`, typeset by Typst itself, as MathML, in its own font),
+or LaTeX (`$\frac{1}{2}$`, by Temml) when it has a `\` or a `{`. Math
+can only be math: no `#` code, files or packages. Raw HTML is shown as
+text, and links are copied, never opened.
 
 Desktop and phone: a weechat-like tree of spaces and channels beside the
 chat, IRC-dense rows (time, nick, text), members on request. `+` creates

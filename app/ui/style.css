@@ -487,6 +487,15 @@ table.keys kbd {
 .content .math { font-size: 1.1em; }
 .content div.math { margin: 4px 0; overflow-x: auto; }
 .content .math.bad { font-family: var(--mono); color: var(--red); }
+/* Typst's math font, for LaTeX too: the same look on every device. */
+@font-face {
+  font-family: "NewCMMath";
+  src: url("./vendor/NewCMMath-Book.woff2") format("woff2");
+}
+.content .math math { font-family: "NewCMMath", math; }
+/* Temml makes every <math> a flexbox; Typst's need MathML's own layout. */
+.typst math { display: math; }
+.typst math[display="block"] { display: block math; }
 /* Code: Prism's token types, in the neon palette. */
 .tok.comment, .tok.prolog, .tok.doctype, .tok.cdata { color: var(--dim); }
 .tok.keyword, .tok.important, .tok.atrule, .tok.selector { color: var(--pink); }
