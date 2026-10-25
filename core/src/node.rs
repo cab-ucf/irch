@@ -453,6 +453,16 @@ fn own_invite(me: &Me, peers: Vec<EndpointAddr>) -> Invite {
     Invite { owner: me.id(), nonce, key, name: String::new(), dm: None, peers }
 }
 
+// Phones skip the Mainline DHT, which keeps a routing table alive:
+// relays and n0's DNS find peers for them.
+fn dht(b: iroh::endpoint::Builder) -> iroh::endpoint::Builder {
+    #[cfg(not(target_os = "android"))]
+    let b = b.address_lookup(
+        iroh_mainline_address_lookup::DhtAddressLookup::builder(),
+    );
+    b
+}
+
 impl Node {
     pub async fn start(cfg: Config) -> Result<Arc<Self>> {
         std::fs::create_dir_all(&cfg.dir)?;
@@ -477,29 +487,13 @@ impl Node {
         local.peers.values().for_each(|a| lookup.add_endpoint_info(a.clone()));
         let bind = async |port: u16| {
             let b = match &cfg.net {
-                // Phones skip the DHT, which keeps a routing table alive:
-                // relays and n0's DNS find peers for them.
-                Net::Default if cfg!(target_os = "android") => {
-                    Endpoint::builder(presets::N0).relay_mode(
-                        RelayMode::custom(
-                            RELAYS.map(|r| r.parse().expect("relay url")),
-                        ),
-                    )
-                }
-                Net::Default => Endpoint::builder(presets::N0)
-                    .relay_mode(RelayMode::custom(
+                Net::Default => dht(Endpoint::builder(presets::N0).relay_mode(
+                    RelayMode::custom(
                         RELAYS.map(|r| r.parse().expect("relay url")),
-                    ))
-                    .address_lookup(
-                        iroh_mainline_address_lookup::DhtAddressLookup::builder(
-                        ),
                     ),
-                Net::Relay(urls) => Endpoint::builder(presets::Minimal)
-                    .relay_mode(RelayMode::custom(urls.clone()))
-                    .address_lookup(
-                        iroh_mainline_address_lookup::DhtAddressLookup::builder(
-                        ),
-                    ),
+                )),
+                Net::Relay(urls) => dht(Endpoint::builder(presets::Minimal)
+                    .relay_mode(RelayMode::custom(urls.clone()))),
                 Net::Lan => Endpoint::builder(presets::Minimal)
                     .relay_mode(RelayMode::Disabled)
                     .address_lookup(

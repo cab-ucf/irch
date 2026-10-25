@@ -129,8 +129,9 @@ impl Bridge {
 }
 
 // We gave ndk-context Android's context (no activity had); the activity's
-// runtime (tao) sets it once and asserts nobody did before.
+// runtime (tao) sets it once per process and asserts nobody did before.
 static OURS: AtomicBool = AtomicBool::new(false);
+static TAO: AtomicBool = AtomicBool::new(false);
 
 /// `Wake.run`: a push came. Start the node if irch was not running (or
 /// wake it), catch up, and return what to notify about, as JSON; while
@@ -147,8 +148,8 @@ pub extern "system" fn Java_dev_irch_chat_Wake_run<'l>(
         (!s.is_null()).then(|| env.get_string(s).ok().map(Into::into))?
     };
     let (dir, push) = (text(&dir).unwrap_or_default(), text(&push));
-    let set = std::panic::catch_unwind(ndk_context::android_context).is_ok();
-    if !set
+    if !TAO.load(SeqCst)
+        && !OURS.load(SeqCst)
         && let (Ok(vm), Ok(g)) = (env.get_java_vm(), env.new_global_ref(ctx))
     {
         let (vm, c) =
@@ -167,6 +168,7 @@ pub extern "system" fn Java_dev_irch_chat_Wake_run<'l>(
 /// `Wake.release`: the activity is about to start; it brings its own.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_irch_chat_Wake_release(_: JNIEnv, _: JClass) {
+    TAO.store(true, SeqCst);
     if OURS.swap(false, SeqCst) {
         unsafe { ndk_context::release_android_context() };
     }

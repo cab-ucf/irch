@@ -55,7 +55,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android, x86_64-linux-android
+          targets: aarch64-linux-android
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-java@v4
         with:
@@ -67,8 +67,9 @@ jobs:
           v='"version": "'${GITHUB_REF_NAME#v}'"'
           sed -i "s/\"version\": \"[^\"]*\"/$v/" app/tauri.conf.json
       - working-directory: app
+        # Phones only: x86_64 is for emulators, which build their own.
         run: NDK_HOME="$ANDROID_NDK_LATEST_HOME" cargo tauri android build
-          --ci --apk --target aarch64 --target x86_64
+          --ci --apk --target aarch64
       - name: Sign with irch's key, attach to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
