@@ -2,6 +2,7 @@
 //! (which iroh cannot see from native code there), notifications, the share
 //! sheet; and through `Push.kt`, push wakes when no activity is running.
 
+use anyhow::Context;
 use irch_core::{Node, Notice};
 use jni::JNIEnv;
 use jni::objects::{JClass, JObject, JString};
@@ -37,29 +38,46 @@ struct Text<'a> {
     text: &'a str,
 }
 
-/// The latest release, if newer than us; with `install`, its APK handed to
-/// Android's installer.
-pub async fn update(
+/// The latest release's APK, handed to Android's installer (which asks,
+/// the first time, whether irch may install apps). If that fails, the
+/// browser fetches it, and Android installs it from there.
+pub async fn upgrade(
     app: &tauri::AppHandle,
-    install: bool,
+    mut on: impl FnMut(usize, Option<u64>),
 ) -> anyhow::Result<Option<String>> {
-    let Some(latest) = crate::newer(app).await? else {
-        return Ok(None);
-    };
-    if install {
-        let url = format!("{}/download/irch.apk", crate::LATEST);
-        let got = irch_core::http().get(url).send().await?;
-        let apk = got.error_for_status()?.bytes().await?;
+    let url = format!("{}/download/irch.apk", crate::LATEST);
+    let bridge = app.try_state::<Bridge>().context("no bridge")?;
+    let got = async {
+        let r = irch_core::http().get(&url).send().await?;
+        let mut r = r.error_for_status()?;
+        let (total, mut apk) = (r.content_length(), vec![]);
+        while let Some(c) = r.chunk().await? {
+            on(c.len(), total);
+            apk.extend_from_slice(&c);
+        }
         let dir = app.path().app_cache_dir()?.join("shared");
         std::fs::create_dir_all(&dir)?;
         let f = dir.join("irch.apk");
         std::fs::write(&f, &apk)?;
-        if let Some(b) = app.try_state::<Bridge>() {
-            b.call("install", FilePath { path: &f.to_string_lossy() }).await;
+        let path = &f.to_string_lossy();
+        bridge
+            .0
+            .run_mobile_plugin_async::<()>("install", FilePath { path })
+            .await?;
+        anyhow::Ok(())
+    };
+    match got.await {
+        Ok(()) => Ok(None),
+        Err(e) => {
+            bridge.call("browse", Url { url: &url }).await;
+            Ok(Some(format!("{e:#}. Your browser downloads irch: open it")))
         }
-        return Ok(None);
     }
-    Ok(Some(latest))
+}
+
+#[derive(Serialize)]
+struct Url<'a> {
+    url: &'a str,
 }
 
 #[derive(Serialize)]

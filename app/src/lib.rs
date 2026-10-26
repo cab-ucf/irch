@@ -256,38 +256,51 @@ async fn serve_here(app: AppHandle) -> Result<(), String> {
     run.await.map_err(err)
 }
 
-/// A newer irch, if there is one; with `install`, install it (then, what
-/// to tell). Desktop: in place, its signature checked against ours, then
-/// restart; installed otherwise (nix, cargo), the release page opens.
-/// Android: the system installer, which takes only our signing key.
+/// A newer irch's version, if there is one (NixOS updates its own).
 #[tauri::command]
-async fn update(
+async fn update(app: AppHandle) -> Result<Option<String>, String> {
+    if NIXOS {
+        return Ok(None);
+    }
+    newer(&app).await.map_err(err)
+}
+
+/// The newer irch, installed; then what to tell, if anything. Desktop: in
+/// place, its signature checked against ours, then restart; installed
+/// otherwise (cargo), the release page opens. Android: the system
+/// installer, which takes only our signing key.
+#[tauri::command]
+async fn upgrade(
     app: AppHandle,
-    install: bool,
+    progress: Channel<u32>,
 ) -> Result<Option<String>, String> {
     #[cfg(desktop)]
     {
         use tauri_plugin_updater::UpdaterExt;
-        if NIXOS {
-            return Ok(None);
-        }
-        let Some(v) = newer(&app).await.map_err(err)? else {
-            return Ok(None);
-        };
-        if !install {
-            return Ok(Some(v));
-        }
         if let Ok(up) = app.updater()
             && let Ok(Some(u)) = up.check().await
-            && u.download_and_install(|_, _| {}, || {}).await.is_ok()
+            && u.download_and_install(percent(progress), || {}).await.is_ok()
         {
             app.restart();
         }
         browse(LATEST).map_err(err)?;
-        Ok(Some(format!("irch {v}: its release page is open")))
+        Ok(Some("irch's release page is open: install it from there".into()))
     }
     #[cfg(target_os = "android")]
-    android::update(&app, install).await.map_err(err)
+    android::upgrade(&app, percent(progress)).await.map_err(err)
+}
+
+/// Bytes as they arrive, as a percentage for the page (each once).
+fn percent(to: Channel<u32>) -> impl FnMut(usize, Option<u64>) {
+    let (mut got, mut last) = (0u64, u32::MAX);
+    move |n, total| {
+        got += n as u64;
+        let p = total.map_or(0, |t| (got * 100 / t.max(1)) as u32);
+        if p != last {
+            last = p;
+            let _ = to.send(p);
+        }
+    }
 }
 
 /// The system's browser, at `url`.
@@ -400,7 +413,7 @@ pub fn run() {
     });
     let b = b.invoke_handler(tauri::generate_handler![
         irch, link, qr, math, save, share, media, tune, opened, update,
-        viewing, hush, upload, serve_here
+        upgrade, viewing, hush, upload, serve_here
     ]);
     let app = b.build(tauri::generate_context!()).expect("tauri builds");
     app.run(|app, e| {
@@ -417,12 +430,14 @@ pub fn run() {
             }
             // Leave cleanly, so peers see us go now, not at a timeout.
             tauri::RunEvent::Exit => {
+                // Inside the runtime: this thread has none, and a panic
+                // here would end a restart (an update's) before it relaunches.
                 if let Some(n) = n() {
-                    let bye = tokio::time::timeout(
-                        Duration::from_secs(2),
-                        n.shutdown(),
-                    );
-                    let _ = tauri::async_runtime::block_on(bye);
+                    let bye = async {
+                        let two = Duration::from_secs(2);
+                        let _ = tokio::time::timeout(two, n.shutdown()).await;
+                    };
+                    tauri::async_runtime::block_on(bye);
                 }
             }
             _ => {}

@@ -2,7 +2,7 @@
 # both kept at irch's latest release: its source checked against irch's
 # signing key, then built here, hourly.
 #   flakes: inputs.irch.url = "github:cab-ucf/irch";
-#           imports = [ inputs.irch.nixosModules.default ];
+#           nixosSystem { modules = [ inputs.irch.nixosModules.default … ]; }
 #   else:   imports = [ "${builtins.fetchTarball
 #             "https://github.com/cab-ucf/irch/archive/main.tar.gz"}/nixos.nix" ];
 #   programs.irch.enable = true;      # the app, and `irch` in a terminal

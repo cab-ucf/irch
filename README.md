@@ -40,9 +40,12 @@ A flake (`/etc/nixos/flake.nix`):
 ```nix
 inputs.irch.url = "github:cab-ucf/irch";
 inputs.irch.inputs.nixpkgs.follows = "nixpkgs";
-# in nixosSystem's modules, or a module's imports:
+# outputs: in nixpkgs.lib.nixosSystem { modules = [ … ]; }
 inputs.irch.nixosModules.default
 ```
+
+(In a module's `imports` instead, `inputs` must come through
+`specialArgs = { inherit inputs; };`, or Nix recurses forever.)
 
 Without flakes: `imports = [ "${builtins.fetchTarball
 "https://github.com/cab-ucf/irch/archive/main.tar.gz"}/nixos.nix" ];`.

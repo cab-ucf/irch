@@ -125,10 +125,11 @@ const fmtDay = (ts) => {
   }
   return days.get(slot);
 };
-function toast(text, error) {
+function toast(text, error, ms = 3500) {
   const t = h("div", { class: "toast" + (error ? " error" : "") }, text);
   $("toasts").append(t);
-  setTimeout(() => t.remove(), 3500);
+  setTimeout(() => t.remove(), ms);
+  return t;
 }
 
 async function call(cmd, args) {
@@ -423,7 +424,7 @@ t.id !== S.ch && badge(t.mentions),
 async function updates(quietly) {
   let v;
   try {
-    v = await invoke("update", { install: false });
+    v = await invoke("update");
   } catch (e) {
     return quietly || toast(`Could not check: ${e}`, true);
   }
@@ -437,10 +438,15 @@ async function updates(quietly) {
     foot(cancel(finish),
       h("button", { class: "btn", onclick: () => finish(true) }, "Update"))));
   if (!ok) return;
-  toast(`Downloading irch ${v}…`);
-  await invoke("update", { install: true })
-    .then((said) => said && toast(said))
-    .catch((e) => toast(`Update failed: ${e}`, true));
+  // A percentage, so a slow download never looks like nothing.
+  const t = toast(`Downloading irch ${v}…`, false, 6e5);
+  const progress = new T.core.Channel();
+  progress.onmessage = (p) => t.textContent = p < 100
+    ? `Downloading irch ${v}… ${p}%` : `Installing irch ${v}…`;
+  await invoke("upgrade", { progress })
+    .then((said) => said && toast(said, false, 1e4))
+    .catch((e) => toast(`Update failed: ${e}`, true, 1e4))
+    .finally(() => t.remove());
 }
 
 /** irch://open/SPACE/CHANNEL/MESSAGE, from a note: there, if we can;
