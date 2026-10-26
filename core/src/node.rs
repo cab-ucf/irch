@@ -16,6 +16,8 @@ use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey,
 };
+use iroh_blobs::BlobsProtocol;
+use iroh_blobs::store::fs::FsStore;
 use iroh_gossip::api::{Event as Gossiped, GossipSender};
 use iroh_gossip::{Gossip, TopicId};
 use n0_future::StreamExt;
@@ -406,6 +408,8 @@ pub struct Node {
     clock: AtomicU64,
     invisible: AtomicBool,
     serve: Option<[u8; 16]>,
+    // Files offered from here, and those fetched (served on to members).
+    files: Option<FsStore>,
     call: Mutex<Option<Call>>,
     media: call::Media,
 }
@@ -455,6 +459,26 @@ fn own_invite(me: &Me, peers: Vec<EndpointAddr>) -> Invite {
     let nonce = k[..16].try_into().expect("16");
     let key = crate::crypto::kdf("irch own key", &[&me.seed]);
     Invite { owner: me.id(), nonce, key, name: String::new(), dm: None, peers }
+}
+
+/// Offered files go to the devices of people in a space with us, no one
+/// else.
+fn gate(n: std::sync::Weak<Node>) -> iroh_blobs::provider::events::EventSender {
+    use iroh_blobs::provider::events::*;
+    let mask =
+        EventMask { connected: ConnectMode::Intercept, ..EventMask::DEFAULT };
+    let (tx, mut rx) = EventSender::channel(32, mask);
+    tokio::spawn(async move {
+        while let Some(m) = rx.recv().await {
+            if let ProviderMessage::ClientConnected(m) = m {
+                let n = n.upgrade().zip(m.endpoint_id);
+                let ok = n.is_some_and(|(n, d)| n.member_device(&d));
+                let r = if ok { Ok(()) } else { Err(AbortReason::Permission) };
+                let _ = m.tx.send(r).await;
+            }
+        }
+    });
+    tx
 }
 
 // Phones skip the Mainline DHT, which keeps a routing table alive:
@@ -529,6 +553,10 @@ impl Node {
             .find(|a| a.is_ipv4())
             .map_or(0, |a| a.port());
         let serve = cfg.serve.then(|| *local.token.get_or_insert_with(rand));
+        let files = match serve {
+            None => Some(FsStore::load(cfg.dir.join("files")).await?),
+            Some(_) => None,
+        };
         let gossip =
             Gossip::builder().max_message_size(GOSSIP_MAX).spawn(ep.clone());
         let own_inv = own_invite(&me, link.map(|l| l.1).unwrap_or_default());
@@ -553,10 +581,17 @@ impl Node {
             events: broadcast::channel(1024).0,
             clock: AtomicU64::new(0),
             serve,
+            files,
             call: Mutex::new(None),
             media: broadcast::channel(512).0,
         });
-        let router = Router::builder(n.ep.clone())
+        let mut router = Router::builder(n.ep.clone());
+        if let Some(f) = &n.files {
+            let gate = Some(gate(Arc::downgrade(&n)));
+            router =
+                router.accept(iroh_blobs::ALPN, BlobsProtocol::new(f, gate));
+        }
+        let router = router
             .accept(iroh_gossip::ALPN, n.gossip.clone())
             .accept(sync::ALPN, Proto(Arc::downgrade(&n)))
             .accept(BLOB, Proto(Arc::downgrade(&n)))
@@ -1620,12 +1655,69 @@ impl Node {
         Ok(())
     }
 
+    /// A file left where it is, served from this device to members while it
+    /// is online: any size, no copy, not sealed (QUIC encrypts the way),
+    /// checked chunk by chunk by whoever fetches it. `name`: else the path's.
+    pub async fn offer(&self, path: &Path, name: Option<&str>) -> Result<File> {
+        use iroh_blobs::api::blobs::{AddPathOptions, ImportMode};
+        let files = self.files.as_ref().context("storage nodes offer none")?;
+        let path = std::path::absolute(path)?;
+        let size = std::fs::metadata(&path)?.len();
+        let (format, mode) = (Default::default(), ImportMode::TryReference);
+        let opts = AddPathOptions { path: path.clone(), format, mode };
+        let tag = files.add_path_with_opts(opts).with_tag().await?;
+        let base = path.file_name().and_then(|n| n.to_str());
+        let name = name.or(base).unwrap_or("file").chars().take(128).collect();
+        let hash = Id(*tag.hash.as_bytes());
+        Ok(File { name, size, hash, key: crate::op::OFFERED })
+    }
+
+    /// An offered file, from whichever member has it (its sender, first),
+    /// resumed where a try left off; served on to members from here.
+    async fn pull(&self, space: &Id, f: &File) -> Result<&FsStore> {
+        let files = self.files.as_ref().context("storage nodes fetch none")?;
+        let hash = iroh_blobs::Hash::from_bytes(f.hash.0);
+        if !files.has(hash).await? {
+            let sp = self.get(space)?;
+            let mut peers: Vec<EndpointId> = self.bootstrap(&sp);
+            peers.extend(sp.nbrs());
+            let got = files.downloader(&self.ep).download(hash, peers).await;
+            got.ok().context(
+                "not reachable now: ask whoever sent it to open irch",
+            )?;
+        }
+        Ok(files)
+    }
+
+    async fn export(&self, space: &Id, f: &File, to: &Path) -> Result<()> {
+        use iroh_blobs::api::blobs::{ExportMode, ExportOptions};
+        let files = self.pull(space, f).await?;
+        let hash = iroh_blobs::Hash::from_bytes(f.hash.0);
+        let (mode, target) = (ExportMode::TryReference, to.to_path_buf());
+        std::fs::remove_file(to)?;
+        files.export_with_opts(ExportOptions { hash, mode, target }).await?;
+        Ok(())
+    }
+
+    /// Whether `d` is a device of someone in a space with us.
+    fn member_device(&self, d: &EndpointId) -> bool {
+        let has =
+            |id: &Id| self.view(id, |s| s.devices(usize::MAX).contains(d));
+        self.spaces().iter().any(|id| has(id) == Some(true))
+    }
+
     /// An attachment's plaintext, from here or from anyone who has it.
     pub async fn file(
         self: &Arc<Self>,
         space: &Id,
         f: &File,
     ) -> Result<Vec<u8>> {
+        if f.offered() {
+            ensure!(f.size <= MAX_FILE as u64, "too big to open here: save it");
+            let hash = iroh_blobs::Hash::from_bytes(f.hash.0);
+            let files = self.pull(space, f).await?;
+            return Ok(files.get_bytes(hash).await?.to_vec());
+        }
         let ct = match std::fs::read(self.blob(&f.hash)) {
             Ok(ct) => ct,
             Err(_) => {
@@ -1660,7 +1752,10 @@ impl Node {
         dir: &Path,
     ) -> Result<PathBuf> {
         use std::io::{ErrorKind::AlreadyExists, Write};
-        let data = self.file(space, f).await?;
+        let data = match f.offered() {
+            true => vec![],
+            false => self.file(space, f).await?,
+        };
         let name = &f.clone().safe().name;
         let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
         let dot = if ext.is_empty() { "" } else { "." };
@@ -1674,6 +1769,11 @@ impl Node {
             match std::fs::File::create_new(&p) {
                 Ok(mut out) => {
                     out.write_all(&data)?;
+                    if f.offered() {
+                        drop(out);
+                        let got = self.export(space, f, &p).await;
+                        got.inspect_err(|_| drop(std::fs::remove_file(&p)))?;
+                    }
                     // Windows: from the internet, like a browser download.
                     #[cfg(windows)]
                     let _ = std::fs::write(

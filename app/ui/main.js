@@ -932,8 +932,10 @@ const inl = (tokens) => [...render(tokens, h("span", {})).childNodes];
 const MIME = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
   gif: "image/gif", webp: "image/webp", avif: "image/avif", bmp: "image/bmp" };
 const mime = (name) => MIME[name.split(".").pop().toLowerCase()];
-const size = (n) => n < 1024 ? `${n} B` : n < 1 << 20 ? `${n >> 10} KB`
-  : `${(n / (1 << 20)).toFixed(1)} MB`;
+const size = (n) => {
+  const i = Math.min(4, Math.floor(Math.log2(Math.max(1, n)) / 10));
+  return `${i ? (n / 2 ** (10 * i)).toFixed(1) : n} ${"BKMGT"[i]}${i ? "B" : ""}`;
+};
 const images = new Map(); // hash -> Promise of a data: URL
 
 function image(f) {
@@ -961,9 +963,12 @@ function attachments(files) {
   }));
 }
 
+// An offered file's key is all zeros: its sender's device serves it.
+const offered = (f) => /^0+$/.test(f.key);
 const fileChip = (f) => h("div", { class: "file-chip" }, icon("file"),
   h("div", { class: "meta", title: "Preview", onclick: () => preview(f) },
-    h("b", {}, f.name), h("small", {}, size(f.size))),
+    h("b", {}, f.name), h("small", {}, size(f.size),
+      offered(f) ? " · from its sender's device, while online" : "")),
   h("button", { title: android ? "Share" : "Save to Downloads",
     onclick: () => saveFile(f) }, icon("down")));
 
@@ -1028,19 +1033,49 @@ function lightbox(src, f) {
       } }, android ? "Share" : "Save"))));
 }
 
-async function addFiles(list) {
+const SEALED = 25 << 20; // what storage nodes take
+const PART = 4 << 20;
+const b64 = (blob) => new Promise((ok) => {
+  const r = new FileReader();
+  r.onload = () => ok(r.result.slice(r.result.indexOf(",") + 1));
+  r.readAsDataURL(blob);
+});
+
+/** Up to 25 MB, sealed for storage nodes (there while you are offline);
+ *  larger, or `keep`, served from this device while it is online. */
+async function addFiles(list, keep) {
   for (const file of list) {
-    if (file.size > 25 << 20) {
-      toast(`${file.name} is over 25 MB`, true);
-      continue;
-    }
-    const data = await new Promise((ok) => {
-      const r = new FileReader();
-      r.onload = () => ok(r.result.slice(r.result.indexOf(",") + 1));
-      r.readAsDataURL(file);
-    });
-    const f = await call("attach", { space: S.sid, name: file.name, data })
+    const here = keep || file.size > SEALED;
+    if (here) toast(`Sharing ${file.name} from this device…`);
+    const f = await (here ? offerFile(file) : sealFile(file))
       .catch(() => null);
+    if (f) S.files.push(f);
+    renderFilesBar();
+  }
+}
+
+const sealFile = async (file) =>
+  call("attach", { space: S.sid, name: file.name, data: await b64(file) });
+
+/** Into irch's folder in parts (a page knows no paths), then offered. */
+async function offerFile(file) {
+  const id = randomId(16);
+  let path;
+  for (let at = 0; at === 0 || at < file.size; at += PART) {
+    const part = file.slice(at, at + PART);
+    const body = android ? { data: await b64(part) }
+      : new Uint8Array(await part.arrayBuffer());
+    path = await invoke("upload", body, { headers: { "x-upload": id } });
+  }
+  return call("offer", { path, name: file.name });
+}
+
+/** Desktops: files chosen by path stay where they are (any size, no copy). */
+async function offerPaths() {
+  const paths = await T.dialog.open({ multiple: true }).catch(() => null);
+  for (const path of [paths ?? []].flat()) {
+    toast(`Sharing ${path.split(/[\\/]/).pop()} from this device…`);
+    const f = await call("offer", { path }).catch(() => null);
     if (f) S.files.push(f);
     renderFilesBar();
   }
@@ -1924,9 +1959,14 @@ function wire() {
     store.set("members", on ? "1" : "0");
   };
   $("attach-btn").append(icon("clip"));
-  $("attach-btn").onclick = () => $("picker").click();
+  const pick = (keep) => ((S.keep = keep), $("picker").click());
+  $("attach-btn").onclick = (e) => menu(e.currentTarget, [
+    ["Upload: storage nodes keep it (to 25 MB)", "clip", () => pick(false)],
+    ["Share from this device (any size)", "disk",
+      () => (android ? pick(true) : offerPaths())],
+  ]);
   $("picker").onchange = (e) => {
-    addFiles([...e.target.files]);
+    addFiles([...e.target.files], S.keep);
     e.target.value = "";
   };
   addEventListener("dragover", (e) => e.preventDefault());

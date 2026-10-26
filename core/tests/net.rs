@@ -291,6 +291,32 @@ async fn storage_keeps_only_the_spaces_chosen() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn offered_files_go_from_device_to_members_only() {
+    let (a, b) = (node("a").await, node("b").await);
+    let id = a.create("home").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let keyed = || a.view(&id, |s| s.kem(&b.id()).is_some()) == Some(true);
+    until("b's key", keyed).await;
+    // Past what storage nodes take: kept here, served from here.
+    let big: Vec<u8> = (0..30u32 << 20).map(|i| (i % 251) as u8).collect();
+    let src = dir("src").join("big.bin");
+    std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+    std::fs::write(&src, &big).unwrap();
+    let f = a.offer(&src, None).await.unwrap();
+    assert!(f.offered() && f.size == big.len() as u64 && f.name == "big.bin");
+    let saved = b.save(&id, &f, &dir("saved")).await.unwrap();
+    assert!(std::fs::read(&saved).unwrap() == big, "b has it, whole");
+    // x knows the space, the hash and a's address, but holds no key.
+    let mut inv = Invite::decode(&a.invite(&id).await.unwrap()).unwrap();
+    inv.key = [7; 32];
+    let x = node("x").await;
+    x.join(&inv.encode()).await.unwrap();
+    let out = dir("x");
+    assert!(x.save(&id, &f, &out).await.is_err(), "no member, no file");
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0, "nothing left");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn storage_node_and_restart() {
     let s = start(&dir("s"), "s", None, true).await;
     let (a, bdir) = (node("a").await, dir("b"));

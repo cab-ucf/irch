@@ -31,6 +31,7 @@ const HELP: &str = "\
 /store CODE      pair with a storage node (local: this computer's)
 /store here      keep this space on your storage nodes
 /file PATH TEXT  send a file        /save        save the last file here
+/share PATH TEXT share from here, any size, while irch runs
 /invisible       no presence or typing    /quit
 Ctrl-N/P or Alt-Up/Down: channel   PgUp/PgDn: scroll   Esc: close";
 
@@ -315,6 +316,15 @@ impl App {
                      {}\n\nIt becomes you: keep this secret.",
                     n.link_code().await
                 ));
+            }
+            "share" => {
+                let (path, text) = arg.split_once(' ').unwrap_or((&arg, ""));
+                let files =
+                    vec![n.offer(std::path::Path::new(path), None).await?];
+                let (channel, text) = (self.here()?.1, text.to_string());
+                self.post(Op::Post { channel, text, reply: None, files })
+                    .await?;
+                self.status = "shared from this machine while it runs".into();
             }
             "store" if arg == "local" => {
                 let code = irch_core::local_storage().ok_or_else(|| {

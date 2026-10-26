@@ -75,6 +75,11 @@ disk   : one append-only log of envs per space; nothing else to migrate
 - **Files** (up to 25 MiB) are sealed under a fresh key that travels only
   inside the post; their ciphertext is named by its BLAKE3 hash, fetched
   from whoever has it and kept by your storage nodes too.
+- **Shared files** (any size: `/share PATH`, or "Share from this device")
+  stay where they are and are not sealed: the post names their hash, and
+  the sender's devices serve them, over QUIC, to members' devices only,
+  while online. Asked for one that is offline, irch says to ask its
+  sender to open irch. Big uploads go this way by themselves.
 - **Calls are a mesh.** Everyone in a channel's call connects straight to
   everyone else in it: to devices a member's signed `Call` names, which
   must then sign as that member. The page captures and codes (WebCodecs:
@@ -130,7 +135,7 @@ secrets are named at its top).
 
 Terminal: `/create NAME`, `/join CODE`, `/invite`, `/channel NAME`,
 `/reply TEXT`, `/thread TEXT`, `/react EMOJI`, `/edit TEXT`, `/delete`,
-`/dm USER`, `/ban USER`, `/rekey`, `/file PATH`, `/save`, `/link`,
+`/dm USER`, `/ban USER`, `/rekey`, `/file PATH`, `/share PATH`, `/save`, `/link`,
 `/store CODE|local|here`, `/note [FILE]`, `/todo [FILE]`, `/invisible`,
 `/help`.
 Ctrl-N/P switches channel; PgUp/PgDn scrolls.

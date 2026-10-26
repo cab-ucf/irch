@@ -87,6 +87,11 @@ pub enum Call {
     },
     /// Pair with this computer's storage node (nixos.nix).
     StoreLocal,
+    /// A file served from this device, left where it is.
+    Offer {
+        path: String,
+        name: Option<String>,
+    },
     File {
         space: Id,
         file: File,
@@ -175,6 +180,9 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
         }
         Call::Store { space, node, on } => {
             json!(n.store(&space, &node, on).await?)
+        }
+        Call::Offer { path, name } => {
+            json!(n.offer(std::path::Path::new(&path), name.as_deref()).await?)
         }
         Call::StoreLocal => {
             let code =

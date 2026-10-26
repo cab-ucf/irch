@@ -3,6 +3,7 @@
 #[cfg(target_os = "android")]
 mod android;
 
+use anyhow::Context;
 use irch_core::{Ch, Config, File, Id, Net, Node, Notice, api};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -172,6 +173,36 @@ async fn media(s: State<'_, App>, req: Request<'_>) -> Result<(), String> {
     Ok(())
 }
 
+/// A picked file in parts (a page knows no paths), appended to its copy in
+/// irch's folder, which is then offered; the reply is that copy's path.
+/// Bytes, or base64 where IPC carries none (Android).
+#[tauri::command]
+fn upload(app: AppHandle, req: Request<'_>) -> Result<String, String> {
+    use std::io::Write;
+    let r = || {
+        let id = req.headers().get("x-upload").and_then(|v| v.to_str().ok());
+        let hex = |i: &&str| {
+            i.len() == 32 && i.bytes().all(|b| b.is_ascii_hexdigit())
+        };
+        let id = id.filter(hex).context("no upload id")?;
+        let dir = app.path().app_data_dir()?.join("offered");
+        std::fs::create_dir_all(&dir)?;
+        let part = match req.body() {
+            InvokeBody::Raw(b) => b.clone(),
+            InvokeBody::Json(v) => {
+                let b64 = v["data"].as_str().context("no data")?;
+                data_encoding::BASE64.decode(b64.as_bytes())?
+            }
+        };
+        let p = dir.join(id);
+        let mut f =
+            std::fs::OpenOptions::new().create(true).append(true).open(&p)?;
+        f.write_all(&part)?;
+        anyhow::Ok(p.to_string_lossy().into())
+    };
+    r().map_err(err)
+}
+
 /// Frames from our call, to the page: the sender's id, then the frame.
 #[tauri::command]
 async fn tune(s: State<'_, App>, to: Channel<Body>) -> Result<(), String> {
@@ -272,7 +303,9 @@ pub fn run() {
         }
     }));
     #[cfg(desktop)]
-    let b = b.plugin(tauri_plugin_updater::Builder::new().build());
+    let b = b
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init());
     let b = b
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -319,7 +352,7 @@ pub fn run() {
     });
     let b = b.invoke_handler(tauri::generate_handler![
         irch, link, qr, math, save, share, media, tune, opened, update,
-        viewing, hush
+        viewing, hush, upload
     ]);
     let app = b.build(tauri::generate_context!()).expect("tauri builds");
     app.run(|app, e| {
