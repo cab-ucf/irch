@@ -2042,9 +2042,11 @@ async fn pump(n: Arc<Node>, sp: Weak<Space>, boot: Vec<EndpointId>) {
 /// For push endpoints and updates: TLS as iroh sets it up, roots compiled
 /// in.
 pub fn http() -> reqwest::Client {
-    let tls = iroh::tls::CaTlsConfig::embedded()
-        .client_config(iroh::tls::default_provider())
-        .expect("TLS roots");
+    #[cfg(not(target_os = "android"))]
+    let ca = iroh::tls::CaTlsConfig::system();
+    #[cfg(target_os = "android")]
+    let ca = iroh::tls::CaTlsConfig::embedded();
+    let tls = ca.client_config(iroh::tls::default_provider()).expect("TLS");
     let b = reqwest::Client::builder().tls_backend_preconfigured(tls);
     // Stalls end a request, not its length: an update can be large.
     let b = b.connect_timeout(Duration::from_secs(20));
