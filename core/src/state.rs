@@ -159,6 +159,7 @@ impl State {
             }
             Op::Topic { thread, name } => {
                 let t = self.topics.entry(thread).or_default();
+                let name = crate::op::name(&name);
                 (t.insert(at, (s.author, name)).is_none(), false)
             }
             Op::React { target, emoji, on } => {
@@ -209,13 +210,19 @@ impl State {
             match op {
                 _ if role == Role::Banned || self.stale_at(at, a) => {}
                 Op::Profile { name, kem } => {
-                    self.profiles.insert(*a, (name.clone(), kem.clone()));
+                    let n = crate::op::name(name);
+                    self.profiles.insert(*a, (n, kem.clone()));
                     self.profiled.insert(*a, *at);
                 }
-                Op::Rename { name } if admin => self.name = Some(name.clone()),
+                Op::Rename { name } if admin => {
+                    self.name = Some(crate::op::name(name))
+                }
                 Op::Channel { id, name } if admin && self.dm.is_none() => {
                     match name {
-                        Some(n) => drop(self.channels.insert(*id, n.clone())),
+                        Some(n) => {
+                            let n = crate::op::name(n);
+                            drop(self.channels.insert(*id, n))
+                        }
                         None => drop(self.channels.remove(id)),
                     }
                 }

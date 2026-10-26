@@ -25,8 +25,12 @@ impl Log {
         let (mut recs, mut end, mut r) = (vec![], 0, BufReader::new(&f));
         let mut head = [0; 5];
         while r.read_exact(&mut head).is_ok() {
-            let mut b =
-                vec![0; u32::from_le_bytes(head[..4].try_into()?) as usize];
+            // Never more than an envelope: a damaged length ends the log.
+            let len = u32::from_le_bytes(head[..4].try_into()?) as usize;
+            if len > crate::op::MAX_ENV {
+                break;
+            }
+            let mut b = vec![0; len];
             if r.read_exact(&mut b).is_err() {
                 break;
             }

@@ -1257,10 +1257,17 @@ impl Node {
             let fix = admin && b.st.dm.is_none() && (b.st.leaks() || lost);
             (std::mem::take(&mut b.knocks), fix)
         };
+        let me = self.id();
         for inv in knocks {
             let known =
                 self.view(&self.own, |s| s.spaces().contains_key(&inv.id()));
+            // One DM per person: a flood of knocks opens no more.
+            let with = |sp: &Arc<Space>| {
+                self.view(&sp.id, |s| s.peer(&me) == Some(inv.owner))
+                    == Some(true)
+            };
             if known == Some(false)
+                && !self.all().iter().any(with)
                 && let Err(e) = self.enter(inv).await
             {
                 warn!("accepting a DM: {e}");
@@ -2107,8 +2114,14 @@ impl Node {
                 peer,
                 info.into_addrs().map(|a| a.into_addr()),
             );
+            // Members' devices only, the latest 512: anyone who knows a
+            // space's id may join its topic, and must not crowd them out.
+            let keep = !a.is_empty() && n.member_device(&peer);
             let mut l = lock(&n.local);
-            if !a.is_empty() && l.peers.len() < 512 {
+            if keep {
+                if l.peers.len() >= 512 && !l.peers.contains_key(&peer) {
+                    l.peers.pop_first();
+                }
                 l.peers.insert(peer, a);
             }
             drop(l);

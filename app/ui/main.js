@@ -886,7 +886,7 @@ function render(tokens, root) {
 
 // Links are copied, never opened: irch opens nothing on its own.
 const link = (href) => h("span", { class: "link", title: `Copy ${href}`,
-  onclick: () => copy(href, "Link copied") });
+  onclick: () => copy(href, `Copied ${href}`) }); // where it goes, said
 
 function spoiler() {
   const s = h("span", { class: "spoiler", title: "Spoiler" });
@@ -1114,8 +1114,8 @@ async function offerFile(file) {
 
 /** Desktops: files chosen by path stay where they are (any size, no copy). */
 async function offerPaths() {
-  const paths = await T.dialog.open({ multiple: true }).catch(() => null);
-  for (const path of [paths ?? []].flat()) {
+  const paths = await invoke("pick").catch(() => []);
+  for (const path of paths) {
     toast(`Sharing ${path.split(/[\\/]/).pop()} from this device…`);
     const f = await call("offer", { path }).catch(() => null);
     if (f) S.files.push(f);

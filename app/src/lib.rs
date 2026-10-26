@@ -106,9 +106,50 @@ fn err(e: anyhow::Error) -> String {
     format!("{e:#}")
 }
 
+/// Files the person picked (desktop): the page may offer those, and what
+/// it uploaded into irch's own folder, nothing else on this computer.
+static PICKED: std::sync::Mutex<Vec<std::path::PathBuf>> =
+    std::sync::Mutex::new(vec![]);
+
 #[tauri::command]
-async fn irch(s: State<'_, App>, call: api::Call) -> Result<Value, String> {
+async fn irch(
+    app: AppHandle,
+    s: State<'_, App>,
+    call: api::Call,
+) -> Result<Value, String> {
+    if let api::Call::Offer { path, .. } = &call {
+        let p = std::path::Path::new(path);
+        let mut picked = PICKED.lock().unwrap_or_else(|e| e.into_inner());
+        let chosen = picked.iter().position(|x| x == p);
+        let ours = app.path().app_data_dir().map(|d| d.join("offered"));
+        let ours = ours.is_ok_and(|d| p.parent() == Some(&d));
+        if !ours && chosen.is_none() {
+            return Err("only files you pick are shared".into());
+        }
+        chosen.map(|i| picked.remove(i));
+    }
     api::call(&node(&s).await?, call).await.map_err(err)
+}
+
+/// Files to share, picked here (desktop): kept, by path, as they are.
+#[cfg(desktop)]
+#[tauri::command]
+async fn pick(app: AppHandle) -> Vec<String> {
+    use tauri_plugin_dialog::DialogExt;
+    let got = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog().file().blocking_pick_files()
+    });
+    let got = got.await.ok().flatten().unwrap_or_default();
+    let got: Vec<_> =
+        got.into_iter().filter_map(|f| f.into_path().ok()).collect();
+    PICKED.lock().unwrap_or_else(|e| e.into_inner()).extend(got.clone());
+    got.iter().map(|p| p.to_string_lossy().into()).collect()
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn pick() -> Vec<String> {
+    vec![]
 }
 
 /// Become another device of the person behind `code`. A fresh
@@ -442,7 +483,8 @@ pub fn run() {
         hush,
         upload,
         serve_here,
-        notify_check
+        notify_check,
+        pick
     ]);
     let app = b.build(tauri::generate_context!()).expect("tauri builds");
     app.run(|app, e| {
