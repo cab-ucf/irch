@@ -16,14 +16,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-latest, windows-latest]
+        include:
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: windows-latest, target: aarch64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ${{ matrix.target }}
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y
           libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev
@@ -43,12 +52,23 @@ jobs:
         with:
           projectPath: app
           tauriScript: cargo tauri
+          args: --target ${{ matrix.target }}
           tagName: ${{ github.ref_name }}
           releaseName: irch ${{ github.ref_name }}
           includeUpdaterJson: true
+      - name: The terminal client and storage node, beside the app
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cargo build --release --locked -p irch --target ${{ matrix.target }}
+          x=$([ "$RUNNER_OS" = Windows ] && echo .exe || true)
+          cp target/${{ matrix.target }}/release/irch$x \
+            irch-${{ matrix.target }}$x
+          gh release upload "$GITHUB_REF_NAME" irch-${{ matrix.target }}$x \
+            --clobber
 
   android:
-    needs: desktop
     runs-on: ubuntu-latest
     steps:
       - name: Room for the build
@@ -86,4 +106,7 @@ jobs:
           "$tools/apksigner" sign --ks irch.jks --ks-pass env:PW \
             --ks-key-alias irch --out irch.apk a.apk
           rm irch.jks
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --title "irch $GITHUB_REF_NAME" ||
+            true # made meanwhile by a desktop job
           gh release upload "$GITHUB_REF_NAME" irch.apk --clobber
