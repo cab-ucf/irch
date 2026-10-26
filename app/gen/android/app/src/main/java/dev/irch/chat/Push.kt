@@ -96,6 +96,9 @@ class IrchWake : Service() {
 
 const val SYNCING = "syncing"
 
+/** Its owner's own servers wake it (src/android.rs): irch saved them. */
+fun wakeServers(ctx: Context) = java.io.File(ctx.dataDir, "wake.json").exists()
+
 /** No push app: irch stays connected, so messages and calls arrive. */
 fun live(ctx: Context) {
   runCatching { ctx.startForegroundService(Intent(ctx, IrchLive::class.java)) }
@@ -142,7 +145,7 @@ class Boot : android.content.BroadcastReceiver() {
     if (i.action != Intent.ACTION_BOOT_COMPLETED) return
     val pushed = org.unifiedpush.android.connector.UnifiedPush
       .getAckDistributor(ctx) != null
-    if (!pushed) live(ctx)
+    if (!pushed || wakeServers(ctx)) live(ctx)
   }
 }
 

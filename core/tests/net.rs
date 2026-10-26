@@ -520,3 +520,45 @@ async fn writing_wakes_a_sleeping_device() {
     until("b has it", || texts(&b, &id, &ch).len() == 2).await;
     assert!(b.notices().is_empty(), "mentions only");
 }
+
+/// b's phone sleeps holding one quiet connection to b's storage node; a
+/// writes, a asks b's servers to wake it, the one holding it does, at
+/// once. Nothing of Google's, nothing but irch.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_storage_node_wakes_a_sleeping_phone() {
+    let (db, ds) = (dir("b"), dir("ws"));
+    let a = node("a").await;
+    let b = start(&db, "b", None, false).await;
+    let s = start(&ds, "s", None, true).await;
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let at = format!("127.0.0.1:{port}");
+    s.serve_wakes(at.parse().unwrap(), vec![at.clone()]).await.unwrap();
+    let id = a.create("lab").await.unwrap();
+    let ch = general(&a, &id);
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    pair(&b, &s, &[]).await;
+
+    let targets = b.wake_setup().await;
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].at, [at]);
+    let wakes = |n: &Node| {
+        n.view(&id, |st| {
+            st.pushes().iter().any(|p| p.1.starts_with("irch:wake:"))
+        }) == Some(true)
+    };
+    until("a knows to wake b through s", || wakes(&a)).await;
+
+    // Asleep: only the cached servers, no node needed.
+    let (device, t) = irch_core::wake::load(&db).unwrap();
+    let phone =
+        tokio::spawn(async move { irch_core::wake::wait(device, &t).await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!phone.is_finished(), "it waits quietly");
+    say(&a, &id, ch, "lunch?").await;
+    let woke = tokio::time::timeout(Duration::from_secs(10), phone).await;
+    assert!(woke.expect("woken within seconds").unwrap().is_ok());
+}

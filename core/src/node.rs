@@ -408,10 +408,31 @@ pub struct Node {
     clock: AtomicU64,
     invisible: AtomicBool,
     serve: Option<[u8; 16]>,
+    // A storage node: the phones holding a wake connection here.
+    phones: crate::wake::Hub,
     // Files offered from here, and those fetched (served on to members).
     files: Option<FsStore>,
     call: Mutex<Option<Call>>,
     media: call::Media,
+}
+
+/// Public addresses first: a phone tries them in turn.
+fn wake_order(
+    mut ips: Vec<std::net::IpAddr>,
+) -> impl Iterator<Item = std::net::IpAddr> {
+    let private = |ip: &std::net::IpAddr| match ip {
+        std::net::IpAddr::V4(a) => {
+            a.is_private() || a.is_loopback() || a.is_link_local()
+        }
+        std::net::IpAddr::V6(a) => {
+            a.is_loopback()
+                || (a.segments()[0] & 0xfe00) == 0xfc00
+                || (a.segments()[0] & 0xffc0) == 0xfe80
+        }
+    };
+    ips.sort_by_key(|ip| private(ip));
+    ips.dedup();
+    ips.into_iter()
 }
 
 /// Serves sync and blobs; the ALPN says which.
@@ -424,6 +445,7 @@ impl ProtocolHandler for Proto {
         let n = self.0.upgrade().ok_or_else(gone)?;
         let r = match c.alpn() {
             sync::ALPN => sync::respond(&n, &c).await,
+            crate::wake::ALPN => crate::wake::answer(&n.phones, c).await,
             call::ALPN => {
                 n.answer(c).await;
                 Ok(())
@@ -581,6 +603,7 @@ impl Node {
             events: broadcast::channel(1024).0,
             clock: AtomicU64::new(0),
             serve,
+            phones: Default::default(),
             files,
             call: Mutex::new(None),
             media: broadcast::channel(512).0,
@@ -594,6 +617,7 @@ impl Node {
         let router = router
             .accept(iroh_gossip::ALPN, n.gossip.clone())
             .accept(sync::ALPN, Proto(Arc::downgrade(&n)))
+            .accept(crate::wake::ALPN, Proto(Arc::downgrade(&n)))
             .accept(BLOB, Proto(Arc::downgrade(&n)))
             .accept(call::ALPN, Proto(Arc::downgrade(&n)))
             .spawn();
@@ -752,6 +776,60 @@ impl Node {
         lock(&self.prefs).push.is_some()
     }
 
+    /// A storage node: take phones' wake connections on `listen`; they
+    /// reach it at `at`, else at each address it has, with that port.
+    pub async fn serve_wakes(
+        self: &Arc<Self>,
+        listen: std::net::SocketAddr,
+        mut at: Vec<String>,
+    ) -> Result<()> {
+        let token = self.serve.context("only storage nodes take phones")?;
+        let l = tokio::net::TcpListener::bind(listen).await?;
+        if at.is_empty() {
+            let port = l.local_addr()?.port();
+            let ips = self.addr().await.ip_addrs().map(|a| a.ip()).collect();
+            at = wake_order(ips)
+                .map(|ip| (ip, port).into())
+                .map(|a: std::net::SocketAddr| a.to_string())
+                .collect();
+        }
+        self.phones.at(at);
+        let n = Arc::downgrade(self);
+        tokio::spawn(async move {
+            while let Ok((s, _)) = l.accept().await {
+                let Some(n) = n.upgrade() else { return };
+                tokio::spawn(async move {
+                    let key = n.ep.secret_key().clone();
+                    if let Err(e) = n.phones.phone(s, &key, &token).await {
+                        debug!("wake connection: {e:#}");
+                    }
+                });
+            }
+        });
+        Ok(())
+    }
+
+    /// A phone: which of its owner's servers take wake connections, kept
+    /// for its background service, and its spaces told to wake it there.
+    /// None reachable now: as it was.
+    pub async fn wake_setup(self: &Arc<Self>) -> Vec<crate::wake::Target> {
+        let paired = self.view(&self.own, |s| s.storage()).unwrap_or_default();
+        let (mut targets, mut servers) = (vec![], vec![]);
+        for (addr, token) in paired {
+            let at = crate::wake::find(&self.ep, addr.clone()).await;
+            if let Some(at) = at.ok().filter(|a| !a.is_empty()) {
+                targets.push(crate::wake::Target { at, id: addr.id, token });
+                servers.push(addr);
+            }
+        }
+        if !targets.is_empty() {
+            let _ = crate::wake::save(&self.dir, self.ep.id(), &targets);
+            let url = crate::wake::url(self.ep.id(), &servers);
+            self.set_push(Some(url)).await;
+        }
+        targets
+    }
+
     /// Where others wake this device when they write (UnifiedPush), or
     /// none: told every space we are in, sealed like any op.
     pub async fn set_push(self: &Arc<Self>, url: Option<String>) {
@@ -782,8 +860,10 @@ impl Node {
         let dev = self.ep.id();
         let urls = self.view(id, |s| s.pushes()).unwrap_or_default();
         // https only (a member names the URL: never our LAN); tests, local.
+        // Or a phone's own wake servers, asked over iroh.
         let ok = |u: &String| {
             u.starts_with("https://")
+                || u.starts_with("irch:wake:")
                 || cfg!(debug_assertions) && u.starts_with("http://127.0.0.1:")
         };
         for (_, url) in urls.into_iter().filter(|u| u.0 != dev && ok(&u.1)) {
@@ -793,7 +873,9 @@ impl Node {
                     w.entry(url.clone()).or_insert((None, false));
                 let since =
                     last.map_or(Duration::MAX, |t: Instant| t.elapsed());
-                let wait = Duration::from_secs(30).saturating_sub(since);
+                // A push service is spared; our own servers are not.
+                let gap = if url.starts_with("irch:wake:") { 2 } else { 30 };
+                let wait = Duration::from_secs(gap).saturating_sub(since);
                 match (wait.is_zero(), *held) {
                     (_, true) => continue,
                     (true, _) => *last = Some(Instant::now()),
@@ -808,6 +890,12 @@ impl Node {
                 if !wait.is_zero() {
                     lock(&n.wake)
                         .insert(url.clone(), (Some(Instant::now()), false));
+                }
+                if url.starts_with("irch:wake:") {
+                    if let Err(e) = crate::wake::ring(&n.ep, &url).await {
+                        warn!("wake: {e:#}");
+                    }
+                    return;
                 }
                 let http = n.http.get_or_init(http);
                 let r = http.post(&url).header("TTL", "86400");

@@ -239,16 +239,25 @@ closes the topmost thing (a thread returns to its channel), then sends
 irch to the background.
 
 Phones sleep: holding iroh connections open would wake the radio every
-few seconds. Instead, whoever writes wakes the others: a phone with a
+few seconds. Instead, whoever writes wakes the others. Best, with no
+Google and nothing else to install: a phone paired with its owner's
+storage node (`irch --serve`, on any always-on computer, as many as you
+like) holds one TCP connection to one of them, which sends a byte every
+4½ minutes (the phone's kernel answers it; irch sleeps) and "wake" the
+moment anyone writes: the writer asks that phone's nodes over iroh until
+one has it. A node offers this on TCP 7745 (`--wake-port`; NixOS opens
+it): phones must reach it there, so behind a router forward that port
+and say where (`--wake-addr host:7745`, `services.irch.wakeAddress`).
+The node is checked by its key, the phone by its pairing. Else, a
 UnifiedPush app ([ntfy](https://ntfy.sh): from F-Droid, or from Google
 Play on ntfy.sh, which rides Google's own connection at no battery cost)
 tells its spaces, sealed like any op, where to reach it; the writer's
-device sends that address a ping with nothing in it (at most every 30 s),
-and the phone wakes for a few seconds, fetches from the writer over iroh,
-and notifies. Push servers learn only that a ping went to an address.
-Starting a call wakes the others the same way, and anyone in it says so
-at once to a device that comes back. With no push app, irch stays
-connected instead (a quiet "Connected for messages and calls"
+device sends that address a ping with nothing in it (at most every 30
+s), and the phone wakes for a few seconds, fetches from the writer over
+iroh, and notifies. Push servers learn only that a ping went to an
+address. Starting a call wakes the others the same way, and anyone in it
+says so at once to a device that comes back. With no push app, irch
+stays connected instead (a quiet "Connected for messages and calls"
 notification, from boot on): every message and call arrives, at a cost
 in battery that ntfy avoids. With one, out of sight for a minute (and in
 no call), the node stops altogether; phones skip the Mainline DHT

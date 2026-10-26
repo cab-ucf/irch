@@ -70,7 +70,8 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     // A push app wakes irch for almost no battery; without one, a service
     // keeps it running, or messages and calls would wait for it.
     UnifiedPush.tryUseCurrentOrDefaultDistributor(activity) { ok ->
-      if (ok) UnifiedPush.register(activity) else live(activity)
+      if (ok) UnifiedPush.register(activity)
+      if (!ok || wakeServers(activity)) live(activity)
     }
   }
 

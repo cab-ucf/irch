@@ -8,6 +8,7 @@
 #   programs.irch.enable = true;      # the app, and `irch` in a terminal
 #   services.irch.enable = true;      # a storage node, always on
 #   services.irch.users = [ "you" ];  # their irch pairs with it in one step
+#   services.irch.wakeAddress = [ "host.example.org:7745" ];  # if not public
 #   journalctl -u irch | grep -A1 'Storage code'   # give this to others
 { config, lib, pkgs, ... }:
 let
@@ -38,6 +39,22 @@ in {
     services.irch.users = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
+    };
+    # Its owners' phones hold one quiet TCP connection here, to be woken
+    # when anyone writes: no Google, no push app (0: none).
+    services.irch.wakePort = lib.mkOption {
+      type = lib.types.port;
+      default = 7745;
+    };
+    # Where phones reach it, if not at this machine's own addresses: say,
+    # [ "irch.example.org:7745" ] behind a forwarded port.
+    services.irch.wakeAddress = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+    };
+    services.irch.openFirewall = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
     };
   };
 
@@ -82,14 +99,18 @@ in {
     })
 
     (lib.mkIf cfg.enable {
+      networking.firewall.allowedTCPPorts =
+        lib.mkIf (cfg.openFirewall && cfg.wakePort != 0) [ cfg.wakePort ];
       systemd.services.irch = {
         wantedBy = [ "multi-user.target" ];
         wants = [ "network-online.target" ];
         after = [ "network-online.target" ];
         serviceConfig = {
           User = "irch";
-          ExecStart =
-            "${pick "irch"}/bin/irch --serve --dir /var/lib/irch/data";
+          ExecStart = lib.concatStringsSep " " ([
+            "${pick "irch"}/bin/irch --serve --dir /var/lib/irch/data"
+            "--wake-port ${toString cfg.wakePort}"
+          ] ++ map (a: "--wake-addr ${lib.escapeShellArg a}") cfg.wakeAddress);
           Restart = "always"; RestartSec = 5;
           NoNewPrivileges = true; PrivateTmp = true; PrivateDevices = true;
           ProtectSystem = "strict"; ProtectHome = true;

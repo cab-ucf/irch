@@ -32,6 +32,14 @@ struct Cli {
     /// Keep other people's ciphertext: a storage node
     #[arg(long)]
     serve: bool,
+    /// A storage node: TCP port its owners' phones hold their one quiet
+    /// connection to, to be woken (0: none)
+    #[arg(long, default_value_t = 7745)]
+    wake_port: u16,
+    /// Where phones reach that port, as host:port (repeatable; else this
+    /// computer's own addresses)
+    #[arg(long)]
+    wake_addr: Vec<String>,
     /// No interface: an always-on device of yours
     #[arg(long)]
     headless: bool,
@@ -130,6 +138,20 @@ async fn main() -> Result<()> {
     if let Some(code) = n.storage_code().await {
         // Where irch on this computer finds it (irch_core::local_storage).
         std::fs::write(code_file, &code)?;
+        if c.wake_port != 0 {
+            // Both stacks: [::] alone is IPv6-only on some systems.
+            let mut ok = false;
+            for ip in ["::", "0.0.0.0"] {
+                let at = std::net::SocketAddr::new(ip.parse()?, c.wake_port);
+                ok |= n.serve_wakes(at, c.wake_addr.clone()).await.is_ok();
+            }
+            if !ok {
+                eprintln!(
+                    "Port {} is taken: phones cannot be woken here.",
+                    c.wake_port
+                );
+            }
+        }
         println!("Storage code (give it to the people you store for):");
         println!("{code}");
         // nixos.nix: where this computer's own users' irch finds it.

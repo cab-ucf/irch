@@ -489,6 +489,12 @@ async fn start(app: &AppHandle, link: Option<String>) -> Result<(), String> {
             });
         let n = tokio::spawn(Node::start(config(dir, link, notes)?)).await??;
         adopt(n.clone());
+        // Phones: woken through their owner's own servers, if any take it.
+        #[cfg(target_os = "android")]
+        {
+            let n = n.clone();
+            tauri::async_runtime::spawn(async move { n.wake_setup().await });
+        }
         anyhow::Ok(n)
     };
     let r = r.await.map_err(err);
