@@ -1,9 +1,10 @@
 # NixOS: irch for this computer's people, and an always-on storage node,
 # both kept at irch's latest release: its source checked against irch's
 # signing key, then built here, hourly.
-#   imports = [ "${builtins.fetchTarball
-#     "https://github.com/cab-ucf/irch/archive/main.tar.gz"}/nixos.nix" ];
-#   (flakes: irch.nixosModules.default)
+#   flakes: inputs.irch.url = "github:cab-ucf/irch";
+#           imports = [ inputs.irch.nixosModules.default ];
+#   else:   imports = [ "${builtins.fetchTarball
+#             "https://github.com/cab-ucf/irch/archive/main.tar.gz"}/nixos.nix" ];
 #   programs.irch.enable = true;      # the app, and `irch` in a terminal
 #   services.irch.enable = true;      # a storage node, always on
 #   services.irch.users = [ "you" ];  # their irch pairs with it in one step

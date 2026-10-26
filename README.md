@@ -35,18 +35,28 @@ System Settings → Privacy & Security, never `xattr`.
 
 ### NixOS
 
+A flake (`/etc/nixos/flake.nix`):
+
 ```nix
-imports = [ "${builtins.fetchTarball
-  "https://github.com/cab-ucf/irch/archive/main.tar.gz"}/nixos.nix" ];
+inputs.irch.url = "github:cab-ucf/irch";
+inputs.irch.inputs.nixpkgs.follows = "nixpkgs";
+# in nixosSystem's modules, or a module's imports:
+inputs.irch.nixosModules.default
+```
+
+Without flakes: `imports = [ "${builtins.fetchTarball
+"https://github.com/cab-ucf/irch/archive/main.tar.gz"}/nixos.nix" ];`.
+Then:
+
+```nix
 programs.irch.enable = true;      # the app, and `irch` in a terminal
 services.irch.enable = true;      # a storage node, always on
 services.irch.users = [ "you" ];  # your irch pairs with it in one step
 ```
 
-(Flakes: `irch.nixosModules.default`, and `packages.<system>.irch`.)
 Hourly, a service fetches the newest release's source, checks it against
 irch's signing key, and builds it with Nix as its own user; the app and
-the node switch to that build.
+the node switch to that build (`packages.<system>.irch` is the flake's).
 
 ### From source
 
