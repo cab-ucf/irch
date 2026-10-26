@@ -13,12 +13,10 @@ import android.os.Build
 import android.webkit.WebView
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationChannelCompat
-import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.DefaultLifecycleObserver
-import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import app.tauri.annotation.Command
@@ -36,10 +34,12 @@ class WatchArgs {
 }
 
 @InvokeArg
-class MentionArgs {
-  var tag = ""
+class AlertArgs {
+  var space = ""
+  var room = ""
   var title = ""
   var body = ""
+  var ring = false
 }
 
 @InvokeArg
@@ -60,8 +60,10 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     if (!notificationsAllowed(activity) && Build.VERSION.SDK_INT >= 33) {
       ActivityCompat.requestPermissions(activity, arrayOf(POST_NOTIFICATIONS), 1)
     }
+    // A push app wakes irch for almost no battery; without one, a service
+    // keeps it running, or messages and calls would wait for it.
     UnifiedPush.tryUseCurrentOrDefaultDistributor(activity) { ok ->
-      if (ok) UnifiedPush.register(activity)
+      if (ok) UnifiedPush.register(activity) else live(activity)
     }
   }
 
@@ -92,14 +94,20 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     invoke.resolve()
   }
 
-  /** A mention, shown only while irch is in the background. */
+  /** The Rust side left out what is on screen; the rest is told. */
   @Command
-  fun mention(invoke: Invoke) {
-    val args = invoke.parseArgs(MentionArgs::class.java)
-    val state = ProcessLifecycleOwner.get().lifecycle.currentState
-    if (!state.isAtLeast(Lifecycle.State.STARTED)) {
-      postMessage(activity, args.tag, args.title, args.body)
-    }
+  fun alert(invoke: Invoke) {
+    val a = invoke.parseArgs(AlertArgs::class.java)
+    alert(activity, org.json.JSONObject().put("space", a.space)
+      .put("room", a.room).put("title", a.title).put("body", a.body)
+      .put("ring", a.ring))
+    invoke.resolve()
+  }
+
+  /** A call answered or declined in the page: the ringing stops. */
+  @Command
+  fun hush(invoke: Invoke) {
+    hush(activity)
     invoke.resolve()
   }
 
@@ -154,8 +162,6 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
   }
 }
 
-const val MESSAGES = "messages"
-
 fun notificationsAllowed(ctx: Context) = Build.VERSION.SDK_INT < 33 ||
   ContextCompat.checkSelfPermission(ctx, POST_NOTIFICATIONS) ==
   PackageManager.PERMISSION_GRANTED
@@ -169,26 +175,3 @@ fun notificationChannel(ctx: Context, id: String, name: String, level: Int) =
   NotificationManagerCompat.from(ctx).createNotificationChannel(
     NotificationChannelCompat.Builder(id, level).setName(name).build()
   )
-
-/** Locked, the screen shows only "New message"; the text needs unlocking. */
-fun postMessage(ctx: Context, tag: String, title: String, body: String) {
-  if (!notificationsAllowed(ctx)) return
-  val high = NotificationManagerCompat.IMPORTANCE_HIGH
-  notificationChannel(ctx, MESSAGES, "Messages", high)
-  val hidden = NotificationCompat.Builder(ctx, MESSAGES)
-    .setSmallIcon(R.drawable.ic_stat)
-    .setContentTitle("New message")
-    .build()
-  val n = NotificationCompat.Builder(ctx, MESSAGES)
-    .setSmallIcon(R.drawable.ic_stat)
-    .setContentTitle(title)
-    .setContentText(body)
-    .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-    .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-    .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-    .setPublicVersion(hidden)
-    .setContentIntent(openAppIntent(ctx))
-    .setAutoCancel(true)
-    .build()
-  NotificationManagerCompat.from(ctx).notify(tag, 0, n)
-}

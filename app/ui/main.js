@@ -304,6 +304,7 @@ function select(sid, ch) {
     cancelReply();
   }
   S.ch = ch;
+  quiet(invoke("viewing", { space: sid ?? null, room: ch ?? null }));
   if (ch) store.set("ch." + sid, inThread() ? S.thread.parent : ch);
   document.body.classList.remove("drawer");
   renderSidebar();
@@ -428,8 +429,13 @@ async function updates(quietly) {
     .catch((e) => toast(`Update failed: ${e}`, true));
 }
 
-/** irch://open/SPACE/CHANNEL/MESSAGE, from a note: there, if we can. */
+/** irch://open/SPACE/CHANNEL/MESSAGE, from a note: there, if we can;
+ *  irch://call/SPACE/CHANNEL, a call answered from its notification, and
+ *  irch://ring/…, the notification opened (answer or decline here). */
 async function openUrl(url) {
+  const c = /^irch:\/\/(call|ring)\/([0-9a-f]{64})\/([0-9a-f]{16})$/
+    .exec(url);
+  if (c) return c[1] === "call" ? answer(c[2], c[3]) : incoming(c[2], c[3]);
   if (!String(url).startsWith("irch://open/")) return;
   const [sid, ch, msg] = url.replace(/^irch:\/\/open\//, "").split("/");
   const s = S.spaces.find((x) => x.id === sid);
@@ -557,6 +563,61 @@ async function ring() {
     toast(String(e?.message ?? e), true);
     await av.leave(rpc);
   }
+}
+
+// ---------- alerts ----------
+
+// Desktops sound alerts here (phones: the system's sound, the ringtone).
+let audio;
+function tone(notes, gain) {
+  audio ??= new AudioContext();
+  quiet(audio.resume());
+  const t0 = audio.currentTime;
+  for (const [f, at, len] of notes) {
+    const o = audio.createOscillator();
+    const g = audio.createGain();
+    o.frequency.value = f;
+    g.gain.setValueAtTime(gain, t0 + at);
+    g.gain.exponentialRampToValueAtTime(1e-4, t0 + at + len);
+    o.connect(g).connect(audio.destination);
+    o.start(t0 + at);
+    o.stop(t0 + at + len);
+  }
+}
+const chime = () => tone([[880, 0, 0.12], [1320, 0.13, 0.25]], 0.15);
+// A phone's ring: 440 and 480 Hz together, two seconds in every six.
+const ringing = () => tone([[440, 0, 2], [480, 0, 2]], 0.07);
+
+let calling = null;
+
+/** Someone calls (a DM): answer or decline; after 45 s, missed. */
+function incoming(sid, ch, who) {
+  if (calling) return;
+  const ids = callOf(sid, ch)?.call ?? [];
+  who ??= ids.length ? nameOf(ids[0]) : "Someone";
+  const rings = android ? 0 : setInterval(ringing, 6000);
+  if (!android) ringing();
+  const late = setTimeout(() => $("modal").close(), 45e3);
+  calling = modal((finish) => h("div", {},
+    h("div", { class: "m-body" }, h("h2", {}, who),
+      h("p", { class: "sub" }, "is calling you")),
+    foot(h("button", { class: "btn link", onclick: () => finish(false) },
+      "Decline"),
+    h("button", { class: "btn green", onclick: () => finish(true) },
+      "Answer"))));
+  calling.then((yes) => {
+    clearInterval(rings);
+    clearTimeout(late);
+    calling = null;
+    quiet(invoke("hush"));
+    if (yes) answer(sid, ch);
+  });
+}
+
+async function answer(sid, ch) {
+  quiet(invoke("hush"));
+  select(sid, ch);
+  if (!here()) await ring();
 }
 
 async function camera(kind) {
@@ -871,8 +932,10 @@ const inl = (tokens) => [...render(tokens, h("span", {})).childNodes];
 const MIME = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
   gif: "image/gif", webp: "image/webp", avif: "image/avif", bmp: "image/bmp" };
 const mime = (name) => MIME[name.split(".").pop().toLowerCase()];
-const size = (n) => n < 1024 ? `${n} B` : n < 1 << 20 ? `${n >> 10} KB`
-  : `${(n / (1 << 20)).toFixed(1)} MB`;
+const size = (n) => {
+  const i = Math.min(4, Math.floor(Math.log2(Math.max(1, n)) / 10));
+  return `${i ? (n / 2 ** (10 * i)).toFixed(1) : n} ${"BKMGT"[i]}${i ? "B" : ""}`;
+};
 const images = new Map(); // hash -> Promise of a data: URL
 
 function image(f) {
@@ -900,9 +963,12 @@ function attachments(files) {
   }));
 }
 
+// An offered file's key is all zeros: its sender's device serves it.
+const offered = (f) => /^0+$/.test(f.key);
 const fileChip = (f) => h("div", { class: "file-chip" }, icon("file"),
   h("div", { class: "meta", title: "Preview", onclick: () => preview(f) },
-    h("b", {}, f.name), h("small", {}, size(f.size))),
+    h("b", {}, f.name), h("small", {}, size(f.size),
+      offered(f) ? " · from its sender's device, while online" : "")),
   h("button", { title: android ? "Share" : "Save to Downloads",
     onclick: () => saveFile(f) }, icon("down")));
 
@@ -967,18 +1033,49 @@ function lightbox(src, f) {
       } }, android ? "Share" : "Save"))));
 }
 
-async function addFiles(list) {
+const SEALED = 25 << 20; // what storage nodes take
+const PART = 4 << 20;
+const b64 = (blob) => new Promise((ok) => {
+  const r = new FileReader();
+  r.onload = () => ok(r.result.slice(r.result.indexOf(",") + 1));
+  r.readAsDataURL(blob);
+});
+
+/** Up to 25 MB, sealed for storage nodes (there while you are offline);
+ *  larger, or `keep`, served from this device while it is online. */
+async function addFiles(list, keep) {
   for (const file of list) {
-    if (file.size > 25 << 20) {
-      toast(`${file.name} is over 25 MB`, true);
-      continue;
-    }
-    const data = await new Promise((ok) => {
-      const r = new FileReader();
-      r.onload = () => ok(r.result.slice(r.result.indexOf(",") + 1));
-      r.readAsDataURL(file);
-    });
-    const f = await call("attach", { name: file.name, data }).catch(() => null);
+    const here = keep || file.size > SEALED;
+    if (here) toast(`Sharing ${file.name} from this device…`);
+    const f = await (here ? offerFile(file) : sealFile(file))
+      .catch(() => null);
+    if (f) S.files.push(f);
+    renderFilesBar();
+  }
+}
+
+const sealFile = async (file) =>
+  call("attach", { space: S.sid, name: file.name, data: await b64(file) });
+
+/** Into irch's folder in parts (a page knows no paths), then offered. */
+async function offerFile(file) {
+  const id = randomId(16);
+  let path;
+  for (let at = 0; at === 0 || at < file.size; at += PART) {
+    const part = file.slice(at, at + PART);
+    const body = android ? { data: await b64(part) }
+      : new Uint8Array(await part.arrayBuffer());
+    path = await invoke("upload", body, { headers: { "x-upload": id } });
+  }
+  return call("offer", { path, name: file.name });
+}
+
+/** Desktops: files chosen by path stay where they are (any size, no copy). */
+async function offerPaths() {
+  const paths = await T.dialog.open({ multiple: true }).catch(() => null);
+  for (const path of [paths ?? []].flat()) {
+    toast(`Sharing ${path.split(/[\\/]/).pop()} from this device…`);
+    const f = await call("offer", { path }).catch(() => null);
     if (f) S.files.push(f);
     renderFilesBar();
   }
@@ -1196,6 +1293,7 @@ function spaceMenu(anchor) {
     s.admin && ["Create Channel", "plus", createChannel],
     s.admin && ["Rename Space", "pencil", renameSpace],
     s.admin && ["Reset Invite Links", "key", resetInvites],
+    ["Storage Nodes", "disk", () => storageFlow(s)],
     "-",
     ...[["All", "All messages"], ["Mentions", "Only @mentions"],
       ["Off", "Nothing"]].map(([level, text]) => [
@@ -1207,6 +1305,36 @@ function spaceMenu(anchor) {
   ]);
 }
 
+
+/** Which of your storage nodes keep this space: encrypted, there while
+ *  everyone is offline. */
+function storageFlow(s) {
+  const local = S.me.local_storage;
+  const keep = (node, on) => quiet(call("store", { space: s.id, node, on }));
+  const paired = s.storage.some((x) => x.node === local);
+  modal((finish) => {
+    const sw = (x) => h("label", { class: "switch" },
+      h("span", {}, short(x.node),
+        h("small", {}, x.node === local ? "This computer" : "Storage node")),
+      h("input", { type: "checkbox", checked: x.on,
+        onchange: (e) => keep(x.node, e.target.checked) }), h("i"));
+    const here = local && !paired && h("button", { class: "btn",
+      onclick: async () => {
+        await quiet(call("store_local").then(() => keep(local, true)));
+        finish(true);
+      } }, "Keep it on this computer's storage node");
+    return h("div", {},
+      h("div", { class: "m-body" }, h("h2", {}, "Storage Nodes"),
+        h("p", { class: "sub" }, "A storage node keeps this space " +
+          "encrypted, so it waits there while everyone is offline."),
+        s.storage.map(sw), here,
+        !s.storage.length && !here && h("p", { class: "note" },
+          "Pair one with its code in My Account, or run nixos.nix on " +
+          "this computer.")),
+      foot(h("button", { class: "btn grey", onclick: () => finish(null) },
+        "Done")));
+  });
+}
 
 function memberCard(id, anchor, align) {
   const s = cur();
@@ -1453,7 +1581,7 @@ function settings() {
       if (n && n !== S.me.name) await quiet(call("set_name", { name: n }));
       const code = storage.value.trim();
       if (code) await quiet(call("add_storage", { code })
-        .then(() => toast("Your spaces now also live on that storage node")));
+        .then(() => toast("Paired: each space's menu picks what it keeps")));
       S.me = await rpc("me");
       renderUserPanel();
       schedule("members", "msgs");
@@ -1831,9 +1959,14 @@ function wire() {
     store.set("members", on ? "1" : "0");
   };
   $("attach-btn").append(icon("clip"));
-  $("attach-btn").onclick = () => $("picker").click();
+  const pick = (keep) => ((S.keep = keep), $("picker").click());
+  $("attach-btn").onclick = (e) => menu(e.currentTarget, [
+    ["Upload: storage nodes keep it (to 25 MB)", "clip", () => pick(false)],
+    ["Share from this device (any size)", "disk",
+      () => (android ? pick(true) : offerPaths())],
+  ]);
   $("picker").onchange = (e) => {
-    addFiles([...e.target.files]);
+    addFiles([...e.target.files], S.keep);
     e.target.value = "";
   };
   addEventListener("dragover", (e) => e.preventDefault());
@@ -1980,6 +2113,10 @@ async function start() {
     }
   });
   await T.event.listen("open-url", ({ payload }) => openUrl(payload));
+  await T.event.listen("alert", ({ payload: a }) => {
+    if (a.ring) return incoming(a.space, a.room, a.title);
+    if (!android) chime();
+  });
   await loadSidebar();
   if (!S.spaces.length) renderHeader();
   const url = await invoke("opened").catch(() => null);

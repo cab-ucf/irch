@@ -38,6 +38,18 @@ async fn start(
     Node::start(cfg).await.unwrap()
 }
 
+/// Pair `a` with storage node `s`, which then keeps `spaces` too.
+async fn pair(a: &Arc<Node>, s: &Node, spaces: &[Id]) -> String {
+    let code = s.storage_code().await.unwrap();
+    a.add_storage(&code).await.unwrap();
+    let (addr, _): (iroh::EndpointAddr, [u8; 16]) =
+        irch_core::op::uncode("host", &code).unwrap();
+    for id in spaces {
+        a.store(id, &addr.id, true).await.unwrap();
+    }
+    code
+}
+
 async fn node(name: &str) -> Arc<Node> {
     start(&dir(name), name, None, false).await
 }
@@ -201,8 +213,7 @@ async fn a_space_id_alone_gets_nothing_stored() {
     let a = node("a").await;
     let id = a.create("home").await.unwrap();
     say(&a, &id, general(&a, &id), "kept").await;
-    let code = s.storage_code().await.unwrap();
-    a.add_storage(&code).await.unwrap();
+    let code = pair(&a, &s, &[id]).await;
     let held =
         |n: &Node| n.held().iter().find(|h| h.0 == id).map_or(0, |h| h.1);
     until("storage holds it", || held(&s) == held(&a)).await;
@@ -242,13 +253,77 @@ async fn direct_messages() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_dm_call_rings_once() {
+    let (a, b) = (node("a").await, node("b").await);
+    let id = a.create("hub").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let keyed = || a.view(&id, |s| s.kem(&b.id()).is_some()) == Some(true);
+    until("b's key", keyed).await;
+    let dm = a.dm(&id, &b.id()).await.unwrap();
+    say(&a, &dm, irch_core::state::DM, "psst").await;
+    until("b in the DM", || b.spaces().contains(&dm)).await;
+    b.notices(); // the message, told
+    a.call(Some((dm, irch_core::state::DM))).await.unwrap();
+    until("b sees the call", || !b.calls(&dm).is_empty()).await;
+    let rings = |n: &Node| n.notices().into_iter().filter(|n| n.ring).count();
+    assert_eq!(rings(&b), 1, "a DM call rings");
+    assert_eq!(rings(&b), 0, "once");
+    assert_eq!(rings(&a), 0, "not the caller");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn storage_keeps_only_the_spaces_chosen() {
+    let s = start(&dir("s"), "s", None, true).await;
+    let a = node("a").await;
+    let (kept, not) =
+        (a.create("lab").await.unwrap(), a.create("x").await.unwrap());
+    say(&a, &kept, general(&a, &kept), "keep me").await;
+    say(&a, &not, general(&a, &not), "not me").await;
+    let code = pair(&a, &s, &[kept]).await;
+    let has = |id: Id| s.held().iter().any(|h| h.0 == id);
+    until("the chosen space is kept", || has(kept)).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(!has(not), "a space not chosen stays off the storage node");
+    let (addr, _): (iroh::EndpointAddr, [u8; 16]) =
+        irch_core::op::uncode("host", &code).unwrap();
+    a.store(&not, &addr.id, true).await.unwrap();
+    until("and once chosen, kept too", || has(not)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn offered_files_go_from_device_to_members_only() {
+    let (a, b) = (node("a").await, node("b").await);
+    let id = a.create("home").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let keyed = || a.view(&id, |s| s.kem(&b.id()).is_some()) == Some(true);
+    until("b's key", keyed).await;
+    // Past what storage nodes take: kept here, served from here.
+    let big: Vec<u8> = (0..30u32 << 20).map(|i| (i % 251) as u8).collect();
+    let src = dir("src").join("big.bin");
+    std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+    std::fs::write(&src, &big).unwrap();
+    let f = a.offer(&src, None).await.unwrap();
+    assert!(f.offered() && f.size == big.len() as u64 && f.name == "big.bin");
+    let saved = b.save(&id, &f, &dir("saved")).await.unwrap();
+    assert!(std::fs::read(&saved).unwrap() == big, "b has it, whole");
+    // x knows the space, the hash and a's address, but holds no key.
+    let mut inv = Invite::decode(&a.invite(&id).await.unwrap()).unwrap();
+    inv.key = [7; 32];
+    let x = node("x").await;
+    x.join(&inv.encode()).await.unwrap();
+    let out = dir("x");
+    assert!(x.save(&id, &f, &out).await.is_err(), "no member, no file");
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0, "nothing left");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn storage_node_and_restart() {
     let s = start(&dir("s"), "s", None, true).await;
     let (a, bdir) = (node("a").await, dir("b"));
     let b = start(&bdir, "b", None, false).await;
     let id = a.create("home").await.unwrap();
     let ch = general(&a, &id);
-    a.add_storage(&s.storage_code().await.unwrap()).await.unwrap();
+    pair(&a, &s, &[id]).await;
     b.join(&a.invite(&id).await.unwrap()).await.unwrap();
     until("b joined", || {
         a.view(&id, |s| s.kem(&b.id()).is_some()) == Some(true)
@@ -296,7 +371,7 @@ async fn link_while_offline_through_storage() {
     let id = a.create("home").await.unwrap();
     let ch = general(&a, &id);
     say(&a, &id, ch, "kept safe").await;
-    a.add_storage(&s.storage_code().await.unwrap()).await.unwrap();
+    pair(&a, &s, &[id]).await;
     let held =
         |n: &Node, id: &Id| n.held().iter().find(|h| h.0 == *id).map(|h| h.1);
     until("storage holds both spaces", || {
@@ -317,11 +392,11 @@ async fn attachments_live_on_storage_too() {
     let (a, b) = (node("a").await, node("b").await);
     let id = a.create("home").await.unwrap();
     let ch = general(&a, &id);
-    a.add_storage(&s.storage_code().await.unwrap()).await.unwrap();
+    pair(&a, &s, &[id]).await;
     let code = a.invite(&id).await.unwrap();
     b.join(&code).await.unwrap();
     let data: Vec<u8> = (0..300_000u32).map(|i| (i * 7) as u8).collect();
-    let f = a.attach("cat.png", &data).await.unwrap();
+    let f = a.attach(&id, "cat.png", &data).await.unwrap();
     let files = vec![f.clone()];
     let op = Op::Post { channel: ch, text: String::new(), reply: None, files };
     a.publish(&id, op).await.unwrap();

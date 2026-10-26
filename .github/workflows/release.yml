@@ -1,4 +1,5 @@
-# A tag `vX.Y.Z` publishes a release the apps update from: signed desktop
+# A tag `vX.Y.Z` (or this run by hand, naming one: the release makes the
+# tag at this commit) publishes a release the apps update from: signed desktop
 # bundles with Tauri's latest.json, and an APK under irch's signing key.
 # Secrets: TAURI_SIGNING_PRIVATE_KEY(_PASSWORD), ANDROID_KEYSTORE (base64),
 # ANDROID_KEYSTORE_PASSWORD.
@@ -6,24 +7,39 @@ name: release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release's tag, vX.Y.Z
+        required: true
 permissions:
   contents: write
 env:
   CARGO_TERM_COLOR: always
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   desktop:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-latest, windows-latest]
+        include:
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: windows-latest, target: aarch64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ${{ matrix.target }}
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y
           libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev
@@ -32,7 +48,7 @@ jobs:
       - name: The tag is the version
         shell: bash
         run: |
-          v='"version": "'${GITHUB_REF_NAME#v}'"'
+          v='"version": "'${TAG#v}'"'
           sed -i.bak "s/\"version\": \"[^\"]*\"/$v/" app/tauri.conf.json
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
@@ -43,12 +59,23 @@ jobs:
         with:
           projectPath: app
           tauriScript: cargo tauri
-          tagName: ${{ github.ref_name }}
-          releaseName: irch ${{ github.ref_name }}
-          includeUpdaterJson: true
+          args: --target ${{ matrix.target }}
+          tagName: ${{ env.TAG }}
+          releaseName: irch ${{ env.TAG }}
+          includeUpdaterJson: false
+      - name: The terminal client and storage node, beside the app
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cargo build --release --locked -p irch --target ${{ matrix.target }}
+          x=$([ "$RUNNER_OS" = Windows ] && echo .exe || true)
+          cp target/${{ matrix.target }}/release/irch$x \
+            irch-${{ matrix.target }}$x
+          gh release upload "$TAG" irch-${{ matrix.target }}$x \
+            --clobber
 
   android:
-    needs: desktop
     runs-on: ubuntu-latest
     steps:
       - name: Room for the build
@@ -67,7 +94,7 @@ jobs:
       - run: cargo install tauri-cli --version 2.12.4 --locked
       - name: The tag is the version
         run: |
-          v='"version": "'${GITHUB_REF_NAME#v}'"'
+          v='"version": "'${TAG#v}'"'
           sed -i "s/\"version\": \"[^\"]*\"/$v/" app/tauri.conf.json
       - working-directory: app
         # Phones only: x86_64 is for emulators, which build their own.
@@ -86,4 +113,47 @@ jobs:
           "$tools/apksigner" sign --ks irch.jks --ks-pass env:PW \
             --ks-key-alias irch --out irch.apk a.apk
           rm irch.jks
-          gh release upload "$GITHUB_REF_NAME" irch.apk --clobber
+          gh release view "$TAG" >/dev/null 2>&1 ||
+            gh release create "$TAG" --title "irch $TAG" \
+              --target "$GITHUB_SHA" ||
+            true # made meanwhile by a desktop job
+          gh release upload "$TAG" irch.apk --clobber
+
+  # One latest.json from every signature: jobs that each merged their own
+  # into it raced, and the last one's won.
+  updater:
+    needs: desktop
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - run: gh release download "$TAG" -p '*.sig' -D sig
+      - shell: python3 {0}
+        working-directory: sig
+        run: |
+          import glob, json, os, re, time
+          tag, repo = os.environ["TAG"], os.environ["GH_REPO"]
+          url = f"https://github.com/{repo}/releases/download/{tag}/"
+          cpu = dict(amd64="x86_64", x64="x86_64", x86_64="x86_64",
+                     arm64="aarch64", aarch64="aarch64")
+          kinds = [(".app.tar.gz", "darwin", None),
+                   (".AppImage", "linux", "appimage"),
+                   (".deb", "linux", "deb"), (".rpm", "linux", "rpm"),
+                   ("-setup.exe", "windows", "nsis"),
+                   (".msi", "windows", "msi")]
+          out = {}
+          for sig in sorted(glob.glob("*.sig")):
+              name = sig[:-4]
+              a = cpu[re.search("amd64|x86_64|x64|aarch64|arm64", name)[0]]
+              o, kind = next((o, k) for e, o, k in kinds if name.endswith(e))
+              entry = dict(signature=open(sig).read(), url=url + name)
+              if kind:
+                  out[f"{o}-{a}-{kind}"] = entry
+              if kind in (None, "appimage", "msi"):
+                  out[f"{o}-{a}"] = entry
+          json.dump(dict(version=tag.lstrip("v"), platforms=out,
+                         pub_date=time.strftime("%Y-%m-%dT%H:%M:%SZ")),
+                    open("latest.json", "w"), indent=2)
+      - run: gh release upload "$TAG" sig/latest.json --clobber

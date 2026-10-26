@@ -6,6 +6,12 @@
     <!-- Notifications, and a few seconds of catching up when a push wakes irch. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- With no push app: stay connected, from boot on, like a messenger. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Calls ring like calls: full screen when locked, with a buzz. -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.VIBRATE" />
     <!-- In-app updates: the system installer, our signing key only. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- Calls: asked for when one is joined, or a camera turned on. -->
@@ -64,6 +70,16 @@
             android:name=".IrchWake"
             android:exported="false"
             android:foregroundServiceType="shortService" />
+        <service
+            android:name=".IrchLive"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging" />
+        <receiver android:name=".Decline" android:exported="false" />
+        <receiver android:name=".Boot" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
         <provider
           android:name="androidx.core.content.FileProvider"

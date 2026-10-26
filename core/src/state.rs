@@ -104,6 +104,7 @@ pub struct State {
     hosts: BTreeMap<EndpointId, Option<EndpointAddr>>,
     spaces: BTreeMap<Id, Option<Invite>>,
     storage: BTreeMap<EndpointId, Option<(EndpointAddr, [u8; 16])>>,
+    stored: BTreeMap<(EndpointId, Id), bool>,
 }
 
 impl State {
@@ -183,6 +184,7 @@ impl State {
         (self.epochs, self.hosts, self.bans) =
             (vec![], BTreeMap::new(), vec![]);
         (self.spaces, self.storage) = (BTreeMap::new(), BTreeMap::new());
+        self.stored = BTreeMap::new();
         if self.dm.is_some() {
             self.channels.insert(DM, "dm".into());
         }
@@ -235,6 +237,9 @@ impl State {
                 Op::Storage { addr, token, on } if own => {
                     let v = on.then(|| (addr.clone(), *token));
                     self.storage.insert(addr.id, v);
+                }
+                Op::Store { node, space, on } if own => {
+                    self.stored.insert((*node, *space), *on);
                 }
                 _ => {}
             }
@@ -401,6 +406,11 @@ impl State {
 
     pub fn storage(&self) -> Vec<(EndpointAddr, [u8; 16])> {
         self.storage.values().flatten().cloned().collect()
+    }
+
+    /// Whether our storage node `node` keeps `space`.
+    pub fn keeps(&self, node: &EndpointId, space: &Id) -> bool {
+        self.stored.get(&(*node, *space)).copied().unwrap_or(false)
     }
 
     /// Devices heard from, most recent first; no banned member's.

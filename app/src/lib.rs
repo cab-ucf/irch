@@ -3,7 +3,8 @@
 #[cfg(target_os = "android")]
 mod android;
 
-use irch_core::{Config, File, Id, Net, Node, api};
+use anyhow::Context;
+use irch_core::{Ch, Config, File, Id, Net, Node, Notice, api};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -21,6 +22,14 @@ static NODE: std::sync::Mutex<Option<Arc<Node>>> = std::sync::Mutex::new(None);
 #[cfg(target_os = "android")]
 static FG: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(true);
+
+/// The room on screen: its messages need no notification while in sight.
+static VIEW: std::sync::Mutex<Option<(Id, Ch)>> = std::sync::Mutex::new(None);
+
+/// Android, with no push app to wake it: a service keeps it running.
+#[cfg(target_os = "android")]
+static LIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Android: in sight, the node runs; out of it for a minute, it stops
 /// (no keepalives: they wake the radio every few seconds). Pushes wake it.
@@ -51,7 +60,8 @@ async fn seen(app: &AppHandle, fg: bool) {
 #[cfg(target_os = "android")]
 async fn nap() {
     use std::sync::atomic::Ordering::SeqCst;
-    let n = running().filter(|n| n.in_call().is_none() && !FG.load(SeqCst));
+    let awake = FG.load(SeqCst) || LIVE.load(SeqCst);
+    let n = running().filter(|n| n.in_call().is_none() && !awake);
     if let Some(n) = n {
         *NODE.lock().unwrap_or_else(|e| e.into_inner()) = None;
         n.shutdown().await;
@@ -163,6 +173,36 @@ async fn media(s: State<'_, App>, req: Request<'_>) -> Result<(), String> {
     Ok(())
 }
 
+/// A picked file in parts (a page knows no paths), appended to its copy in
+/// irch's folder, which is then offered; the reply is that copy's path.
+/// Bytes, or base64 where IPC carries none (Android).
+#[tauri::command]
+fn upload(app: AppHandle, req: Request<'_>) -> Result<String, String> {
+    use std::io::Write;
+    let r = || {
+        let id = req.headers().get("x-upload").and_then(|v| v.to_str().ok());
+        let hex = |i: &&str| {
+            i.len() == 32 && i.bytes().all(|b| b.is_ascii_hexdigit())
+        };
+        let id = id.filter(hex).context("no upload id")?;
+        let dir = app.path().app_data_dir()?.join("offered");
+        std::fs::create_dir_all(&dir)?;
+        let part = match req.body() {
+            InvokeBody::Raw(b) => b.clone(),
+            InvokeBody::Json(v) => {
+                let b64 = v["data"].as_str().context("no data")?;
+                data_encoding::BASE64.decode(b64.as_bytes())?
+            }
+        };
+        let p = dir.join(id);
+        let mut f =
+            std::fs::OpenOptions::new().create(true).append(true).open(&p)?;
+        f.write_all(&part)?;
+        anyhow::Ok(p.to_string_lossy().into())
+    };
+    r().map_err(err)
+}
+
 /// Frames from our call, to the page: the sender's id, then the frame.
 #[tauri::command]
 async fn tune(s: State<'_, App>, to: Channel<Body>) -> Result<(), String> {
@@ -263,7 +303,9 @@ pub fn run() {
         }
     }));
     #[cfg(desktop)]
-    let b = b.plugin(tauri_plugin_updater::Builder::new().build());
+    let b = b
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init());
     let b = b
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -309,7 +351,8 @@ pub fn run() {
         Ok(())
     });
     let b = b.invoke_handler(tauri::generate_handler![
-        irch, link, qr, math, save, share, media, tune, opened, update
+        irch, link, qr, math, save, share, media, tune, opened, update,
+        viewing, hush, upload
     ]);
     let app = b.build(tauri::generate_context!()).expect("tauri builds");
     app.run(|app, e| {
@@ -368,7 +411,9 @@ async fn start(app: &AppHandle, link: Option<String>) -> Result<(), String> {
 }
 
 /// Core events to the page; a lagging receiver means "refresh everything".
+/// Each alert also goes to the page, which sounds it.
 fn forward(app: AppHandle, n: Arc<Node>) {
+    use irch_core::Event::{Call, Changed};
     // Weak: a node stopped (on Android, out of sight) goes, and this ends.
     let (mut rx, n) = (n.subscribe(), Arc::downgrade(&n));
     tauri::async_runtime::spawn(async move {
@@ -381,13 +426,11 @@ fn forward(app: AppHandle, n: Arc<Node>) {
                 }
                 Err(RecvError::Closed) => break,
             };
-            let n = n
-                .upgrade()
-                .filter(|_| matches!(e, irch_core::Event::Changed { .. }));
-            if let Some(n) = n {
-                for x in n.notices() {
-                    let tag = format!("{}{}", x.space, x.room);
-                    notify(&app, &tag, &x.title, &x.body).await;
+            let news = matches!(e, Changed { .. } | Call { .. });
+            if let Some(n) = n.upgrade().filter(|_| news) {
+                for x in alerts(&n, front(&app)) {
+                    let _ = app.emit("alert", &x);
+                    notify(&app, &x).await;
                 }
             }
             let _ = app.emit("irch", e);
@@ -395,21 +438,55 @@ fn forward(app: AppHandle, n: Arc<Node>) {
     });
 }
 
-#[cfg(target_os = "android")]
-async fn notify(app: &AppHandle, tag: &str, title: &str, body: &str) {
+/// What to tell of: all but messages in the room on screen.
+fn alerts(n: &Node, front: bool) -> Vec<Notice> {
+    let view = *VIEW.lock().unwrap_or_else(|e| e.into_inner());
+    let shown = |x: &Notice| front && view == Some((x.space, x.room));
+    n.notices().into_iter().filter(|x| x.ring || !shown(x)).collect()
+}
+
+/// A call answered or declined in the page: Android's ringing stops.
+#[tauri::command]
+async fn hush(app: AppHandle) {
+    #[cfg(target_os = "android")]
     if let Some(b) = app.try_state::<android::Bridge>() {
-        b.mention(tag, title, body).await;
+        b.hush().await;
+    }
+    let _ = app;
+}
+
+/// The room on screen, or none.
+#[tauri::command]
+fn viewing(space: Option<Id>, room: Option<Ch>) {
+    *VIEW.lock().unwrap_or_else(|e| e.into_inner()) = space.zip(room);
+}
+
+#[cfg(target_os = "android")]
+fn front(_: &AppHandle) -> bool {
+    FG.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(not(target_os = "android"))]
+fn front(app: &AppHandle) -> bool {
+    app.webview_windows().values().any(|w| w.is_focused().unwrap_or(false))
+}
+
+/// Android: the system's sound and vibration, a call's ringtone.
+#[cfg(target_os = "android")]
+async fn notify(app: &AppHandle, x: &Notice) {
+    if let Some(b) = app.try_state::<android::Bridge>() {
+        b.alert(x).await;
     }
 }
 
-/// Only while no irch window is in front.
+/// A desktop's banner, while no irch window is in front (the page sounds
+/// it either way).
 #[cfg(not(target_os = "android"))]
-async fn notify(app: &AppHandle, _tag: &str, title: &str, body: &str) {
+async fn notify(app: &AppHandle, x: &Notice) {
     use tauri_plugin_notification::NotificationExt;
-    let front =
-        app.webview_windows().values().any(|w| w.is_focused().unwrap_or(false));
-    if !front {
-        let _ = app.notification().builder().title(title).body(body).show();
+    if !front(app) {
+        let b = app.notification().builder().title(&x.title).body(&x.body);
+        let _ = b.show();
     }
 }
 

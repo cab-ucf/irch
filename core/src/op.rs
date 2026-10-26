@@ -45,6 +45,9 @@ pub enum Op {
     Gone,
     // Where to wake the signing device when someone writes (UnifiedPush).
     Push { url: Option<String> },
+    // Own space: whether our storage node keeps a space (it always keeps
+    // the own space).
+    Store { node: EndpointId, space: Id, on: bool },
 }
 
 impl Op {
@@ -67,7 +70,15 @@ pub struct File {
     pub key: Id,
 }
 
+/// A file's key when it is not sealed: its sender's devices serve it.
+pub const OFFERED: Id = Id([0; 32]);
+
 impl File {
+    /// Kept on its sender's device rather than sealed for storage nodes.
+    pub fn offered(&self) -> bool {
+        self.key == OFFERED
+    }
+
     /// The name, safe to show and to save anywhere: no control or
     /// direction characters (`photo\u{202e}gnp.exe`), nothing Windows
     /// reserves.

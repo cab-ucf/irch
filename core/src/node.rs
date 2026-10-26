@@ -16,6 +16,8 @@ use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey,
 };
+use iroh_blobs::BlobsProtocol;
+use iroh_blobs::store::fs::FsStore;
 use iroh_gossip::api::{Event as Gossiped, GossipSender};
 use iroh_gossip::{Gossip, TopicId};
 use n0_future::StreamExt;
@@ -121,6 +123,8 @@ pub struct Notice {
     pub room: Ch,
     pub title: String,
     pub body: String,
+    /// A call in a DM: ring, like a phone.
+    pub ring: bool,
 }
 
 pub struct Space {
@@ -396,12 +400,16 @@ pub struct Node {
     prefs: Mutex<Prefs>,
     // Endpoints we woke: when last, and whether one more is held back.
     wake: Mutex<HashMap<String, (Option<Instant>, bool)>>,
+    // Calls notified about (space, caller, channel), while they last.
+    rang: Mutex<HashSet<(Id, Id, Ch)>>,
     http: OnceLock<reqwest::Client>,
     name: Mutex<String>,
     events: broadcast::Sender<Event>,
     clock: AtomicU64,
     invisible: AtomicBool,
     serve: Option<[u8; 16]>,
+    // Files offered from here, and those fetched (served on to members).
+    files: Option<FsStore>,
     call: Mutex<Option<Call>>,
     media: call::Media,
 }
@@ -451,6 +459,26 @@ fn own_invite(me: &Me, peers: Vec<EndpointAddr>) -> Invite {
     let nonce = k[..16].try_into().expect("16");
     let key = crate::crypto::kdf("irch own key", &[&me.seed]);
     Invite { owner: me.id(), nonce, key, name: String::new(), dm: None, peers }
+}
+
+/// Offered files go to the devices of people in a space with us, no one
+/// else.
+fn gate(n: std::sync::Weak<Node>) -> iroh_blobs::provider::events::EventSender {
+    use iroh_blobs::provider::events::*;
+    let mask =
+        EventMask { connected: ConnectMode::Intercept, ..EventMask::DEFAULT };
+    let (tx, mut rx) = EventSender::channel(32, mask);
+    tokio::spawn(async move {
+        while let Some(m) = rx.recv().await {
+            if let ProviderMessage::ClientConnected(m) = m {
+                let n = n.upgrade().zip(m.endpoint_id);
+                let ok = n.is_some_and(|(n, d)| n.member_device(&d));
+                let r = if ok { Ok(()) } else { Err(AbortReason::Permission) };
+                let _ = m.tx.send(r).await;
+            }
+        }
+    });
+    tx
 }
 
 // Phones skip the Mainline DHT, which keeps a routing table alive:
@@ -525,6 +553,10 @@ impl Node {
             .find(|a| a.is_ipv4())
             .map_or(0, |a| a.port());
         let serve = cfg.serve.then(|| *local.token.get_or_insert_with(rand));
+        let files = match serve {
+            None => Some(FsStore::load(cfg.dir.join("files")).await?),
+            Some(_) => None,
+        };
         let gossip =
             Gossip::builder().max_message_size(GOSSIP_MAX).spawn(ep.clone());
         let own_inv = own_invite(&me, link.map(|l| l.1).unwrap_or_default());
@@ -543,15 +575,23 @@ impl Node {
             local: Mutex::new(local),
             prefs: Mutex::new(prefs),
             wake: Mutex::default(),
+            rang: Mutex::default(),
             http: OnceLock::new(),
             name: Mutex::new(cfg.name),
             events: broadcast::channel(1024).0,
             clock: AtomicU64::new(0),
             serve,
+            files,
             call: Mutex::new(None),
             media: broadcast::channel(512).0,
         });
-        let router = Router::builder(n.ep.clone())
+        let mut router = Router::builder(n.ep.clone());
+        if let Some(f) = &n.files {
+            let gate = Some(gate(Arc::downgrade(&n)));
+            router =
+                router.accept(iroh_blobs::ALPN, BlobsProtocol::new(f, gate));
+        }
+        let router = router
             .accept(iroh_gossip::ALPN, n.gossip.clone())
             .accept(sync::ALPN, Proto(Arc::downgrade(&n)))
             .accept(BLOB, Proto(Arc::downgrade(&n)))
@@ -639,7 +679,7 @@ impl Node {
     /// level), unread here. History from before a space's first ask stays
     /// quiet. The app and a push wake share the marks: never twice.
     pub fn notices(&self) -> Vec<Notice> {
-        let (me, mut out) = (self.id(), vec![]);
+        let (me, mut out, mut live) = (self.id(), vec![], HashSet::new());
         for id in self.spaces() {
             let (level, mark) = {
                 let mut p = lock(&self.prefs);
@@ -666,11 +706,43 @@ impl Node {
                 };
                 let body =
                     if m.text.is_empty() { "(file)".into() } else { m.text };
-                out.push(Notice { space: id, room: *ch, title, body });
+                let (space, room) = (id, *ch);
+                out.push(Notice { space, room, title, body, ring: false });
+            }
+            // Calls by others: a DM's rings, a channel's says it started;
+            // each once while it lasts, none while we are in one.
+            let calls = self.get(&id).map(|sp| self.callers(&sp, None));
+            for (_, ch, u) in calls.unwrap_or_default() {
+                let fresh = u != me && lock(&self.rang).insert((id, u, ch));
+                live.insert((id, u, ch));
+                let tell = level != Level::Off && (dm || level == Level::All);
+                if !fresh || !tell || self.in_call().is_some() {
+                    continue;
+                }
+                // Named here, or in any space we share (a new DM may not
+                // have their profile yet).
+                let name_in = |sp: &Id| {
+                    self.view(sp, |s| s.profile(&u).map(str::to_string))
+                };
+                let mut all = std::iter::once(id).chain(self.spaces());
+                let who = all.find_map(|sp| name_in(&sp).flatten());
+                let who = who.unwrap_or_else(|| u.to_string()[..8].into());
+                let room = rooms.iter().find(|r| r.0 == ch);
+                let room = room.map_or("call".into(), |r| r.1.to_string());
+                let (title, body) = match dm {
+                    true => (who, "is calling you".into()),
+                    false => (
+                        format!("{who} in #{room} ({name})"),
+                        "started a call".into(),
+                    ),
+                };
+                let (space, room) = (id, ch);
+                out.push(Notice { space, room, title, body, ring: dm });
             }
             let p = &mut lock(&self.prefs).told;
             p.insert(id, mark.max(newest.unwrap_or(0)));
         }
+        lock(&self.rang).retain(|c| live.contains(c));
         self.save_prefs();
         out
     }
@@ -1136,10 +1208,6 @@ impl Node {
         let (name, kem) = (self.name(), self.me.pk());
         self.post(&sp, Op::Profile { name, kem }).await?;
         let _ = self.tell_push(&id).await;
-        let stores = self.view(&self.own, |s| s.storage()).unwrap_or_default();
-        for (addr, _) in stores {
-            self.host(&sp, addr).await;
-        }
         Ok(id)
     }
 
@@ -1325,6 +1393,7 @@ impl Node {
         *lock(&self.call) = Some(Call::new(id, ch, run));
         self.signal(&sp, Op::Call { channel: Some(ch) }).await;
         self.emit(Event::Call { space: id });
+        self.wake(&id); // sleeping phones: someone is calling
         tokio::spawn(self.clone().ring(run));
         Ok(())
     }
@@ -1483,10 +1552,57 @@ impl Node {
         let own = self.get(&self.own)?;
         let op = Op::Storage { addr: addr.clone(), token, on: true };
         self.post(&own, op).await?;
-        for sp in self.all() {
-            self.host(&sp, addr.clone()).await;
+        self.host(&own, addr).await;
+        Ok(())
+    }
+
+    /// Whether our storage node `node` keeps `space` too.
+    pub async fn store(
+        self: &Arc<Self>,
+        space: &Id,
+        node: &EndpointId,
+        on: bool,
+    ) -> Result<()> {
+        let paired = self.view(&self.own, |s| s.storage()).unwrap_or_default();
+        let (addr, _) = paired
+            .into_iter()
+            .find(|s| s.0.id == *node)
+            .context("not one of your storage nodes")?;
+        let (own, sp) = (self.get(&self.own)?, self.get(space)?);
+        let (node, space) = (*node, *space);
+        self.post(&own, Op::Store { node, space, on }).await?;
+        let me = self.id();
+        let admin = self.view(&space, |s| s.role(&me) == Role::Admin);
+        match on {
+            true => self.host(&sp, addr).await,
+            false if admin == Some(true) => {
+                let _ =
+                    self.post(&sp, Op::Host { node: addr, on: false }).await;
+            }
+            false => {}
         }
         Ok(())
+    }
+
+    /// Our storage nodes, each with whether it keeps `space`.
+    pub fn stored(&self, space: &Id) -> Vec<(EndpointId, bool)> {
+        let all = *space == self.own;
+        let v = self.view(&self.own, |s| {
+            let v = s.storage().into_iter().map(|(a, _)| a.id);
+            v.map(|n| (n, all || s.keeps(&n, space))).collect()
+        });
+        v.unwrap_or_default()
+    }
+
+    /// Our storage nodes that keep `space` (our own space: all of them).
+    fn stores(&self, space: &Id) -> Vec<(EndpointAddr, [u8; 16])> {
+        let all = *space == self.own;
+        let v = self.view(&self.own, |s| {
+            let mut v = s.storage();
+            v.retain(|(a, _)| all || s.keeps(&a.id, space));
+            v
+        });
+        v.unwrap_or_default()
     }
 
     async fn host(self: &Arc<Self>, sp: &Arc<Space>, addr: EndpointAddr) {
@@ -1514,6 +1630,7 @@ impl Node {
     /// Seal a file and keep its ciphertext; send it in an `Op::Post`.
     pub async fn attach(
         self: &Arc<Self>,
+        space: &Id,
         name: &str,
         data: &[u8],
     ) -> Result<File> {
@@ -1521,22 +1638,72 @@ impl Node {
         let key = rand();
         let ct = crate::crypto::seal(&key, b"irch file", data);
         let hash = Id(blake3::hash(&ct).into());
-        self.keep(&hash, &ct)?;
+        self.keep(space, &hash, &ct)?;
         let (name, size) =
             (name.chars().take(128).collect(), data.len() as u64);
         Ok(File { name, size, hash, key: Id(key) })
     }
 
-    /// Store a blob here, and on our storage nodes.
-    fn keep(self: &Arc<Self>, hash: &Id, ct: &[u8]) -> Result<()> {
+    /// Store a blob here, and on our storage nodes that keep `space`.
+    fn keep(self: &Arc<Self>, space: &Id, hash: &Id, ct: &[u8]) -> Result<()> {
         std::fs::create_dir_all(self.dir.join("blobs"))?;
         store::write(&self.blob(hash), ct)?;
-        let stores = self.view(&self.own, |s| s.storage()).unwrap_or_default();
-        for (addr, token) in stores {
+        for (addr, token) in self.stores(space) {
             let (n, put) = (self.clone(), Ask::Put(token, ct.to_vec()));
             tokio::spawn(async move { n.ask(addr, &put).await });
         }
         Ok(())
+    }
+
+    /// A file left where it is, served from this device to members while it
+    /// is online: any size, no copy, not sealed (QUIC encrypts the way),
+    /// checked chunk by chunk by whoever fetches it. `name`: else the path's.
+    pub async fn offer(&self, path: &Path, name: Option<&str>) -> Result<File> {
+        use iroh_blobs::api::blobs::{AddPathOptions, ImportMode};
+        let files = self.files.as_ref().context("storage nodes offer none")?;
+        let path = std::path::absolute(path)?;
+        let size = std::fs::metadata(&path)?.len();
+        let (format, mode) = (Default::default(), ImportMode::TryReference);
+        let opts = AddPathOptions { path: path.clone(), format, mode };
+        let tag = files.add_path_with_opts(opts).with_tag().await?;
+        let base = path.file_name().and_then(|n| n.to_str());
+        let name = name.or(base).unwrap_or("file").chars().take(128).collect();
+        let hash = Id(*tag.hash.as_bytes());
+        Ok(File { name, size, hash, key: crate::op::OFFERED })
+    }
+
+    /// An offered file, from whichever member has it (its sender, first),
+    /// resumed where a try left off; served on to members from here.
+    async fn pull(&self, space: &Id, f: &File) -> Result<&FsStore> {
+        let files = self.files.as_ref().context("storage nodes fetch none")?;
+        let hash = iroh_blobs::Hash::from_bytes(f.hash.0);
+        if !files.has(hash).await? {
+            let sp = self.get(space)?;
+            let mut peers: Vec<EndpointId> = self.bootstrap(&sp);
+            peers.extend(sp.nbrs());
+            let got = files.downloader(&self.ep).download(hash, peers).await;
+            got.ok().context(
+                "not reachable now: ask whoever sent it to open irch",
+            )?;
+        }
+        Ok(files)
+    }
+
+    async fn export(&self, space: &Id, f: &File, to: &Path) -> Result<()> {
+        use iroh_blobs::api::blobs::{ExportMode, ExportOptions};
+        let files = self.pull(space, f).await?;
+        let hash = iroh_blobs::Hash::from_bytes(f.hash.0);
+        let (mode, target) = (ExportMode::TryReference, to.to_path_buf());
+        std::fs::remove_file(to)?;
+        files.export_with_opts(ExportOptions { hash, mode, target }).await?;
+        Ok(())
+    }
+
+    /// Whether `d` is a device of someone in a space with us.
+    fn member_device(&self, d: &EndpointId) -> bool {
+        let has =
+            |id: &Id| self.view(id, |s| s.devices(usize::MAX).contains(d));
+        self.spaces().iter().any(|id| has(id) == Some(true))
     }
 
     /// An attachment's plaintext, from here or from anyone who has it.
@@ -1545,6 +1712,12 @@ impl Node {
         space: &Id,
         f: &File,
     ) -> Result<Vec<u8>> {
+        if f.offered() {
+            ensure!(f.size <= MAX_FILE as u64, "too big to open here: save it");
+            let hash = iroh_blobs::Hash::from_bytes(f.hash.0);
+            let files = self.pull(space, f).await?;
+            return Ok(files.get_bytes(hash).await?.to_vec());
+        }
         let ct = match std::fs::read(self.blob(&f.hash)) {
             Ok(ct) => ct,
             Err(_) => {
@@ -1564,7 +1737,7 @@ impl Node {
                     }
                 }
                 let ct = got.context("nobody reachable has that file now")?;
-                self.keep(&f.hash, &ct)?;
+                self.keep(space, &f.hash, &ct)?;
                 ct
             }
         };
@@ -1579,7 +1752,10 @@ impl Node {
         dir: &Path,
     ) -> Result<PathBuf> {
         use std::io::{ErrorKind::AlreadyExists, Write};
-        let data = self.file(space, f).await?;
+        let data = match f.offered() {
+            true => vec![],
+            false => self.file(space, f).await?,
+        };
         let name = &f.clone().safe().name;
         let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
         let dot = if ext.is_empty() { "" } else { "." };
@@ -1593,6 +1769,11 @@ impl Node {
             match std::fs::File::create_new(&p) {
                 Ok(mut out) => {
                     out.write_all(&data)?;
+                    if f.offered() {
+                        drop(out);
+                        let got = self.export(space, f, &p).await;
+                        got.inspect_err(|_| drop(std::fs::remove_file(&p)))?;
+                    }
                     // Windows: from the internet, like a browser download.
                     #[cfg(windows)]
                     let _ = std::fs::write(
@@ -1675,8 +1856,9 @@ impl Node {
         if !self.takes(&sp, &id) || !lock(&sp.busy).insert(id) {
             return;
         }
-        // Our own storage nodes get their token, and whom to take from.
-        let stores = self.view(&self.own, |s| s.storage()).unwrap_or_default();
+        // Our storage nodes that keep it get their token, and whom to
+        // take from.
+        let stores = self.stores(&sp.id);
         let token = stores.into_iter().find(|s| s.0.id == id).map(|s| s.1);
         let r = async {
             let c = self.ep.connect(peer, sync::ALPN).await?;
@@ -1763,6 +1945,15 @@ impl Node {
             Op::Typing { channel } => {
                 let user = s.author;
                 self.emit(Event::Typing { space: sp.id, channel, user });
+            }
+            // A device back from sleep says hello: tell it of our call now,
+            // not at the next 15 s reminder, or it misses the ring.
+            Op::Here => {
+                if let Some((_, ch)) = self.in_call().filter(|c| c.0 == sp.id) {
+                    let (n, sp) = (self.clone(), sp.clone());
+                    let call = Op::Call { channel: Some(ch) };
+                    tokio::spawn(async move { n.signal(&sp, call).await });
+                }
             }
             Op::Call { channel } => {
                 let mut c = lock(&sp.calls);

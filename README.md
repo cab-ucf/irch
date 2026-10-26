@@ -58,10 +58,11 @@ disk   : one append-only log of envs per space; nothing else to migrate
   devices follow each other. `/link` (My Account › Link a device) shows
   the code.
 - **Storage nodes keep ciphertext, never keys.** `irch --serve` on a NAS
-  or a VPS prints a code; give it to irch (`/store`, or My Account) and it
-  keeps every space you are in, your private one included, so messages
-  wait there while everyone else is offline, and a new device can link
-  while your others are off. It cannot read any of it, so it takes
+  or a VPS prints a code; give it to irch (`/store CODE`, or My Account)
+  and it keeps your private space, so a new device can link while your
+  others are off, and each space you choose (its menu's Storage Nodes,
+  or `/store here`), so messages wait there while everyone else is
+  offline. It cannot read any of it, so it takes
   envelopes only from your devices and the member devices they vouch for.
   An admin's storage node is listed in the space too, so members fetch
   from it and invites send newcomers there first.
@@ -74,6 +75,11 @@ disk   : one append-only log of envs per space; nothing else to migrate
 - **Files** (up to 25 MiB) are sealed under a fresh key that travels only
   inside the post; their ciphertext is named by its BLAKE3 hash, fetched
   from whoever has it and kept by your storage nodes too.
+- **Shared files** (any size: `/share PATH`, or "Share from this device")
+  stay where they are and are not sealed: the post names their hash, and
+  the sender's devices serve them, over QUIC, to members' devices only,
+  while online. Asked for one that is offline, irch says to ask its
+  sender to open irch. Big uploads go this way by themselves.
 - **Calls are a mesh.** Everyone in a channel's call connects straight to
   everyone else in it: to devices a member's signed `Call` names, which
   must then sign as that member. The page captures and codes (WebCodecs:
@@ -104,13 +110,17 @@ Invites carry your relay address, not your IP, whenever a relay is known.
 
 An always-on member's desktop keeps the spaces it is in synced, but it can
 read them and covers only those. A storage node (`irch --serve`) keeps
-every space of everyone who adds its code, ciphertext only. On NixOS,
+the spaces its users choose, ciphertext only. On NixOS,
 `nixos.nix` runs one as its own user, rebuilt hourly from the newest
 release tag signed by a key in `services.irch.signers` (ssh
 `allowed_signers` lines; sign with `git tag -s`, `gpg.format=ssh`), so a
 push alone runs nothing there: import it, set the signers, `systemctl
 start irch-update` once, and `journalctl -u irch | grep -A1 'Storage
-code'` prints the code to hand out.
+code'` prints the code to hand out. On the same computer the node runs
+as its own user while you use irch as yourself: list yourself in
+`services.irch.users` and its code waits in `/run/irch/code` for you
+alone, so a space's Storage Nodes offers "this computer's" in one click
+(`/store local` in the terminal).
 
 ## Updates
 
@@ -125,8 +135,9 @@ secrets are named at its top).
 
 Terminal: `/create NAME`, `/join CODE`, `/invite`, `/channel NAME`,
 `/reply TEXT`, `/thread TEXT`, `/react EMOJI`, `/edit TEXT`, `/delete`,
-`/dm USER`, `/ban USER`, `/rekey`, `/file PATH`, `/save`, `/link`,
-`/store CODE`, `/note [FILE]`, `/todo [FILE]`, `/invisible`, `/help`.
+`/dm USER`, `/ban USER`, `/rekey`, `/file PATH`, `/share PATH`, `/save`, `/link`,
+`/store CODE|local|here`, `/note [FILE]`, `/todo [FILE]`, `/invisible`,
+`/help`.
 Ctrl-N/P switches channel; PgUp/PgDn scrolls.
 
 Messages are Markdown (markdown-it: headings, lists, tables, quotes,
@@ -145,8 +156,12 @@ hover a message to react, reply, edit or delete; click a member to
 message, ban or promote them. The arrow on a message replies in its
 thread, listed under its channel. The phone in a channel's header joins
 its call; mute, camera, screen and hang up sit under the tiles (the
-terminal shows how many are in one: 🔊2). New messages notify while irch
-is out of sight (the space's menu: all, @mentions, or none).
+terminal shows how many are in one: 🔊2). New messages notify like texts,
+with a sound and (on phones) a buzz, except in the room on screen; the
+space's menu picks all, @mentions, or none. A call in a DM rings like a
+phone call: the ringtone until answered, declined or 45 s pass, full
+screen on a locked phone, Answer and Decline in the notification; one in
+a channel says it started.
 
 The composer takes `/nick`, `/join`, `/dm`, `/me`, `/shrug`, `/thread`,
 `/invite`, `/leave`, `/notes`, `/help`. Esc leaves it for normal mode:
@@ -165,8 +180,13 @@ tells its spaces, sealed like any op, where to reach it; the writer's
 device sends that address a ping with nothing in it (at most every 30 s),
 and the phone wakes for a few seconds, fetches from the writer over iroh,
 and notifies. Push servers learn only that a ping went to an address.
-Out of sight for a minute (and in no call), the node stops altogether;
-phones skip the Mainline DHT (relays and n0's DNS find peers for them).
+Starting a call wakes the others the same way, and anyone in it says so
+at once to a device that comes back. With no push app, irch stays
+connected instead (a quiet "Connected for messages and calls"
+notification, from boot on): every message and call arrives, at a cost
+in battery that ntfy avoids. With one, out of sight for a minute (and in
+no call), the node stops altogether; phones skip the Mainline DHT
+(relays and n0's DNS find peers for them).
 
 Notes: the bookmark on a message adds it (or its whole thread) to your
 notes as a task, with an optional due date, or as a quote: plain Markdown

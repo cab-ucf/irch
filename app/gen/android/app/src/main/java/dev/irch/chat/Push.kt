@@ -24,6 +24,9 @@ object Wake {
   /** Start or wake the node, catch up; what to notify, as JSON. */
   @JvmStatic external fun run(ctx: Context, dir: String, push: String?): String
 
+  /** Keep the node running; the next things to notify, as JSON. */
+  @JvmStatic external fun next(ctx: Context, dir: String): String
+
   /** Hand Android's context back before the activity's runtime takes it. */
   @JvmStatic external fun release()
 }
@@ -71,11 +74,7 @@ class IrchWake : Service() {
       runCatching {
         val dir = dataDir.absolutePath
         val got = JSONArray(Wake.run(applicationContext, dir, push))
-        for (k in 0 until got.length()) {
-          val m = got.getJSONObject(k)
-          val tag = m.getString("space") + m.getString("room")
-          postMessage(this, tag, m.getString("title"), m.getString("body"))
-        }
+        for (k in 0 until got.length()) alert(this, got.getJSONObject(k))
       }
       stopSelf(id)
     }.start()
@@ -87,3 +86,56 @@ class IrchWake : Service() {
 }
 
 const val SYNCING = "syncing"
+
+/** No push app: irch stays connected, so messages and calls arrive. */
+fun live(ctx: Context) {
+  runCatching { ctx.startForegroundService(Intent(ctx, IrchLive::class.java)) }
+}
+
+class IrchLive : Service() {
+  override fun onBind(intent: Intent?): IBinder? = null
+
+  override fun onStartCommand(intent: Intent?, flags: Int, id: Int): Int {
+    val quiet = NotificationManagerCompat.IMPORTANCE_MIN
+    notificationChannel(this, LIVE, "Connected", quiet)
+    val n = NotificationCompat.Builder(this, LIVE)
+      .setSmallIcon(R.drawable.ic_stat)
+      .setContentTitle("Connected for messages and calls")
+      .setContentIntent(openAppIntent(this))
+      .build()
+    if (Build.VERSION.SDK_INT >= 34) {
+      val type = ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
+      startForeground(3, n, type)
+    } else {
+      startForeground(3, n)
+    }
+    if (running.compareAndSet(false, true)) Thread {
+      val dir = dataDir.absolutePath
+      while (true) {
+        val got = runCatching { JSONArray(Wake.next(applicationContext, dir)) }
+          .getOrDefault(JSONArray())
+        for (k in 0 until got.length()) alert(this, got.getJSONObject(k))
+        if (got.length() == 0) Thread.sleep(5000) // could not start: again
+      }
+    }.start()
+    return START_STICKY
+  }
+
+  companion object {
+    val running = java.util.concurrent.atomic.AtomicBoolean(false)
+  }
+}
+
+/** After a restart, before irch is opened: connected again, unless a
+ *  push app will wake it. */
+class Boot : android.content.BroadcastReceiver() {
+  override fun onReceive(ctx: Context, i: Intent) {
+    if (i.action != Intent.ACTION_BOOT_COMPLETED) return
+    val pushed = org.unifiedpush.android.connector.UnifiedPush
+      .getAckDistributor(ctx) != null
+    if (!pushed) live(ctx)
+  }
+}
+
+const val LIVE = "live"
+

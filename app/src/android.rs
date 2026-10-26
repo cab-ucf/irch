@@ -33,13 +33,6 @@ struct Watch {
 }
 
 #[derive(Serialize)]
-struct Mention<'a> {
-    tag: &'a str,
-    title: &'a str,
-    body: &'a str,
-}
-
-#[derive(Serialize)]
 struct Text<'a> {
     text: &'a str,
 }
@@ -107,9 +100,12 @@ impl Bridge {
         self.call("watchNetwork", Watch { channel }).await;
     }
 
-    /// Shown only while irch is in the background.
-    pub async fn mention(&self, tag: &str, title: &str, body: &str) {
-        self.call("mention", Mention { tag, title, body }).await;
+    pub async fn alert(&self, x: &Notice) {
+        self.call("alert", x).await;
+    }
+
+    pub async fn hush(&self) {
+        self.call("hush", serde_json::json!({})).await;
     }
 
     pub async fn share(&self, text: &str) {
@@ -144,10 +140,35 @@ pub extern "system" fn Java_dev_irch_chat_Wake_run<'l>(
     dir: JString<'l>,
     push: JString<'l>,
 ) -> jstring {
-    let mut text = |s: &JString| -> Option<String> {
-        (!s.is_null()).then(|| env.get_string(s).ok().map(Into::into))?
-    };
-    let (dir, push) = (text(&dir).unwrap_or_default(), text(&push));
+    let (dir, push) = (text(&mut env, &dir), text(&mut env, &push));
+    let wake = wake(dir.unwrap_or_default().into(), push);
+    reply(env, ctx, wake)
+}
+
+/// `Wake.next`: no push app to wake irch, so a service keeps it running
+/// and asks, again and again, for what to notify about next.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_irch_chat_Wake_next<'l>(
+    mut env: JNIEnv<'l>,
+    _: JClass<'l>,
+    ctx: JObject<'l>,
+    dir: JString<'l>,
+) -> jstring {
+    crate::LIVE.store(true, SeqCst);
+    let dir = text(&mut env, &dir).unwrap_or_default();
+    reply(env, ctx, next(dir.into()))
+}
+
+fn text(env: &mut JNIEnv, s: &JString) -> Option<String> {
+    (!s.is_null()).then(|| env.get_string(s).ok().map(Into::into))?
+}
+
+/// Run `f` with Android's context set, and hand back its notices as JSON.
+fn reply(
+    env: JNIEnv,
+    ctx: JObject,
+    f: impl Future<Output = anyhow::Result<Vec<Notice>>>,
+) -> jstring {
     if !TAO.load(SeqCst)
         && !OURS.load(SeqCst)
         && let (Ok(vm), Ok(g)) = (env.get_java_vm(), env.new_global_ref(ctx))
@@ -158,7 +179,7 @@ pub extern "system" fn Java_dev_irch_chat_Wake_run<'l>(
         std::mem::forget(g);
         OURS.store(true, SeqCst);
     }
-    let r = tauri::async_runtime::block_on(wake(dir.into(), push));
+    let r = tauri::async_runtime::block_on(f);
     let r =
         r.inspect_err(|e| tracing::warn!("wake: {e:#}")).unwrap_or_default();
     let json = serde_json::to_string(&r).unwrap_or_else(|_| "[]".into());
@@ -178,17 +199,7 @@ async fn wake(
     dir: PathBuf,
     push: Option<String>,
 ) -> anyhow::Result<Vec<Notice>> {
-    static ONE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    let _one = ONE.lock().await;
-    let n = match crate::running() {
-        Some(n) => n,
-        None => {
-            crate::log_to(&dir);
-            let n = Node::start(crate::config(dir, None, None)?).await?;
-            crate::adopt(n.clone());
-            n
-        }
-    };
+    let n = node(dir).await?;
     if let Some(p) = push {
         n.set_push((!p.is_empty()).then_some(p)).await;
     }
@@ -205,7 +216,43 @@ async fn wake(
             Ok(Ok(_))
         )
     {}
-    let notices = n.notices();
+    let notices = crate::alerts(&n, false);
     crate::nap().await; // and back to sleep, unless irch came into sight
     Ok(notices)
+}
+
+/// The running node, or one started here (no activity, so no app).
+async fn node(dir: PathBuf) -> anyhow::Result<std::sync::Arc<Node>> {
+    static ONE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one = ONE.lock().await;
+    if let Some(n) = crate::running() {
+        return Ok(n);
+    }
+    crate::log_to(&dir);
+    let n = Node::start(crate::config(dir, None, None)?).await?;
+    crate::adopt(n.clone());
+    Ok(n)
+}
+
+/// The next notices, as soon as there are any (the app, in sight, may
+/// take them first: then this waits on).
+async fn next(dir: PathBuf) -> anyhow::Result<Vec<Notice>> {
+    use irch_core::Event::{Call, Changed};
+    use tokio::sync::broadcast::error::RecvError::Closed;
+    loop {
+        let n = node(dir.clone()).await?;
+        let (mut rx, w) = (n.subscribe(), std::sync::Arc::downgrade(&n));
+        drop(n);
+        loop {
+            let news = match rx.recv().await {
+                Err(Closed) => break, // stopped: a new one
+                e => matches!(e, Ok(Changed { .. } | Call { .. }) | Err(_)),
+            };
+            let Some(n) = w.upgrade() else { break };
+            let got = news.then(|| crate::alerts(&n, crate::FG.load(SeqCst)));
+            if let Some(got) = got.filter(|g| !g.is_empty()) {
+                return Ok(got);
+            }
+        }
+    }
 }
