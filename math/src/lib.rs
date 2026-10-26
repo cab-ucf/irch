@@ -49,7 +49,11 @@ impl World for Math {
 
 /// `src`'s `<math>` element, or why Typst would not typeset it.
 pub fn mathml(src: &str, display: bool) -> Result<String, String> {
-    if src.len() > MAX || src.contains(['#', '$']) {
+    // No code: `#` and `$` leave math, `std` reaches all of Typst's
+    // library (a loop that never ends, an array that fills memory), and a
+    // string's methods compute.
+    let code = src.contains(['#', '$']) || src.contains("std");
+    if src.len() > MAX || code || src.contains("\".") {
         return Err("not plain Typst math".into());
     }
     let pad = if display { " " } else { "" };
@@ -87,6 +91,10 @@ mod tests {
         assert!(mathml(r#"#read("/etc/passwd")"#, false).is_err());
         assert!(mathml("x$ #panic()", false).is_err());
         assert!(mathml("frac(", false).is_err());
+        assert!(
+            mathml(r#"std.range(std.int("100000000000"))"#, false).is_err()
+        );
+        assert!(mathml(r#""a".repeat(99999999)"#, false).is_err());
     }
 
     #[test]

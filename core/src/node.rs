@@ -334,7 +334,8 @@ impl Book {
                 self.pending.retain(|_, (_, s)| matches!(s, Src::Log(_)));
                 self.parked = 0;
             }
-            self.parked += raw.len();
+            // What it costs here, not just its size: a map entry too.
+            self.parked += raw.len() + 256;
         }
         self.pending.insert(i, (e, src));
     }
@@ -344,7 +345,7 @@ impl Book {
         let v: Vec<_> = out.map(|(i, (e, s))| (i, e, s)).collect();
         for (_, _, s) in &v {
             if let Src::Net(raw, _) = s {
-                self.parked -= raw.len();
+                self.parked -= raw.len() + 256;
             }
         }
         v
@@ -669,7 +670,7 @@ impl Node {
             phones: Default::default(),
             files,
             call: Mutex::new(None),
-            media: broadcast::channel(512).0,
+            media: broadcast::channel(128).0,
         });
         let mut router = Router::builder(n.ep.clone());
         if let Some(f) = &n.files {
@@ -1870,6 +1871,22 @@ impl Node {
             let sp = self.get(space)?;
             let mut peers: Vec<EndpointId> = self.bootstrap(&sp);
             peers.extend(sp.nbrs());
+            // Its real size first (the hash proves it): the post's, or
+            // nothing (a post may say 1 byte of a vast file).
+            let mut size = None;
+            for p in &peers {
+                let c = self.ep.connect(*p, iroh_blobs::ALPN);
+                let c = tokio::time::timeout(Duration::from_secs(10), c);
+                if let Ok(Ok(c)) = c.await {
+                    let n =
+                        iroh_blobs::get::request::get_verified_size(&c, &hash);
+                    if let Ok((n, _)) = n.await {
+                        size = Some(n);
+                        break;
+                    }
+                }
+            }
+            ensure!(size == Some(f.size), "not reachable now, or not as said");
             let got = files.downloader(&self.ep).download(hash, peers).await;
             got.ok().context(
                 "not reachable now: ask whoever sent it to open irch",
@@ -1991,9 +2008,17 @@ impl Node {
     /// Answer a blob request.
     async fn give(&self, c: &Connection) -> Result<()> {
         let (mut tx, mut rx) = c.accept_bi().await?;
-        // Only a storage node takes a file; others read a 64-byte ask.
-        let max = if self.serve.is_some() { MAX_FILE + 1024 } else { 64 };
-        match postcard::from_bytes(&rx.read_to_end(max).await?)? {
+        // Its first bytes say what it is (and, to keep a file, the token):
+        // only then is a file's worth read, and only by a storage node.
+        let mut head = [0u8; 17];
+        rx.read_exact(&mut head).await?;
+        let max = match (head[0], self.serve) {
+            (1, Some(t)) if head[1..] == t => MAX_FILE + 16,
+            (1, _) => bail!("not a storage node of yours"),
+            _ => 64,
+        };
+        let rest = rx.read_to_end(max).await?;
+        match postcard::from_bytes(&[&head[..], &rest].concat())? {
             Ask::Get(h) => {
                 tx.write_all(&std::fs::read(self.blob(&h)).unwrap_or_default())
                     .await?

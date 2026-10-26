@@ -243,7 +243,9 @@ async fn serve_here(app: AppHandle) -> Result<(), String> {
         let dir = app.path().app_local_data_dir()?.join("bin");
         std::fs::create_dir_all(&dir)?;
         let exe = dir.join(format!("irch{}", std::env::consts::EXE_SUFFIX));
-        let bin = irch_core::release::fetch(&irch_core::release::cli()).await?;
+        let (cli, v) =
+            (irch_core::release::cli(), irch_core::release::latest());
+        let bin = irch_core::release::fetch(&cli, &v.await?).await?;
         irch_core::release::put(&exe, &bin)?;
         let out = tokio::task::spawn_blocking(move || {
             std::process::Command::new(exe).arg("--install").output()
@@ -267,8 +269,8 @@ async fn update(app: AppHandle) -> Result<Option<String>, String> {
 
 /// The newer irch, installed; then what to tell, if anything. Desktop: in
 /// place, its signature checked against ours, then restart; installed
-/// otherwise (cargo), the release page opens. Android: the system
-/// installer, which takes only our signing key.
+/// otherwise (cargo), the release page opens. Android: checked against
+/// irch's key too, then the system installer, which takes only ours.
 #[tauri::command]
 async fn upgrade(
     app: AppHandle,

@@ -81,11 +81,13 @@ impl Id {
 /// it, or nixos.nix for the local users it names (`IRCH_CODE_FILE`, else
 /// `/run/irch/code`).
 pub fn local_storage() -> Option<String> {
-    let p = std::env::var_os("IRCH_CODE_FILE");
-    let p = p.map_or("/run/irch/code".into(), std::path::PathBuf::from);
+    // /run is root's on Linux; elsewhere (C:\\run) anyone could plant one.
+    let run = cfg!(target_os = "linux").then(|| "/run/irch/code".into());
+    let p = std::env::var_os("IRCH_CODE_FILE").map(Into::into).or(run);
     let mine = dirs::data_dir().map(|d| d.join("irch-serve").join("code"));
     let read = |p| std::fs::read_to_string(p).ok();
-    let code = read(p).or_else(|| mine.and_then(read))?.trim().to_string();
+    let code = p.and_then(read).or_else(|| mine.and_then(read))?;
+    let code = code.trim().to_string();
     (!code.is_empty()).then_some(code)
 }
 

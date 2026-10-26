@@ -47,14 +47,21 @@ pub async fn upgrade(
 ) -> anyhow::Result<Option<String>> {
     let url = format!("{}/download/irch.apk", crate::LATEST);
     let bridge = app.try_state::<Bridge>().context("no bridge")?;
+    let get = |u: String| async move {
+        anyhow::Ok(irch_core::http().get(u).send().await?.error_for_status()?)
+    };
+    // irch's own signature first: an APK it did not sign (another
+    // package, say, which Android would take as new) is never offered.
+    let v = irch_core::release::latest().await?;
+    let sig = get(format!("{url}.sig")).await?.bytes().await?;
+    let mut r = get(url.clone()).await?;
+    let (total, mut apk) = (r.content_length(), vec![]);
+    while let Some(c) = r.chunk().await? {
+        on(c.len(), total);
+        apk.extend_from_slice(&c);
+    }
+    irch_core::release::check(&apk, &sig, "irch.apk", &v)?;
     let got = async {
-        let r = irch_core::http().get(&url).send().await?;
-        let mut r = r.error_for_status()?;
-        let (total, mut apk) = (r.content_length(), vec![]);
-        while let Some(c) = r.chunk().await? {
-            on(c.len(), total);
-            apk.extend_from_slice(&c);
-        }
         let dir = app.path().app_cache_dir()?.join("shared");
         std::fs::create_dir_all(&dir)?;
         let f = dir.join("irch.apk");

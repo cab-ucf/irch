@@ -462,7 +462,12 @@ async function updates(quietly) {
 async function openUrl(url) {
   const c = /^irch:\/\/(call|ring)\/([0-9a-f]{64})\/([0-9a-f]{16})$/
     .exec(url);
-  if (c) return c[1] === "call" ? answer(c[2], c[3]) : incoming(c[2], c[3]);
+  // Answering at once: only Android's own Answer button (MainActivity
+  // checks its token); any other link asks first.
+  if (c) {
+    return c[1] === "call" && android
+      ? answer(c[2], c[3]) : incoming(c[2], c[3]);
+  }
   if (!String(url).startsWith("irch://open/")) return;
   const [sid, ch, msg] = url.replace(/^irch:\/\/open\//, "").split("/");
   const s = S.spaces.find((x) => x.id === sid);

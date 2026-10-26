@@ -15,7 +15,9 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use tokio::sync::{broadcast, mpsc};
 
 pub const ALPN: &[u8] = b"irch/av/1";
-const MAX_FRAME: usize = 4 << 20;
+// A frame: a screen's keyframe fits; 128 of them held for a slow page
+// stay within 128 MiB.
+const MAX_FRAME: usize = 1 << 20;
 // A frame's first byte: audio, video, or a video keyframe (a new group).
 const AUDIO: u8 = 0;
 const KEY: u8 = 2;

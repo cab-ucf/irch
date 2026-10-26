@@ -175,8 +175,8 @@ it. Its code waits in your data directory, so irch on the same computer
 pairs with it in one click: a space's Storage Nodes, "this computer's"
 (`/store local` in the terminal). On NixOS `services.irch.enable` runs
 one as its own user, and its code waits in `/run/irch/code` for the
-users listed in `services.irch.users`; `journalctl -u irch | grep -A1
-'Storage code'` prints the code to hand out.
+users listed in `services.irch.users` (`sudo cat /run/irch/code` shows
+it, to hand out; it is never logged).
 
 ## Updates
 

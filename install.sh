@@ -22,9 +22,10 @@ if [ "$(uname -s)" = Darwin ]; then
   [ $cpu = aarch64 ] && f=irch_aarch64.app.tar.gz || f=irch_x64.app.tar.gz
   to=/Applications
   [ -w $to ] || { to=$HOME/Applications && mkdir -p "$to"; }
-  get "$f" "${TMPDIR:-/tmp}/irch.app.tar.gz"
+  t=$(mktemp -d)
+  get "$f" "$t/irch.app.tar.gz"
   rm -rf "$to/irch.app"
-  tar -xzf "${TMPDIR:-/tmp}/irch.app.tar.gz" -C "$to"
+  tar -xzf "$t/irch.app.tar.gz" -C "$to" && rm -rf "$t"
   open "$to/irch.app"
   echo "irch is in $to, and updates itself."
   exit

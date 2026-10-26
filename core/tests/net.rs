@@ -304,6 +304,9 @@ async fn offered_files_go_from_device_to_members_only() {
     std::fs::write(&src, &big).unwrap();
     let f = a.offer(&src, None).await.unwrap();
     assert!(f.offered() && f.size == big.len() as u64 && f.name == "big.bin");
+    // Said to be a byte, to open in place: refused before any of it comes.
+    let tiny = irch_core::File { size: 1, ..f.clone() };
+    assert!(b.file(&id, &tiny).await.is_err(), "not the size it says");
     let saved = b.save(&id, &f, &dir("saved")).await.unwrap();
     assert!(std::fs::read(&saved).unwrap() == big, "b has it, whole");
     // x knows the space, the hash and a's address, but holds no key.
