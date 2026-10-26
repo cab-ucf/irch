@@ -1173,10 +1173,6 @@ impl Node {
         let (name, kem) = (self.name(), self.me.pk());
         self.post(&sp, Op::Profile { name, kem }).await?;
         let _ = self.tell_push(&id).await;
-        let stores = self.view(&self.own, |s| s.storage()).unwrap_or_default();
-        for (addr, _) in stores {
-            self.host(&sp, addr).await;
-        }
         Ok(id)
     }
 
@@ -1521,10 +1517,57 @@ impl Node {
         let own = self.get(&self.own)?;
         let op = Op::Storage { addr: addr.clone(), token, on: true };
         self.post(&own, op).await?;
-        for sp in self.all() {
-            self.host(&sp, addr.clone()).await;
+        self.host(&own, addr).await;
+        Ok(())
+    }
+
+    /// Whether our storage node `node` keeps `space` too.
+    pub async fn store(
+        self: &Arc<Self>,
+        space: &Id,
+        node: &EndpointId,
+        on: bool,
+    ) -> Result<()> {
+        let paired = self.view(&self.own, |s| s.storage()).unwrap_or_default();
+        let (addr, _) = paired
+            .into_iter()
+            .find(|s| s.0.id == *node)
+            .context("not one of your storage nodes")?;
+        let (own, sp) = (self.get(&self.own)?, self.get(space)?);
+        let (node, space) = (*node, *space);
+        self.post(&own, Op::Store { node, space, on }).await?;
+        let me = self.id();
+        let admin = self.view(&space, |s| s.role(&me) == Role::Admin);
+        match on {
+            true => self.host(&sp, addr).await,
+            false if admin == Some(true) => {
+                let _ =
+                    self.post(&sp, Op::Host { node: addr, on: false }).await;
+            }
+            false => {}
         }
         Ok(())
+    }
+
+    /// Our storage nodes, each with whether it keeps `space`.
+    pub fn stored(&self, space: &Id) -> Vec<(EndpointId, bool)> {
+        let all = *space == self.own;
+        let v = self.view(&self.own, |s| {
+            let v = s.storage().into_iter().map(|(a, _)| a.id);
+            v.map(|n| (n, all || s.keeps(&n, space))).collect()
+        });
+        v.unwrap_or_default()
+    }
+
+    /// Our storage nodes that keep `space` (our own space: all of them).
+    fn stores(&self, space: &Id) -> Vec<(EndpointAddr, [u8; 16])> {
+        let all = *space == self.own;
+        let v = self.view(&self.own, |s| {
+            let mut v = s.storage();
+            v.retain(|(a, _)| all || s.keeps(&a.id, space));
+            v
+        });
+        v.unwrap_or_default()
     }
 
     async fn host(self: &Arc<Self>, sp: &Arc<Space>, addr: EndpointAddr) {
@@ -1552,6 +1595,7 @@ impl Node {
     /// Seal a file and keep its ciphertext; send it in an `Op::Post`.
     pub async fn attach(
         self: &Arc<Self>,
+        space: &Id,
         name: &str,
         data: &[u8],
     ) -> Result<File> {
@@ -1559,18 +1603,17 @@ impl Node {
         let key = rand();
         let ct = crate::crypto::seal(&key, b"irch file", data);
         let hash = Id(blake3::hash(&ct).into());
-        self.keep(&hash, &ct)?;
+        self.keep(space, &hash, &ct)?;
         let (name, size) =
             (name.chars().take(128).collect(), data.len() as u64);
         Ok(File { name, size, hash, key: Id(key) })
     }
 
-    /// Store a blob here, and on our storage nodes.
-    fn keep(self: &Arc<Self>, hash: &Id, ct: &[u8]) -> Result<()> {
+    /// Store a blob here, and on our storage nodes that keep `space`.
+    fn keep(self: &Arc<Self>, space: &Id, hash: &Id, ct: &[u8]) -> Result<()> {
         std::fs::create_dir_all(self.dir.join("blobs"))?;
         store::write(&self.blob(hash), ct)?;
-        let stores = self.view(&self.own, |s| s.storage()).unwrap_or_default();
-        for (addr, token) in stores {
+        for (addr, token) in self.stores(space) {
             let (n, put) = (self.clone(), Ask::Put(token, ct.to_vec()));
             tokio::spawn(async move { n.ask(addr, &put).await });
         }
@@ -1602,7 +1645,7 @@ impl Node {
                     }
                 }
                 let ct = got.context("nobody reachable has that file now")?;
-                self.keep(&f.hash, &ct)?;
+                self.keep(space, &f.hash, &ct)?;
                 ct
             }
         };
@@ -1713,8 +1756,9 @@ impl Node {
         if !self.takes(&sp, &id) || !lock(&sp.busy).insert(id) {
             return;
         }
-        // Our own storage nodes get their token, and whom to take from.
-        let stores = self.view(&self.own, |s| s.storage()).unwrap_or_default();
+        // Our storage nodes that keep it get their token, and whom to
+        // take from.
+        let stores = self.stores(&sp.id);
         let token = stores.into_iter().find(|s| s.0.id == id).map(|s| s.1);
         let r = async {
             let c = self.ep.connect(peer, sync::ALPN).await?;

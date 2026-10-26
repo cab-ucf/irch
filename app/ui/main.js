@@ -1039,7 +1039,8 @@ async function addFiles(list) {
       r.onload = () => ok(r.result.slice(r.result.indexOf(",") + 1));
       r.readAsDataURL(file);
     });
-    const f = await call("attach", { name: file.name, data }).catch(() => null);
+    const f = await call("attach", { space: S.sid, name: file.name, data })
+      .catch(() => null);
     if (f) S.files.push(f);
     renderFilesBar();
   }
@@ -1257,6 +1258,7 @@ function spaceMenu(anchor) {
     s.admin && ["Create Channel", "plus", createChannel],
     s.admin && ["Rename Space", "pencil", renameSpace],
     s.admin && ["Reset Invite Links", "key", resetInvites],
+    ["Storage Nodes", "disk", () => storageFlow(s)],
     "-",
     ...[["All", "All messages"], ["Mentions", "Only @mentions"],
       ["Off", "Nothing"]].map(([level, text]) => [
@@ -1268,6 +1270,36 @@ function spaceMenu(anchor) {
   ]);
 }
 
+
+/** Which of your storage nodes keep this space: encrypted, there while
+ *  everyone is offline. */
+function storageFlow(s) {
+  const local = S.me.local_storage;
+  const keep = (node, on) => quiet(call("store", { space: s.id, node, on }));
+  const paired = s.storage.some((x) => x.node === local);
+  modal((finish) => {
+    const sw = (x) => h("label", { class: "switch" },
+      h("span", {}, short(x.node),
+        h("small", {}, x.node === local ? "This computer" : "Storage node")),
+      h("input", { type: "checkbox", checked: x.on,
+        onchange: (e) => keep(x.node, e.target.checked) }), h("i"));
+    const here = local && !paired && h("button", { class: "btn",
+      onclick: async () => {
+        await quiet(call("store_local").then(() => keep(local, true)));
+        finish(true);
+      } }, "Keep it on this computer's storage node");
+    return h("div", {},
+      h("div", { class: "m-body" }, h("h2", {}, "Storage Nodes"),
+        h("p", { class: "sub" }, "A storage node keeps this space " +
+          "encrypted, so it waits there while everyone is offline."),
+        s.storage.map(sw), here,
+        !s.storage.length && !here && h("p", { class: "note" },
+          "Pair one with its code in My Account, or run nixos.nix on " +
+          "this computer.")),
+      foot(h("button", { class: "btn grey", onclick: () => finish(null) },
+        "Done")));
+  });
+}
 
 function memberCard(id, anchor, align) {
   const s = cur();
@@ -1514,7 +1546,7 @@ function settings() {
       if (n && n !== S.me.name) await quiet(call("set_name", { name: n }));
       const code = storage.value.trim();
       if (code) await quiet(call("add_storage", { code })
-        .then(() => toast("Your spaces now also live on that storage node")));
+        .then(() => toast("Paired: each space's menu picks what it keeps")));
       S.me = await rpc("me");
       renderUserPanel();
       schedule("members", "msgs");

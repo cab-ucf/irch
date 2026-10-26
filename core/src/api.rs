@@ -1,8 +1,10 @@
 //! The app's whole bridge: one JSON call in, one JSON value out.
 
-use crate::{Ch, Id, Node, Op, Role, notes, op::File, state::Pos};
+use crate::op::{File, uncode};
+use crate::{Ch, Id, Node, Op, Role, notes, state::Pos};
 use anyhow::{Context, Result};
 use data_encoding::BASE64;
+use iroh::EndpointAddr;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -74,9 +76,17 @@ pub enum Call {
         code: String,
     },
     Attach {
+        space: Id,
         name: String,
         data: String,
     },
+    Store {
+        space: Id,
+        node: iroh::EndpointId,
+        on: bool,
+    },
+    /// Pair with this computer's storage node (nixos.nix).
+    StoreLocal,
     File {
         space: Id,
         file: File,
@@ -110,6 +120,9 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
             json!({
                 "id": id, "name": name, "invisible": invisible, "call": call,
                 "push": n.pushed(),
+                "local_storage": crate::local_storage()
+                    .and_then(|c| uncode::<(EndpointAddr, [u8; 16])>("host", &c).ok())
+                    .map(|(a, _)| a.id),
             })
         }
         Call::SetName { name } => json!(n.set_name(&name).await?),
@@ -156,8 +169,17 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
         Call::Dm { space, user } => json!(n.dm(&space, &user).await?),
         Call::LinkCode => json!(n.link_code().await),
         Call::AddStorage { code } => json!(n.add_storage(&code).await?),
-        Call::Attach { name, data } => {
-            json!(n.attach(&name, &BASE64.decode(data.as_bytes())?).await?)
+        Call::Attach { space, name, data } => {
+            let data = BASE64.decode(data.as_bytes())?;
+            json!(n.attach(&space, &name, &data).await?)
+        }
+        Call::Store { space, node, on } => {
+            json!(n.store(&space, &node, on).await?)
+        }
+        Call::StoreLocal => {
+            let code =
+                crate::local_storage().context("none on this computer")?;
+            json!(n.add_storage(&code).await?)
         }
         Call::File { space, file } => {
             json!(BASE64.encode(&n.file(&space, &file).await?))
@@ -244,5 +266,8 @@ fn space(n: &Node, id: &Id) -> Option<Value> {
         "id": id, "name": name, "dm": dm, "with": with, "owner": owner,
         "admin": admin, "peers": peers, "locked": locked, "channels": channels,
         "level": n.level(id),
+        "storage": n.stored(id).into_iter()
+            .map(|(node, on)| json!({ "node": node, "on": on }))
+            .collect::<Vec<_>>(),
     }))
 }

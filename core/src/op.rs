@@ -45,6 +45,9 @@ pub enum Op {
     Gone,
     // Where to wake the signing device when someone writes (UnifiedPush).
     Push { url: Option<String> },
+    // Own space: whether our storage node keeps a space (it always keeps
+    // the own space).
+    Store { node: EndpointId, space: Id, on: bool },
 }
 
 impl Op {

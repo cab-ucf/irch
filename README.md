@@ -58,10 +58,11 @@ disk   : one append-only log of envs per space; nothing else to migrate
   devices follow each other. `/link` (My Account › Link a device) shows
   the code.
 - **Storage nodes keep ciphertext, never keys.** `irch --serve` on a NAS
-  or a VPS prints a code; give it to irch (`/store`, or My Account) and it
-  keeps every space you are in, your private one included, so messages
-  wait there while everyone else is offline, and a new device can link
-  while your others are off. It cannot read any of it, so it takes
+  or a VPS prints a code; give it to irch (`/store CODE`, or My Account)
+  and it keeps your private space, so a new device can link while your
+  others are off, and each space you choose (its menu's Storage Nodes,
+  or `/store here`), so messages wait there while everyone else is
+  offline. It cannot read any of it, so it takes
   envelopes only from your devices and the member devices they vouch for.
   An admin's storage node is listed in the space too, so members fetch
   from it and invites send newcomers there first.
@@ -104,13 +105,17 @@ Invites carry your relay address, not your IP, whenever a relay is known.
 
 An always-on member's desktop keeps the spaces it is in synced, but it can
 read them and covers only those. A storage node (`irch --serve`) keeps
-every space of everyone who adds its code, ciphertext only. On NixOS,
+the spaces its users choose, ciphertext only. On NixOS,
 `nixos.nix` runs one as its own user, rebuilt hourly from the newest
 release tag signed by a key in `services.irch.signers` (ssh
 `allowed_signers` lines; sign with `git tag -s`, `gpg.format=ssh`), so a
 push alone runs nothing there: import it, set the signers, `systemctl
 start irch-update` once, and `journalctl -u irch | grep -A1 'Storage
-code'` prints the code to hand out.
+code'` prints the code to hand out. On the same computer the node runs
+as its own user while you use irch as yourself: list yourself in
+`services.irch.users` and its code waits in `/run/irch/code` for you
+alone, so a space's Storage Nodes offers "this computer's" in one click
+(`/store local` in the terminal).
 
 ## Updates
 
@@ -126,7 +131,8 @@ secrets are named at its top).
 Terminal: `/create NAME`, `/join CODE`, `/invite`, `/channel NAME`,
 `/reply TEXT`, `/thread TEXT`, `/react EMOJI`, `/edit TEXT`, `/delete`,
 `/dm USER`, `/ban USER`, `/rekey`, `/file PATH`, `/save`, `/link`,
-`/store CODE`, `/note [FILE]`, `/todo [FILE]`, `/invisible`, `/help`.
+`/store CODE|local|here`, `/note [FILE]`, `/todo [FILE]`, `/invisible`,
+`/help`.
 Ctrl-N/P switches channel; PgUp/PgDn scrolls.
 
 Messages are Markdown (markdown-it: headings, lists, tables, quotes,

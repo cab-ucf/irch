@@ -28,7 +28,8 @@ const HELP: &str = "\
 /admin USER  /member USER  /ban USER  /unban USER  (admins)
 /rekey           new key, old invites stop working (admins)
 /link            become you on another device (keep it secret)
-/store CODE      keep your spaces on a storage node
+/store CODE      pair with a storage node (local: this computer's)
+/store here      keep this space on your storage nodes
 /file PATH TEXT  send a file        /save        save the last file here
 /invisible       no presence or typing    /quit
 Ctrl-N/P or Alt-Up/Down: channel   PgUp/PgDn: scroll   Esc: close";
@@ -276,8 +277,9 @@ impl App {
                 let data = std::fs::read(path)?;
                 let name = std::path::Path::new(path).file_name();
                 let name = name.and_then(|n| n.to_str()).unwrap_or("file");
-                let files = vec![n.attach(name, &data).await?];
-                let (channel, text) = (self.here()?.1, text.to_string());
+                let (space, channel) = self.here()?;
+                let files = vec![n.attach(&space, name, &data).await?];
+                let text = text.to_string();
                 self.post(Op::Post { channel, text, reply: None, files })
                     .await?;
             }
@@ -314,9 +316,25 @@ impl App {
                     n.link_code().await
                 ));
             }
+            "store" if arg == "local" => {
+                let code = irch_core::local_storage().ok_or_else(|| {
+                    anyhow!("no storage node on this computer")
+                })?;
+                n.add_storage(&code).await?;
+                self.status = "paired: /store here keeps a space there".into();
+            }
+            "store" if arg == "here" => {
+                let id = self.space()?;
+                let v = n.stored(&id);
+                ensure!(!v.is_empty(), "/store CODE or /store local first");
+                for (node, _) in v {
+                    n.store(&id, &node, true).await?;
+                }
+                self.status = "this space now also lives there".into();
+            }
             "store" => {
                 n.add_storage(&arg).await?;
-                self.status = "your spaces now also live there".into();
+                self.status = "paired: /store here keeps a space there".into();
             }
             "invisible" => {
                 n.set_invisible(!n.invisible()).await;

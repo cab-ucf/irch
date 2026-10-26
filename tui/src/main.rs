@@ -66,6 +66,10 @@ async fn main() -> Result<()> {
     if let Some(code) = n.storage_code().await {
         println!("Storage code (give it to the people you store for):");
         println!("{code}");
+        // nixos.nix: where this computer's own users' irch finds it.
+        if let Some(p) = std::env::var_os("IRCH_CODE_FILE") {
+            std::fs::write(p, &code)?;
+        }
     }
     if ui {
         app::run(n.clone()).await?;
