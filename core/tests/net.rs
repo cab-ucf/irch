@@ -503,6 +503,10 @@ async fn writing_wakes_a_sleeping_device() {
     let told = |n: &Node| n.view(&id, |s| s.pushes().len()) == Some(1);
     until("a knows where to wake b", || told(&a)).await;
     assert!(b.notices().is_empty(), "history stays quiet");
+    let named = |n: &Node| n.view(&id, |s| s.profile(&a.id()).is_some());
+    until("b knows a by name", || named(&b) == Some(true)).await;
+    // Later than that first ask, not in its very millisecond.
+    tokio::time::sleep(Duration::from_millis(2)).await;
 
     say(&a, &id, ch, "@b the samples are in").await;
     until("a woke b", || pushes.load(Relaxed) == 1).await;
