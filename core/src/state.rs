@@ -86,8 +86,9 @@ pub struct State {
     control: BTreeMap<Pos, (Id, Op)>,
     posts: HashMap<Ch, BTreeMap<Pos, Post>>,
     index: HashMap<Id, (Ch, Pos)>,
-    // The epoch each op was sealed under.
-    sealed: HashMap<Id, [u8; 8]>,
+    // The epochs each op was sealed under (the same op, re-sealed by
+    // someone else, may come under several).
+    sealed: HashMap<Id, Vec<[u8; 8]>>,
     // Each device's push endpoint, by who says so: newest wins.
     pushes: HashMap<(Id, EndpointId), (Pos, Option<String>)>,
     // Every post's would-be thread, back to the post.
@@ -101,6 +102,7 @@ pub struct State {
     name: Option<String>,
     channels: BTreeMap<Ch, String>,
     profiles: HashMap<Id, (String, Vec<u8>)>,
+    profiled: HashMap<Id, Pos>,
     roles: HashMap<Id, Role>,
     epochs: Vec<Epoch>,
     bans: Vec<(Pos, Id)>,
@@ -133,11 +135,15 @@ impl State {
 
     fn insert(&mut self, s: Signed) -> (bool, bool) {
         let at = (s.ts, s.id);
-        self.sealed.insert(s.id, s.epoch);
+        let tags = self.sealed.entry(s.id).or_default();
+        if !tags.contains(&s.epoch) {
+            tags.push(s.epoch);
+        }
         let t = self.authors.entry(s.author).or_default();
         *t = (*t).max(s.ts);
+        // Never later than now: a date set ahead does not rank it first.
         let t = self.devices.entry((s.device, s.author)).or_default();
-        *t = (*t).max(s.ts);
+        *t = (*t).max(s.ts.min(crate::now()));
         match s.op {
             Op::Post { channel, text, reply, files } => {
                 self.index.insert(s.id, (channel, at));
@@ -188,6 +194,7 @@ impl State {
     fn refold(&mut self) {
         (self.name, self.channels) = (None, BTreeMap::new());
         (self.profiles, self.roles) = (HashMap::new(), HashMap::new());
+        self.profiled = HashMap::new();
         (self.epochs, self.hosts, self.bans) =
             (vec![], BTreeMap::new(), vec![]);
         (self.spaces, self.storage) = (BTreeMap::new(), BTreeMap::new());
@@ -203,6 +210,7 @@ impl State {
                 _ if role == Role::Banned || self.stale_at(at, a) => {}
                 Op::Profile { name, kem } => {
                     self.profiles.insert(*a, (name.clone(), kem.clone()));
+                    self.profiled.insert(*a, *at);
                 }
                 Op::Rename { name } if admin => self.name = Some(name.clone()),
                 Op::Channel { id, name } if admin && self.dm.is_none() => {
@@ -252,6 +260,24 @@ impl State {
             }
         }
         self.control = control;
+        // New keys go only to who holds the current one: a key told under
+        // an epoch some later one left them out of (however it is dated)
+        // gets none.
+        let cut = self.profiled.iter().filter(|(a, at)| {
+            let tags = self.sealed.get(&at.1).map_or(&[][..], |t| t);
+            tags.iter().all(|t| self.left_out(t, a))
+        });
+        let cut: Vec<Id> = cut.map(|(a, _)| *a).collect();
+        for a in cut {
+            self.profiles.entry(a).and_modify(|p| p.1.clear());
+        }
+    }
+
+    /// Some epoch set after `epoch` was not given to `a`.
+    fn left_out(&self, epoch: &[u8; 8], a: &Id) -> bool {
+        let es = &self.epochs;
+        let from = es.iter().find(|e| e.tag == *epoch).map(|e| e.at);
+        es.iter().any(|e| Some(e.at) > from && !e.to.contains(a))
     }
 
     /// Sealed under `epoch` at `at` by `a`, after a newer epoch was set
@@ -267,8 +293,10 @@ impl State {
         es.iter().filter(since).any(|e| !e.to.contains(a))
     }
 
+    /// Stale under every epoch it came sealed under.
     fn stale_at(&self, at: &Pos, a: &Id) -> bool {
-        self.sealed.get(&at.1).is_some_and(|t| self.stale(t, at, a))
+        let tags = self.sealed.get(&at.1);
+        tags.is_some_and(|t| t.iter().all(|t| self.stale(t, at, a)))
     }
 
     /// Where `a` said to wake device `d`.
@@ -281,8 +309,18 @@ impl State {
         let ok = |((a, _), (at, _)): &(&(Id, EndpointId), &(Pos, _))| {
             self.role(a) != Role::Banned && !self.stale_at(at, a)
         };
-        let p = self.pushes.iter().filter(ok);
-        p.filter_map(|((_, d), (_, u))| Some((*d, u.clone()?))).collect()
+        // A few per member, their newest: devices are theirs to claim.
+        let mut p: Vec<_> = self.pushes.iter().filter(ok).collect();
+        p.sort_unstable_by_key(|x| std::cmp::Reverse(x.1.0));
+        let mut n: HashMap<Id, usize> = HashMap::new();
+        p.retain(|((a, _), _)| {
+            let c = n.entry(*a).or_default();
+            *c += 1;
+            *c <= 4
+        });
+        p.into_iter()
+            .filter_map(|((_, d), (_, u))| Some((*d, u.clone()?)))
+            .collect()
     }
 
     /// Who a direct-message space is with, seen by `me`.
@@ -839,7 +877,7 @@ mod tests {
             boxes: to.iter().map(|u| (*u, vec![])).collect(),
         };
         let name = |n: &str| Op::Profile { name: n.into(), kem: vec![1] };
-        st.extend([
+        let base = vec![
             sealed(1, o, [0; 8], rekey(0, &[])),
             sealed(
                 2,
@@ -853,13 +891,29 @@ mod tests {
             sealed(7, x, [0; 8], post("x was here", None)),
             sealed(8, a, [0; 8], post("a, offline", None)),
             sealed(9, o, [1; 8], post("o", None)),
-        ]);
+        ];
+        st.extend(base.clone());
         assert!(st.kem(&a).is_some() && st.kem(&x).is_none());
         let m: Vec<_> =
             st.messages(&CH, None, 9).into_iter().map(|m| m.text).collect();
         assert_eq!(m, ["a, offline", "o"]);
         assert!(st.stale(&[0; 8], &(10, Id([10; 32])), &x));
         assert!(!st.stale(&[1; 8], &(10, Id([10; 32])), &x));
+        // Re-sealed under the old key by someone else: still shown, in
+        // either order; dated before the reset: still no new keys.
+        let n = Id([9; 32]);
+        let (np, nk) = (sealed(20, n, [1; 8], post("n", None)), name("n"));
+        let older = |s: &Signed| Signed { epoch: [0; 8], ..s.clone() };
+        for (one, two) in [(np.clone(), older(&np)), (older(&np), np.clone())] {
+            let mut st2 = State::new(&Invite::new(o, "", None));
+            st2.extend(base.clone());
+            let nn = sealed(19, n, [1; 8], nk.clone());
+            st2.extend([one, two, nn.clone(), older(&nn)]);
+            let m = st2.messages(&CH, None, 9);
+            assert!(m.iter().any(|m| m.text == "n") && st2.kem(&n).is_some());
+        }
+        st.extend([sealed(4, x, [0; 8], name("a"))]);
+        assert!(st.kem(&x).is_none(), "backdated, still left out");
     }
 
     #[test]

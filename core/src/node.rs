@@ -151,9 +151,17 @@ struct Book {
     parked: usize,
     // Per epoch, the older keys its holders learn through `Back`.
     backs: HashMap<[u8; 8], Vec<[u8; 8]>>,
+    // Keys handed on (`Back`) or boxed to us (`Rekey`), by whom, where,
+    // under which epoch: learned once that is an admin whose op stands
+    // (maybe only after more history opens).
+    offered: Vec<Offered>,
     st: State,
     knocks: Vec<Invite>,
 }
+
+/// A key someone offered: who, where, under which epoch, and whether it
+/// was handed on (`Back`) or boxed to us (`Rekey`).
+type Offered = (Id, (u64, Id), [u8; 8], Key, bool);
 
 /// Where an envelope is: in the log (checked once, or not yet), or only
 /// in memory until it opens and checks out (ours need no check).
@@ -180,7 +188,18 @@ impl Book {
     fn new(log: Log, st: State) -> Self {
         let (idx, at, keys) = (BTreeMap::new(), HashMap::new(), HashMap::new());
         let (pending, backs, knocks) = (HashMap::new(), HashMap::new(), vec![]);
-        Self { log, idx, at, keys, pending, parked: 0, backs, st, knocks }
+        Self {
+            log,
+            idx,
+            at,
+            keys,
+            pending,
+            parked: 0,
+            backs,
+            offered: vec![],
+            st,
+            knocks,
+        }
     }
 
     fn has(&self, i: &Id) -> bool {
@@ -222,62 +241,91 @@ impl Book {
         mut work: Vec<(Id, Env, Src)>,
     ) -> usize {
         let (mut ops, mut kept) = (vec![], 0);
-        while let Some((i, e, src)) = work.pop() {
-            let Some(&key) = self.keys.get(&e.epoch) else {
-                self.park(i, e, src);
-                continue;
-            };
-            let trusted = matches!(src, Src::Log(true) | Src::Net(_, true));
-            let Some(s) = op::open(sp, &key, &e, !trusted) else { continue };
-            if let Src::Net(raw, ours) = &src {
-                if !self.store(i, e.ts, raw, true, *ours) {
+        loop {
+            while let Some((i, e, src)) = work.pop() {
+                let Some(&key) = self.keys.get(&e.epoch) else {
+                    self.park(i, e, src);
+                    continue;
+                };
+                let trusted = matches!(src, Src::Log(true) | Src::Net(_, true));
+                let Some(s) = op::open(sp, &key, &e, !trusted) else {
+                    continue;
+                };
+                // Banned, or under a key they were cut off from: dropped
+                // (it would only be hidden, and fill every member's disk).
+                let at = (s.ts, s.id);
+                if self.st.role(&s.author) == Role::Banned
+                    || self.st.stale(&e.epoch, &at, &s.author)
+                {
                     continue;
                 }
-                kept += 1;
+                if let Src::Net(raw, ours) = &src {
+                    if !self.store(i, e.ts, raw, true, *ours) {
+                        continue;
+                    }
+                    kept += 1;
+                }
+                let key = match &s.op {
+                    Op::Rekey { epoch, boxes } => boxes
+                        .iter()
+                        .find(|b| b.0 == me.id())
+                        .and_then(|b| {
+                            kem_open(&me.kem, &rekey_aad(sp, epoch), &b.1)
+                        })
+                        .and_then(|k| Key::try_from(k).ok())
+                        .filter(|k| tag(k) == *epoch)
+                        .map(|k| (k, false)),
+                    Op::Back { key } => Some((*key, true)),
+                    Op::Knock { .. }
+                        if self.st.role(&s.author) == Role::Banned
+                            || self.st.stale(
+                                &e.epoch,
+                                &(s.ts, s.id),
+                                &s.author,
+                            ) =>
+                    {
+                        None
+                    }
+                    Op::Knock { sealed } => {
+                        let inv = kem_open(&me.kem, &sp.0, sealed);
+                        let inv = inv.and_then(|b| {
+                            postcard::from_bytes::<Invite>(&b).ok()
+                        });
+                        self.knocks.extend(inv.filter(|i| {
+                            i.dm == Some(me.id()) && i.owner == s.author
+                        }));
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some((k, back)) = key {
+                    if self.offered.len() >= 1024 {
+                        self.offered.remove(0);
+                    }
+                    self.offered.push((s.author, at, e.epoch, k, back));
+                }
+                ops.push(s);
             }
-            let key = match &s.op {
-                Op::Rekey { epoch, boxes } => boxes
-                    .iter()
-                    .find(|b| b.0 == me.id())
-                    .and_then(|b| {
-                        kem_open(&me.kem, &rekey_aad(sp, epoch), &b.1)
-                    })
-                    .and_then(|k| Key::try_from(k).ok())
-                    .filter(|k| tag(k) == *epoch),
-                Op::Back { key } => {
-                    self.backs.entry(e.epoch).or_default().push(tag(key));
-                    Some(*key)
+            self.st.extend(std::mem::take(&mut ops));
+            let st = &self.st;
+            let good =
+                |(a, at, ep, ..): &(Id, (u64, Id), [u8; 8], Key, bool)| {
+                    st.role(a) == Role::Admin && !st.stale(ep, at, a)
+                };
+            let good: Vec<_> =
+                self.offered.extract_if(.., |o| good(o)).collect();
+            for (_, _, under, k, back) in good {
+                if back {
+                    self.backs.entry(under).or_default().push(tag(&k));
                 }
-                Op::Knock { .. }
-                    if self.st.role(&s.author) == Role::Banned
-                        || self.st.stale(
-                            &e.epoch,
-                            &(s.ts, s.id),
-                            &s.author,
-                        ) =>
-                {
-                    None
+                if self.keys.insert(tag(&k), k).is_none() {
+                    work.extend(self.unpark(&tag(&k)));
                 }
-                Op::Knock { sealed } => {
-                    let inv = kem_open(&me.kem, &sp.0, sealed);
-                    let inv = inv
-                        .and_then(|b| postcard::from_bytes::<Invite>(&b).ok());
-                    self.knocks.extend(inv.filter(|i| {
-                        i.dm == Some(me.id()) && i.owner == s.author
-                    }));
-                    None
-                }
-                _ => None,
-            };
-            if let Some(k) = key
-                && self.keys.insert(tag(&k), k).is_none()
-            {
-                work.extend(self.unpark(&tag(&k)));
             }
-            ops.push(s);
+            if work.is_empty() {
+                return kept;
+            }
         }
-        self.st.extend(ops);
-        kept
     }
 
     fn park(&mut self, i: Id, e: Env, src: Src) {
@@ -402,7 +450,7 @@ pub struct Node {
     wake: Mutex<HashMap<String, (Option<Instant>, bool)>>,
     // Calls notified about (space, caller, channel), while they last.
     rang: Mutex<HashSet<(Id, Id, Ch)>>,
-    http: OnceLock<reqwest::Client>,
+    push: OnceLock<reqwest::Client>,
     name: Mutex<String>,
     events: broadcast::Sender<Event>,
     clock: AtomicU64,
@@ -613,7 +661,7 @@ impl Node {
             prefs: Mutex::new(prefs),
             wake: Mutex::default(),
             rang: Mutex::default(),
-            http: OnceLock::new(),
+            push: OnceLock::new(),
             name: Mutex::new(cfg.name),
             events: broadcast::channel(1024).0,
             clock: AtomicU64::new(0),
@@ -916,14 +964,9 @@ impl Node {
     fn wake(self: &Arc<Self>, id: &Id) {
         let dev = self.ep.id();
         let urls = self.view(id, |s| s.pushes()).unwrap_or_default();
-        // https only (a member names the URL: never our LAN); tests, local.
-        // Or a phone's own wake servers, asked over iroh.
-        let ok = |u: &String| {
-            u.starts_with("https://")
-                || u.starts_with("irch:wake:")
-                || cfg!(debug_assertions) && u.starts_with("http://127.0.0.1:")
-        };
-        for (_, url) in urls.into_iter().filter(|u| u.0 != dev && ok(&u.1)) {
+        for (_, url) in
+            urls.into_iter().filter(|u| u.0 != dev && pushable(&u.1))
+        {
             let wait = {
                 let mut w = lock(&self.wake);
                 let (last, held) =
@@ -954,8 +997,9 @@ impl Node {
                     }
                     return;
                 }
-                let http = n.http.get_or_init(http);
-                let r = http.post(&url).header("TTL", "86400");
+                let local = url.starts_with("http://").then(http);
+                let c = local.as_ref().unwrap_or(n.push.get_or_init(push_http));
+                let r = c.post(&url).header("TTL", "86400");
                 let r = r.header("Urgency", "high").body("1").send().await;
                 if let Err(e) = r {
                     warn!("push: {e}");
@@ -2187,6 +2231,10 @@ async fn pump(n: Arc<Node>, sp: Weak<Space>, boot: Vec<EndpointId>) {
 /// For push endpoints and updates: TLS as iroh sets it up, roots compiled
 /// in.
 pub fn http() -> reqwest::Client {
+    client().build().expect("HTTP client")
+}
+
+fn client() -> reqwest::ClientBuilder {
     #[cfg(not(target_os = "android"))]
     let ca = iroh::tls::CaTlsConfig::system();
     #[cfg(target_os = "android")]
@@ -2195,7 +2243,43 @@ pub fn http() -> reqwest::Client {
     let b = reqwest::Client::builder().tls_backend_preconfigured(tls);
     // Stalls end a request, not its length: an update can be large.
     let b = b.connect_timeout(Duration::from_secs(20));
-    b.read_timeout(Duration::from_secs(30)).build().expect("HTTP client")
+    b.read_timeout(Duration::from_secs(30))
+}
+
+/// For push URLs, which members name: https to public addresses only,
+/// never redirected.
+fn push_http() -> reqwest::Client {
+    let b = client().redirect(reqwest::redirect::Policy::none());
+    let b = b.https_only(true).dns_resolver(Public);
+    b.build().expect("HTTP client")
+}
+
+/// A push URL worth asking: https, to a public address (a member names
+/// it: never our LAN); tests, local. Or a phone's own servers, over iroh.
+fn pushable(u: &str) -> bool {
+    let ip = || {
+        let u = reqwest::Url::parse(u).ok()?;
+        u.host_str()?.trim_matches(['[', ']']).parse().ok()
+    };
+    u.starts_with("https://") && ip().is_none_or(|a| public(&a))
+        || u.starts_with("irch:wake:")
+        || cfg!(debug_assertions) && u.starts_with("http://127.0.0.1:")
+}
+
+struct Public;
+
+impl reqwest::dns::Resolve for Public {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let all = tokio::net::lookup_host((host, 0)).await?;
+            let v: Vec<_> = all.filter(|a| public(&a.ip())).collect();
+            if v.is_empty() {
+                return Err("no public address".into());
+            }
+            Ok(Box::new(v.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
 }
 
 async fn heartbeat(n: Weak<Node>) {
@@ -2248,6 +2332,68 @@ mod tests {
         }
         assert!(b.parked <= PARKED + (2 << 20) && b.at.is_empty());
         assert_eq!(std::fs::metadata(&p).unwrap().len(), 0);
+        std::fs::remove_file(p).unwrap();
+    }
+
+    #[test]
+    fn pushes_go_out_only_to_public_https() {
+        assert!(pushable("https://ntfy.sh/up1") && pushable("irch:wake:x"));
+        for u in [
+            "http://ntfy.sh/up1",
+            "https://10.0.0.8/up",
+            "https://[::1]:8080/up",
+            "https://[fd00::1]/up",
+            "https://100.64.0.1/up",
+            "https://169.254.169.254/latest",
+            "file:///etc/passwd",
+        ] {
+            assert!(!pushable(u), "{u}");
+        }
+    }
+
+    #[test]
+    fn only_admins_hand_on_keys() {
+        let (o, x) = (Me::new(rand()), Me::new(rand()));
+        let inv = Invite::new(o.id(), "", None);
+        let (sp, k0, dev) = (inv.id(), inv.key, SecretKey::generate().public());
+        let p = std::env::temp_dir().join(format!("irch-keys-{}", now()));
+        let mut b = Book::new(Log::open(&p).unwrap().0, State::new(&inv));
+        b.keys.insert(tag(&k0), k0);
+        let (kb, kx): (Key, Key) = (rand(), rand());
+        let (ch, n) = (Ch([3; 8]), |t: &str| t.to_string());
+        let post = |t| Op::Post {
+            channel: ch,
+            text: n(t),
+            reply: None,
+            files: vec![],
+        };
+        let boxed = kem_seal(&o.pk(), &rekey_aad(&sp, &tag(&kx)), &kx).unwrap();
+        let ops = [
+            (&o, k0, 1, Op::Channel { id: ch, name: Some(n("g")) }),
+            // Someone holding the key, not an admin, mints one of their own.
+            (&x, k0, 2, Op::Back { key: kx }),
+            (
+                &x,
+                k0,
+                3,
+                Op::Rekey { epoch: tag(&kx), boxes: vec![(o.id(), boxed)] },
+            ),
+            (&x, kx, 4, post("x, under its own key")),
+            // The owner hands one on.
+            (&o, k0, 5, Op::Back { key: kb }),
+            (&o, kb, 6, post("o, under a key handed on")),
+        ];
+        let work = ops.into_iter().map(|(who, k, ts, op)| {
+            let (s, raw) = op::seal(&sp, &k, &who.user, dev, ts, op);
+            (s.id, postcard::from_bytes(&raw).unwrap(), Src::Log(false))
+        });
+        b.fold(&sp, &o, work.rev().collect());
+        assert!(
+            b.keys.contains_key(&tag(&kb)) && !b.keys.contains_key(&tag(&kx))
+        );
+        let texts: Vec<_> =
+            b.st.messages(&ch, None, 9).into_iter().map(|m| m.text).collect();
+        assert_eq!(texts, ["o, under a key handed on"]);
         std::fs::remove_file(p).unwrap();
     }
 
