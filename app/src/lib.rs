@@ -293,16 +293,12 @@ async fn upgrade(
 /// Phones: what decides whether they are told of messages and calls, and
 /// asking for what is missing. Desktops are told while irch runs: null.
 #[tauri::command]
-async fn notify_check(
-    app: AppHandle,
-    fix: bool,
-    test: bool,
-) -> Result<Value, String> {
+async fn notify_check(app: AppHandle, ask: String) -> Result<Value, String> {
     #[cfg(target_os = "android")]
-    return android::notify_check(&app, fix, test).await.map_err(err);
+    return android::notify_check(&app, &ask).await.map_err(err);
     #[cfg(desktop)]
     {
-        let _ = (app, fix, test);
+        let _ = (app, ask);
         Ok(Value::Null)
     }
 }

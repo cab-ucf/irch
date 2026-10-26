@@ -333,6 +333,12 @@ const badge = (n) =>
 /** One list, as weechat's: each space and its channels and threads,
  *  then direct messages. A space folds by its name. */
 function renderSidebar() {
+  // A phone in a space now has someone to hear from: Android is asked,
+  // once, to let irch run unrestricted (else, asleep, it cannot ring).
+  if (android && S.spaces.length && !store.get("askedBg")) {
+    store.set("askedBg", "1");
+    quiet(invoke("notify_check", { ask: "background" }));
+  }
   put($("server-header"), h("span", { class: "brand" }, "irch"),
     h("button", { title: "Add a space (create or join)", onclick: addSpace },
       icon("plus")));
@@ -1669,8 +1675,8 @@ function settings() {
  *  now, a way to allow the rest, and a test. */
 function notifyCheck() {
   const box = h("div", { class: "checks" });
-  const draw = async (fix, test) => {
-    const a = await invoke("notify_check", { fix, test }).catch(() => null);
+  const draw = async (ask = "") => {
+    const a = await invoke("notify_check", { ask }).catch(() => null);
     if (!a) return;
     const row = (ok, text) => h("p", { class: "check" + (ok ? " ok" : "") },
       ok ? "✓ " : "✗ ", text);
@@ -1684,15 +1690,15 @@ function notifyCheck() {
           "UnifiedPush app such as ntfy costs less battery."),
       h("div", { class: "row" },
         !(a.notify && a.background) && h("button",
-          { class: "btn", onclick: () => draw(true, false) }, "Allow"),
-        h("button", { class: "btn grey", onclick: () => draw(false, true) },
+          { class: "btn", onclick: () => draw("fix") }, "Allow"),
+        h("button", { class: "btn grey", onclick: () => draw("test") },
           "Send a test notification")));
     // Back from Android's settings: what they allow now.
     document.addEventListener("visibilitychange", () =>
-      !document.hidden && box.isConnected && draw(false, false),
+      !document.hidden && box.isConnected && draw(),
     { once: true });
   };
-  draw(false, false);
+  draw();
   return box;
 }
 

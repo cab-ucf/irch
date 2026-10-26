@@ -44,6 +44,8 @@ tap() {
 }
 
 adb install -r -g "$apk"
+# As if Allow was chosen when irch asks to run unrestricted.
+adb shell dumpsys deviceidle whitelist +"$pkg" >/dev/null
 adb logcat -c
 adb shell am start -W -n "$pkg/.MainActivity"
 see 'Welcome to irch' 90 || fail "UI never showed the welcome screen"

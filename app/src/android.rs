@@ -75,19 +75,22 @@ pub async fn upgrade(
     }
 }
 
-/// What decides whether this phone is told; with `fix`, Android asks for
-/// what is missing; with `test`, a notification shows now.
+/// What decides whether this phone is told, after `ask`: "fix" (Android
+/// asks for what is missing), "background" (to run unrestricted), "test"
+/// (a notification, now), or nothing.
 pub async fn notify_check(
     app: &tauri::AppHandle,
-    fix: bool,
-    test: bool,
+    ask: &str,
 ) -> anyhow::Result<serde_json::Value> {
     let b = app.try_state::<Bridge>().context("no bridge")?;
-    if fix {
-        b.call("allowAlerts", serde_json::json!({})).await;
-    }
-    if test {
-        b.call("testAlert", serde_json::json!({})).await;
+    let cmd = match ask {
+        "fix" => Some("allowAlerts"),
+        "background" => Some("askBackground"),
+        "test" => Some("testAlert"),
+        _ => None,
+    };
+    if let Some(cmd) = cmd {
+        b.call(cmd, serde_json::json!({})).await;
     }
     let got = b.0.run_mobile_plugin_async("alerts", serde_json::json!({}));
     Ok(got.await?)

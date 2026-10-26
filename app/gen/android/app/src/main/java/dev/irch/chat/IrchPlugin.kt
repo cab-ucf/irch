@@ -72,12 +72,6 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     UnifiedPush.tryUseCurrentOrDefaultDistributor(activity) { ok ->
       if (ok) UnifiedPush.register(activity) else live(activity)
     }
-    // Asked once; My Account shows it, and asks again on request.
-    val prefs = activity.getSharedPreferences("irch", Context.MODE_PRIVATE)
-    if (!unrestricted(activity) && !prefs.getBoolean("askedBattery", false)) {
-      prefs.edit().putBoolean("askedBattery", true).apply()
-      unrestrict()
-    }
   }
 
   /** Doze lets an optimized app neither keep its connection nor start
@@ -114,6 +108,13 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
           activity.packageName)
       activity.startActivity(i)
     } else if (!unrestricted(activity)) unrestrict()
+    invoke.resolve()
+  }
+
+  /** Once there is someone to hear from (the page asks, once). */
+  @Command
+  fun askBackground(invoke: Invoke) {
+    if (!unrestricted(activity)) unrestrict()
     invoke.resolve()
   }
 
