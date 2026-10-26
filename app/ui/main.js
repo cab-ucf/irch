@@ -1302,19 +1302,22 @@ function confirmBox({ title, sub, ok }) {
       h("button", { class: "btn red", onclick: () => finish(true) }, ok))));
 }
 
-/** A code to hand on: copy, share (Android), and a QR code to scan. */
-async function showCode({ title, label, code, note }) {
+/** A code to hand on: copy, share (Android), and a QR code to scan; a
+ *  secret one is never shared to other apps, and leaves the clipboard
+ *  after a minute. */
+async function showCode({ title, label, code, note, secret }) {
   const qr = await invoke("qr", { text: code }).catch(() => null);
   modal((finish) => {
     const b = h("button", { class: "btn", onclick: async () => {
       await copy(code);
-      b.textContent = "Copied";
+      if (secret) setTimeout(() => clip?.writeText("").catch(() => {}), 60e3);
+      b.textContent = secret ? "Copied for a minute" : "Copied";
       b.classList.add("green");
     } }, "Copy");
     const field = h("input",
       { class: "field mono", type: "text", value: code, readOnly: true });
     field.addEventListener("focus", () => field.select());
-    const share = android && h("button", { class: "btn",
+    const share = android && !secret && h("button", { class: "btn",
       onclick: () => quiet(invoke("share", { text: code })) }, "Share");
     if (share) b.classList.add("grey");
     const img = qr && h("img", { class: "qr", alt: "QR code",
@@ -1494,6 +1497,7 @@ function settings() {
 async function linkDevice() {
   const code = await call("link_code").catch(() => null);
   if (code) showCode({ title: "Link a device", label: "Your link code", code,
+    secret: true,
     note: "Open irch on the new device, choose Link this device, and paste " +
       "or scan this. It becomes you: keep this code secret, and never " +
       "post it anywhere." });

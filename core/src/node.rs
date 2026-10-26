@@ -1491,9 +1491,12 @@ impl Node {
 
     async fn host(self: &Arc<Self>, sp: &Arc<Space>, addr: EndpointAddr) {
         self.lookup.add_endpoint_info(addr.clone());
-        let listed =
-            self.view(&sp.id, |s| s.hosts().iter().any(|h| h.id == addr.id));
-        if listed == Some(false) {
+        let me = self.id();
+        let list = self.view(&sp.id, |s| {
+            s.role(&me) == Role::Admin
+                && !s.hosts().iter().any(|h| h.id == addr.id)
+        });
+        if list == Some(true) {
             let _ =
                 self.post(sp, Op::Host { node: addr.clone(), on: true }).await;
         }
@@ -1577,9 +1580,7 @@ impl Node {
     ) -> Result<PathBuf> {
         use std::io::{ErrorKind::AlreadyExists, Write};
         let data = self.file(space, f).await?;
-        let name = Path::new(&f.name).file_name().and_then(|n| n.to_str());
-        let name = name.unwrap_or_default().trim_start_matches('.');
-        let name = if name.is_empty() { "file" } else { name };
+        let name = &f.clone().safe().name;
         let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
         let dot = if ext.is_empty() { "" } else { "." };
         std::fs::create_dir_all(dir)?;
@@ -1590,7 +1591,16 @@ impl Node {
             };
             let p = dir.join(n);
             match std::fs::File::create_new(&p) {
-                Ok(mut out) => return Ok(out.write_all(&data).map(|_| p)?),
+                Ok(mut out) => {
+                    out.write_all(&data)?;
+                    // Windows: from the internet, like a browser download.
+                    #[cfg(windows)]
+                    let _ = std::fs::write(
+                        format!("{}:Zone.Identifier", p.display()),
+                        "[ZoneTransfer]\r\nZoneId=3\r\n",
+                    );
+                    return Ok(p);
+                }
                 Err(e) if e.kind() == AlreadyExists => continue,
                 Err(e) => return Err(e.into()),
             }

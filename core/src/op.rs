@@ -67,6 +67,33 @@ pub struct File {
     pub key: Id,
 }
 
+impl File {
+    /// The name, safe to show and to save anywhere: no control or
+    /// direction characters (`photo\u{202e}gnp.exe`), nothing Windows
+    /// reserves.
+    pub fn safe(mut self) -> Self {
+        let bad = |c: char| {
+            c.is_control()
+                || "<>:\"/\\|?*".contains(c)
+                || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}' | '\u{feff}')
+        };
+        let n: String = self.name.chars().filter(|c| !bad(*c)).collect();
+        let n = n.trim_matches(|c| c == '.' || c == ' ');
+        let stem = n.split('.').next().unwrap_or_default().to_uppercase();
+        let dev = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || stem.len() == 4
+                && ["COM", "LPT"].iter().any(|p| stem.starts_with(p))
+                && stem.as_bytes()[3].is_ascii_digit();
+        self.name = match n {
+            "" => "file".into(),
+            n if dev => format!("_{n}"),
+            n => n.into(),
+        };
+        self
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub enum Role {
     #[default]
@@ -210,4 +237,23 @@ fn sealed() {
     assert!(open(&Id([9; 32]), &key, &e, true).is_none());
     assert!(open(&sp, &crypto::rand(), &e, true).is_none());
     assert!(open(&sp, &key, &Env { ts: 8, ..e }, true).is_none());
+}
+
+#[cfg(test)]
+mod file_tests {
+    use super::{File, Id};
+
+    #[test]
+    fn names_say_what_they_are() {
+        let f = |n: &str| {
+            let (hash, key) = (Id([0; 32]), Id([0; 32]));
+            File { name: n.into(), size: 0, hash, key }.safe().name
+        };
+        assert_eq!(f("photo\u{202e}gnp.exe"), "photognp.exe");
+        assert_eq!(f("../../.ssh/a:b|c\n"), "sshabc");
+        assert_eq!(f("con.txt"), "_con.txt");
+        assert_eq!(f("COM1"), "_COM1");
+        assert_eq!(f(" . "), "file");
+        assert_eq!(f("notes.md"), "notes.md");
+    }
 }
