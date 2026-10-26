@@ -1647,12 +1647,7 @@ function settings() {
             onclick: () => copy(S.me.id, "ID copied") }, "Copy")),
         sw("Invisible", "Others see you offline; typing stays private.",
           S.me.invisible, (on) => setInvisible(on)),
-        android && h("p", { class: "note" }, S.me.push
-          ? "Notifications arrive while irch sleeps: whoever writes wakes " +
-            "this phone through your push app (a ping with nothing in it)."
-          : "To be notified while irch sleeps, install a UnifiedPush app " +
-            "(ntfy: on F-Droid, or on Google Play, which uses Google's " +
-            "connection and costs no battery), then reopen irch."),
+        android && notifyCheck(),
         h("label", {}, "Storage node"), storage,
         h("p", { class: "note" }, "Paste the code `irch --serve` prints " +
           "on an always-on machine: it keeps your spaces' ciphertext, " +
@@ -1668,6 +1663,37 @@ function settings() {
       foot(cancel(finish),
         h("button", { class: "btn", onclick: save }, "Save")));
   });
+}
+
+/** A phone in a pocket is told only if Android lets irch: what it allows
+ *  now, a way to allow the rest, and a test. */
+function notifyCheck() {
+  const box = h("div", { class: "checks" });
+  const draw = async (fix, test) => {
+    const a = await invoke("notify_check", { fix, test }).catch(() => null);
+    if (!a) return;
+    const row = (ok, text) => h("p", { class: "check" + (ok ? " ok" : "") },
+      ok ? "✓ " : "✗ ", text);
+    put(box, h("label", {}, "Notifications on this phone"),
+      row(a.notify, "irch may show notifications"),
+      row(a.background, "irch may run in the background (else, asleep " +
+        "in a pocket, Android cuts it off and it cannot ring)"),
+      h("p", { class: "note" }, a.push
+        ? `Whoever writes wakes it through ${a.push}: no battery to speak of.`
+        : "It stays connected, shown by a quiet notification. A " +
+          "UnifiedPush app such as ntfy costs less battery."),
+      h("div", { class: "row" },
+        !(a.notify && a.background) && h("button",
+          { class: "btn", onclick: () => draw(true, false) }, "Allow"),
+        h("button", { class: "btn grey", onclick: () => draw(false, true) },
+          "Send a test notification")));
+    // Back from Android's settings: what they allow now.
+    document.addEventListener("visibilitychange", () =>
+      !document.hidden && box.isConnected && draw(false, false),
+    { once: true });
+  };
+  draw(false, false);
+  return box;
 }
 
 async function linkDevice() {

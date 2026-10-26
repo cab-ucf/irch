@@ -1314,3 +1314,5 @@ dialog:has(.preview) { width: min(900px, calc(100vw - 32px)); }
 /* Chat first: a channel's start is one modest line, not a banner. */
 #welcome .big, #welcome .avatar.big { display: none; }
 #welcome h1 { font-size: 20px; margin: 0 0 2px; }
+.check { margin: 4px 0; color: var(--red); font-size: 14px; }
+.check.ok { color: var(--green); }

@@ -75,6 +75,24 @@ pub async fn upgrade(
     }
 }
 
+/// What decides whether this phone is told; with `fix`, Android asks for
+/// what is missing; with `test`, a notification shows now.
+pub async fn notify_check(
+    app: &tauri::AppHandle,
+    fix: bool,
+    test: bool,
+) -> anyhow::Result<serde_json::Value> {
+    let b = app.try_state::<Bridge>().context("no bridge")?;
+    if fix {
+        b.call("allowAlerts", serde_json::json!({})).await;
+    }
+    if test {
+        b.call("testAlert", serde_json::json!({})).await;
+    }
+    let got = b.0.run_mobile_plugin_async("alerts", serde_json::json!({}));
+    Ok(got.await?)
+}
+
 #[derive(Serialize)]
 struct Url<'a> {
     url: &'a str,

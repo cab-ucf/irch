@@ -72,6 +72,55 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     UnifiedPush.tryUseCurrentOrDefaultDistributor(activity) { ok ->
       if (ok) UnifiedPush.register(activity) else live(activity)
     }
+    // Asked once; My Account shows it, and asks again on request.
+    val prefs = activity.getSharedPreferences("irch", Context.MODE_PRIVATE)
+    if (!unrestricted(activity) && !prefs.getBoolean("askedBattery", false)) {
+      prefs.edit().putBoolean("askedBattery", true).apply()
+      unrestrict()
+    }
+  }
+
+  /** Doze lets an optimized app neither keep its connection nor start
+   *  from a push: what reaches a phone in a pocket depends on this. */
+  private fun unrestrict() = runCatching {
+    val uri = android.net.Uri.parse("package:" + activity.packageName)
+    activity.startActivity(Intent(
+      android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, uri
+    ))
+  }
+
+  /** What decides whether this phone is told: as My Account shows it. */
+  @Command
+  fun alerts(invoke: Invoke) {
+    val push = UnifiedPush.getAckDistributor(activity)
+    val label = push?.let {
+      runCatching {
+        val pm = activity.packageManager
+        pm.getApplicationLabel(pm.getApplicationInfo(it, 0)).toString()
+      }.getOrDefault(it)
+    }
+    invoke.resolve(JSObject()
+      .put("notify", notificationsAllowed(activity))
+      .put("background", unrestricted(activity))
+      .put("push", label))
+  }
+
+  /** Ask for what is missing: notifications, then running unrestricted. */
+  @Command
+  fun allowAlerts(invoke: Invoke) {
+    if (!notificationsAllowed(activity)) {
+      val i = Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+        .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE,
+          activity.packageName)
+      activity.startActivity(i)
+    } else if (!unrestricted(activity)) unrestrict()
+    invoke.resolve()
+  }
+
+  @Command
+  fun testAlert(invoke: Invoke) {
+    postMessage(activity, "test", "irch", "Notifications reach this phone.")
+    invoke.resolve()
   }
 
   /**
@@ -186,6 +235,10 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     invoke.resolve()
   }
 }
+
+fun unrestricted(ctx: Context) =
+  ctx.getSystemService(android.os.PowerManager::class.java)
+    .isIgnoringBatteryOptimizations(ctx.packageName)
 
 fun notificationsAllowed(ctx: Context) = Build.VERSION.SDK_INT < 33 ||
   ContextCompat.checkSelfPermission(ctx, POST_NOTIFICATIONS) ==

@@ -290,6 +290,23 @@ async fn upgrade(
     android::upgrade(&app, percent(progress)).await.map_err(err)
 }
 
+/// Phones: what decides whether they are told of messages and calls, and
+/// asking for what is missing. Desktops are told while irch runs: null.
+#[tauri::command]
+async fn notify_check(
+    app: AppHandle,
+    fix: bool,
+    test: bool,
+) -> Result<Value, String> {
+    #[cfg(target_os = "android")]
+    return android::notify_check(&app, fix, test).await.map_err(err);
+    #[cfg(desktop)]
+    {
+        let _ = (app, fix, test);
+        Ok(Value::Null)
+    }
+}
+
 /// Bytes as they arrive, as a percentage for the page (each once).
 fn percent(to: Channel<u32>) -> impl FnMut(usize, Option<u64>) {
     let (mut got, mut last) = (0u64, u32::MAX);
@@ -412,8 +429,22 @@ pub fn run() {
         Ok(())
     });
     let b = b.invoke_handler(tauri::generate_handler![
-        irch, link, qr, math, save, share, media, tune, opened, update,
-        upgrade, viewing, hush, upload, serve_here
+        irch,
+        link,
+        qr,
+        math,
+        save,
+        share,
+        media,
+        tune,
+        opened,
+        update,
+        upgrade,
+        viewing,
+        hush,
+        upload,
+        serve_here,
+        notify_check
     ]);
     let app = b.build(tauri::generate_context!()).expect("tauri builds");
     app.run(|app, e| {
