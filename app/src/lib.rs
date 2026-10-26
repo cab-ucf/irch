@@ -223,15 +223,27 @@ async fn tune(s: State<'_, App>, to: Channel<Body>) -> Result<(), String> {
     Ok(())
 }
 
-/// Releases: `latest.json` (Tauri's updater format) and `irch.apk`. On
-/// desktops the updater has it from tauri.conf.json.
-#[cfg(target_os = "android")]
-const LATEST: &str =
-    "https://github.com/cab-ucf/irch/releases/latest/download/";
+/// Releases: `latest.json` (Tauri's updater format) and `irch.apk`.
+const LATEST: &str = "https://github.com/cab-ucf/irch/releases/latest";
 
-/// A newer irch, if there is one; with `install`, install it. Desktop: in
-/// place, its signature checked against ours, then restart. Android: the
-/// system installer, which takes an update only under our signing key.
+/// The latest release's version, if newer than this irch.
+async fn newer(app: &AppHandle) -> anyhow::Result<Option<String>> {
+    let url = format!("{LATEST}/download/latest.json");
+    let got = irch_core::http().get(url).send().await?.error_for_status()?;
+    let json: Value = serde_json::from_slice(&got.bytes().await?)?;
+    let latest = json["version"].as_str().context("no version")?;
+    let latest = latest.trim_start_matches('v');
+    let v = |s: &str| {
+        s.split('.').map(|x| x.parse().unwrap_or(0)).collect::<Vec<u64>>()
+    };
+    let ours = app.package_info().version.to_string();
+    Ok((v(latest) > v(&ours)).then(|| latest.into()))
+}
+
+/// A newer irch, if there is one; with `install`, install it (then, what
+/// to tell). Desktop: in place, its signature checked against ours, then
+/// restart; installed otherwise (nix, cargo), the release page opens.
+/// Android: the system installer, which takes only our signing key.
 #[tauri::command]
 async fn update(
     app: AppHandle,
@@ -240,19 +252,36 @@ async fn update(
     #[cfg(desktop)]
     {
         use tauri_plugin_updater::UpdaterExt;
-        let u = app.updater().map_err(|e| e.to_string())?;
-        let Some(u) = u.check().await.map_err(|e| e.to_string())? else {
+        let Some(v) = newer(&app).await.map_err(err)? else {
             return Ok(None);
         };
-        if install {
-            let got = u.download_and_install(|_, _| {}, || {}).await;
-            got.map_err(|e| e.to_string())?;
+        if !install {
+            return Ok(Some(v));
+        }
+        if let Ok(up) = app.updater()
+            && let Ok(Some(u)) = up.check().await
+            && u.download_and_install(|_, _| {}, || {}).await.is_ok()
+        {
             app.restart();
         }
-        Ok(Some(u.version))
+        browse(LATEST).map_err(err)?;
+        Ok(Some(format!("irch {v}: its release page is open")))
     }
     #[cfg(target_os = "android")]
     android::update(&app, install).await.map_err(err)
+}
+
+/// The system's browser, at `url`.
+#[cfg(desktop)]
+fn browse(url: &str) -> anyhow::Result<()> {
+    #[cfg(target_os = "windows")]
+    let open = "explorer";
+    #[cfg(target_os = "macos")]
+    let open = "open";
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let open = "xdg-open";
+    std::process::Command::new(open).arg(url).spawn()?;
+    Ok(())
 }
 
 /// The irch:// link irch was opened with, if any.

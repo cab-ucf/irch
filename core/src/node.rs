@@ -1172,9 +1172,9 @@ impl Node {
                 (empty || fits(t, MAX_TEXT)) && files.len() <= 10
             }
             Op::Edit { text: Some(t), .. } => fits(t, MAX_TEXT),
-            Op::Rename { name: n } | Op::Channel { name: Some(n), .. } => {
-                fits(n, MAX_NAME)
-            }
+            Op::Rename { name: n }
+            | Op::Channel { name: Some(n), .. }
+            | Op::Topic { name: n, .. } => fits(n, MAX_NAME),
             Op::React { emoji, .. } => fits(emoji, 32),
             Op::Role { role, .. } => *role != Role::Banned,
             Op::Edit { .. } | Op::Channel { .. } => true,

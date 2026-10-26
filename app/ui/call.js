@@ -93,9 +93,13 @@ export async function video(kind) {
   if (kind && call.on) {
     const m = navigator.mediaDevices;
     const fps = kind === "screen" ? 10 : 15;
+    // A phone held upright sends upright video.
+    const tall = matchMedia("(pointer: coarse) and (orientation: portrait)");
+    const [x, y] = tall.matches ? [480, 640] : [640, 480];
     const s = await (kind === "screen"
       ? m.getDisplayMedia({ video: { frameRate: fps } })
-      : m.getUserMedia({ video: { width: 640, height: 480, frameRate: fps } }));
+      : m.getUserMedia({ video: { facingMode: "user", width: { ideal: x },
+        height: { ideal: y }, frameRate: fps } }));
     const v = document.createElement("video");
     Object.assign(v, { muted: true, playsInline: true, srcObject: s });
     await quiet(v.play());

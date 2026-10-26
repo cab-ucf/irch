@@ -69,7 +69,8 @@ disk   : one append-only log of envs per space; nothing else to migrate
 - **Threads need no op of their own.** A message's thread is the channel
   named by the first 8 bytes of its id: replying in it is posting there,
   so two people who start the same thread at once start one, and unread
-  counts, mentions, edits and sync come for free.
+  counts, mentions, edits and sync come for free. A `Topic` names one
+  (its starter's or an admin's, newest wins): a room, listed at once.
 - **DMs** are two-person spaces, announced by a `Knock` that only the
   recipient's key opens.
 - **Files** (up to 25 MiB) are sealed under a fresh key that travels only
@@ -127,14 +128,16 @@ alone, so a space's Storage Nodes offers "this computer's" in one click
 The apps check for a newer release at launch (and in My Account) and
 install it: desktops in place, the update's signature checked against
 the key in `tauri.conf.json`; Android through its installer, which takes
-only an APK signed with irch's own key. A tag publishes a release:
+only an APK signed with irch's own key. An irch the updater cannot
+replace (built with nix or cargo, an unpacked AppImage) opens the
+release page instead. A tag publishes a release:
 `git tag v0.2.0 && git push origin v0.2.0` (`release.yml`; its four
 secrets are named at its top).
 
 ## Using it
 
 Terminal: `/create NAME`, `/join CODE`, `/invite`, `/channel NAME`,
-`/reply TEXT`, `/thread TEXT`, `/react EMOJI`, `/edit TEXT`, `/delete`,
+`/reply TEXT`, `/thread TEXT`, `/room NAME`, `/react EMOJI`, `/edit TEXT`, `/delete`,
 `/dm USER`, `/ban USER`, `/rekey`, `/file PATH`, `/share PATH`, `/save`, `/link`,
 `/store CODE|local|here`, `/note [FILE]`, `/todo [FILE]`, `/invisible`,
 `/help`.
@@ -153,9 +156,11 @@ chat, IRC-dense rows (time, nick, text), members on request. `+` creates
 or joins a space; the paperclip, a drop or a paste attaches files, and a
 file's name previews it (images, audio, video, PDFs, highlighted text);
 hover a message to react, reply, edit or delete; click a member to
-message, ban or promote them. The arrow on a message replies in its
-thread, listed under its channel. The phone in a channel's header joins
-its call; mute, camera, screen and hang up sit under the tiles (the
+message, call, ban or promote them. The arrow on a message replies in
+its thread, listed under its channel; a channel's `+` opens a named room
+(a thread before anyone replies), and its pencil renames it. The phone
+in a channel's header joins its group call, the one on a DM rings that
+person, and video keeps its shape (a phone held upright sends upright); mute, camera, screen and hang up sit under the tiles (the
 terminal shows how many are in one: 🔊2). New messages notify like texts,
 with a sound and (on phones) a buzz, except in the room on screen; the
 space's menu picks all, @mentions, or none. A call in a DM rings like a

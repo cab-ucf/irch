@@ -21,6 +21,7 @@ const HELP: &str = "\
 /rename NAME     rename space       /nick NAME   your name everywhere
 /reply TEXT      reply to the last message by someone else
 /thread TEXT     reply in its thread (indented under the channel)
+/room NAME       a named thread here (in a thread: renames it)
 /note [FILE]     it into your notes ($LOROH_VAULT or ~/notes; Inbox.md)
 /todo [FILE]     it as a task there (in a thread: the whole thread)
 /react EMOJI     react to it        /edit TEXT   edit your last message
@@ -235,6 +236,21 @@ impl App {
                 self.post(Op::Post { channel, text, reply: None, files })
                     .await?;
                 (self.at, self.scroll) = (Some((s, Some(channel))), 0);
+            }
+            "room" => {
+                need()?;
+                let (s, c) = self.here()?;
+                let thread = match n.view(&s, |st| st.thread(&c)).flatten() {
+                    Some(t) => t.id,
+                    None => {
+                        let (text, files) = (arg.clone(), vec![]);
+                        let op =
+                            Op::Post { channel: c, text, reply: None, files };
+                        n.publish(&s, op).await?.thread()
+                    }
+                };
+                self.post(Op::Topic { thread, name: arg }).await?;
+                (self.at, self.scroll) = (Some((s, Some(thread))), 0);
             }
             "note" | "todo" => {
                 let (s, c) = self.here()?;
