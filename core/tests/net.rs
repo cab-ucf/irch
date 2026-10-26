@@ -242,6 +242,25 @@ async fn direct_messages() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_dm_call_rings_once() {
+    let (a, b) = (node("a").await, node("b").await);
+    let id = a.create("hub").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let keyed = || a.view(&id, |s| s.kem(&b.id()).is_some()) == Some(true);
+    until("b's key", keyed).await;
+    let dm = a.dm(&id, &b.id()).await.unwrap();
+    say(&a, &dm, irch_core::state::DM, "psst").await;
+    until("b in the DM", || b.spaces().contains(&dm)).await;
+    b.notices(); // the message, told
+    a.call(Some((dm, irch_core::state::DM))).await.unwrap();
+    until("b sees the call", || !b.calls(&dm).is_empty()).await;
+    let rings = |n: &Node| n.notices().into_iter().filter(|n| n.ring).count();
+    assert_eq!(rings(&b), 1, "a DM call rings");
+    assert_eq!(rings(&b), 0, "once");
+    assert_eq!(rings(&a), 0, "not the caller");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn storage_node_and_restart() {
     let s = start(&dir("s"), "s", None, true).await;
     let (a, bdir) = (node("a").await, dir("b"));

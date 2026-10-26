@@ -145,8 +145,12 @@ hover a message to react, reply, edit or delete; click a member to
 message, ban or promote them. The arrow on a message replies in its
 thread, listed under its channel. The phone in a channel's header joins
 its call; mute, camera, screen and hang up sit under the tiles (the
-terminal shows how many are in one: 🔊2). New messages notify while irch
-is out of sight (the space's menu: all, @mentions, or none).
+terminal shows how many are in one: 🔊2). New messages notify like texts,
+with a sound and (on phones) a buzz, except in the room on screen; the
+space's menu picks all, @mentions, or none. A call in a DM rings like a
+phone call: the ringtone until answered, declined or 45 s pass, full
+screen on a locked phone, Answer and Decline in the notification; one in
+a channel says it started.
 
 The composer takes `/nick`, `/join`, `/dm`, `/me`, `/shrug`, `/thread`,
 `/invite`, `/leave`, `/notes`, `/help`. Esc leaves it for normal mode:
@@ -165,8 +169,13 @@ tells its spaces, sealed like any op, where to reach it; the writer's
 device sends that address a ping with nothing in it (at most every 30 s),
 and the phone wakes for a few seconds, fetches from the writer over iroh,
 and notifies. Push servers learn only that a ping went to an address.
-Out of sight for a minute (and in no call), the node stops altogether;
-phones skip the Mainline DHT (relays and n0's DNS find peers for them).
+Starting a call wakes the others the same way, and anyone in it says so
+at once to a device that comes back. With no push app, irch stays
+connected instead (a quiet "Connected for messages and calls"
+notification, from boot on): every message and call arrives, at a cost
+in battery that ntfy avoids. With one, out of sight for a minute (and in
+no call), the node stops altogether; phones skip the Mainline DHT
+(relays and n0's DNS find peers for them).
 
 Notes: the bookmark on a message adds it (or its whole thread) to your
 notes as a task, with an optional due date, or as a quote: plain Markdown

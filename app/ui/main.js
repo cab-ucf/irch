@@ -304,6 +304,7 @@ function select(sid, ch) {
     cancelReply();
   }
   S.ch = ch;
+  quiet(invoke("viewing", { space: sid ?? null, room: ch ?? null }));
   if (ch) store.set("ch." + sid, inThread() ? S.thread.parent : ch);
   document.body.classList.remove("drawer");
   renderSidebar();
@@ -428,8 +429,13 @@ async function updates(quietly) {
     .catch((e) => toast(`Update failed: ${e}`, true));
 }
 
-/** irch://open/SPACE/CHANNEL/MESSAGE, from a note: there, if we can. */
+/** irch://open/SPACE/CHANNEL/MESSAGE, from a note: there, if we can;
+ *  irch://call/SPACE/CHANNEL, a call answered from its notification, and
+ *  irch://ring/…, the notification opened (answer or decline here). */
 async function openUrl(url) {
+  const c = /^irch:\/\/(call|ring)\/([0-9a-f]{64})\/([0-9a-f]{16})$/
+    .exec(url);
+  if (c) return c[1] === "call" ? answer(c[2], c[3]) : incoming(c[2], c[3]);
   if (!String(url).startsWith("irch://open/")) return;
   const [sid, ch, msg] = url.replace(/^irch:\/\/open\//, "").split("/");
   const s = S.spaces.find((x) => x.id === sid);
@@ -557,6 +563,61 @@ async function ring() {
     toast(String(e?.message ?? e), true);
     await av.leave(rpc);
   }
+}
+
+// ---------- alerts ----------
+
+// Desktops sound alerts here (phones: the system's sound, the ringtone).
+let audio;
+function tone(notes, gain) {
+  audio ??= new AudioContext();
+  quiet(audio.resume());
+  const t0 = audio.currentTime;
+  for (const [f, at, len] of notes) {
+    const o = audio.createOscillator();
+    const g = audio.createGain();
+    o.frequency.value = f;
+    g.gain.setValueAtTime(gain, t0 + at);
+    g.gain.exponentialRampToValueAtTime(1e-4, t0 + at + len);
+    o.connect(g).connect(audio.destination);
+    o.start(t0 + at);
+    o.stop(t0 + at + len);
+  }
+}
+const chime = () => tone([[880, 0, 0.12], [1320, 0.13, 0.25]], 0.15);
+// A phone's ring: 440 and 480 Hz together, two seconds in every six.
+const ringing = () => tone([[440, 0, 2], [480, 0, 2]], 0.07);
+
+let calling = null;
+
+/** Someone calls (a DM): answer or decline; after 45 s, missed. */
+function incoming(sid, ch, who) {
+  if (calling) return;
+  const ids = callOf(sid, ch)?.call ?? [];
+  who ??= ids.length ? nameOf(ids[0]) : "Someone";
+  const rings = android ? 0 : setInterval(ringing, 6000);
+  if (!android) ringing();
+  const late = setTimeout(() => $("modal").close(), 45e3);
+  calling = modal((finish) => h("div", {},
+    h("div", { class: "m-body" }, h("h2", {}, who),
+      h("p", { class: "sub" }, "is calling you")),
+    foot(h("button", { class: "btn link", onclick: () => finish(false) },
+      "Decline"),
+    h("button", { class: "btn green", onclick: () => finish(true) },
+      "Answer"))));
+  calling.then((yes) => {
+    clearInterval(rings);
+    clearTimeout(late);
+    calling = null;
+    quiet(invoke("hush"));
+    if (yes) answer(sid, ch);
+  });
+}
+
+async function answer(sid, ch) {
+  quiet(invoke("hush"));
+  select(sid, ch);
+  if (!here()) await ring();
 }
 
 async function camera(kind) {
@@ -1980,6 +2041,10 @@ async function start() {
     }
   });
   await T.event.listen("open-url", ({ payload }) => openUrl(payload));
+  await T.event.listen("alert", ({ payload: a }) => {
+    if (a.ring) return incoming(a.space, a.room, a.title);
+    if (!android) chime();
+  });
   await loadSidebar();
   if (!S.spaces.length) renderHeader();
   const url = await invoke("opened").catch(() => null);

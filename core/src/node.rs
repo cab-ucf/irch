@@ -121,6 +121,8 @@ pub struct Notice {
     pub room: Ch,
     pub title: String,
     pub body: String,
+    /// A call in a DM: ring, like a phone.
+    pub ring: bool,
 }
 
 pub struct Space {
@@ -396,6 +398,8 @@ pub struct Node {
     prefs: Mutex<Prefs>,
     // Endpoints we woke: when last, and whether one more is held back.
     wake: Mutex<HashMap<String, (Option<Instant>, bool)>>,
+    // Calls notified about (space, caller, channel), while they last.
+    rang: Mutex<HashSet<(Id, Id, Ch)>>,
     http: OnceLock<reqwest::Client>,
     name: Mutex<String>,
     events: broadcast::Sender<Event>,
@@ -543,6 +547,7 @@ impl Node {
             local: Mutex::new(local),
             prefs: Mutex::new(prefs),
             wake: Mutex::default(),
+            rang: Mutex::default(),
             http: OnceLock::new(),
             name: Mutex::new(cfg.name),
             events: broadcast::channel(1024).0,
@@ -639,7 +644,7 @@ impl Node {
     /// level), unread here. History from before a space's first ask stays
     /// quiet. The app and a push wake share the marks: never twice.
     pub fn notices(&self) -> Vec<Notice> {
-        let (me, mut out) = (self.id(), vec![]);
+        let (me, mut out, mut live) = (self.id(), vec![], HashSet::new());
         for id in self.spaces() {
             let (level, mark) = {
                 let mut p = lock(&self.prefs);
@@ -666,11 +671,43 @@ impl Node {
                 };
                 let body =
                     if m.text.is_empty() { "(file)".into() } else { m.text };
-                out.push(Notice { space: id, room: *ch, title, body });
+                let (space, room) = (id, *ch);
+                out.push(Notice { space, room, title, body, ring: false });
+            }
+            // Calls by others: a DM's rings, a channel's says it started;
+            // each once while it lasts, none while we are in one.
+            let calls = self.get(&id).map(|sp| self.callers(&sp, None));
+            for (_, ch, u) in calls.unwrap_or_default() {
+                let fresh = u != me && lock(&self.rang).insert((id, u, ch));
+                live.insert((id, u, ch));
+                let tell = level != Level::Off && (dm || level == Level::All);
+                if !fresh || !tell || self.in_call().is_some() {
+                    continue;
+                }
+                // Named here, or in any space we share (a new DM may not
+                // have their profile yet).
+                let name_in = |sp: &Id| {
+                    self.view(sp, |s| s.profile(&u).map(str::to_string))
+                };
+                let mut all = std::iter::once(id).chain(self.spaces());
+                let who = all.find_map(|sp| name_in(&sp).flatten());
+                let who = who.unwrap_or_else(|| u.to_string()[..8].into());
+                let room = rooms.iter().find(|r| r.0 == ch);
+                let room = room.map_or("call".into(), |r| r.1.to_string());
+                let (title, body) = match dm {
+                    true => (who, "is calling you".into()),
+                    false => (
+                        format!("{who} in #{room} ({name})"),
+                        "started a call".into(),
+                    ),
+                };
+                let (space, room) = (id, ch);
+                out.push(Notice { space, room, title, body, ring: dm });
             }
             let p = &mut lock(&self.prefs).told;
             p.insert(id, mark.max(newest.unwrap_or(0)));
         }
+        lock(&self.rang).retain(|c| live.contains(c));
         self.save_prefs();
         out
     }
@@ -1325,6 +1362,7 @@ impl Node {
         *lock(&self.call) = Some(Call::new(id, ch, run));
         self.signal(&sp, Op::Call { channel: Some(ch) }).await;
         self.emit(Event::Call { space: id });
+        self.wake(&id); // sleeping phones: someone is calling
         tokio::spawn(self.clone().ring(run));
         Ok(())
     }
@@ -1763,6 +1801,15 @@ impl Node {
             Op::Typing { channel } => {
                 let user = s.author;
                 self.emit(Event::Typing { space: sp.id, channel, user });
+            }
+            // A device back from sleep says hello: tell it of our call now,
+            // not at the next 15 s reminder, or it misses the ring.
+            Op::Here => {
+                if let Some((_, ch)) = self.in_call().filter(|c| c.0 == sp.id) {
+                    let (n, sp) = (self.clone(), sp.clone());
+                    let call = Op::Call { channel: Some(ch) };
+                    tokio::spawn(async move { n.signal(&sp, call).await });
+                }
             }
             Op::Call { channel } => {
                 let mut c = lock(&sp.calls);
