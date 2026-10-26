@@ -2046,7 +2046,9 @@ pub fn http() -> reqwest::Client {
         .client_config(iroh::tls::default_provider())
         .expect("TLS roots");
     let b = reqwest::Client::builder().tls_backend_preconfigured(tls);
-    b.timeout(Duration::from_secs(20)).build().expect("HTTP client")
+    // Stalls end a request, not its length: an update can be large.
+    let b = b.connect_timeout(Duration::from_secs(20));
+    b.read_timeout(Duration::from_secs(30)).build().expect("HTTP client")
 }
 
 async fn heartbeat(n: Weak<Node>) {

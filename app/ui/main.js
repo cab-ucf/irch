@@ -1342,19 +1342,29 @@ function storageFlow(s) {
         h("small", {}, x.node === local ? "This computer" : "Storage node")),
       h("input", { type: "checkbox", checked: x.on,
         onchange: (e) => keep(x.node, e.target.checked) }), h("i"));
+    const pair = async () => {
+      await quiet(call("store_local").then(() => keep(S.me.local_storage, true)));
+      finish(true);
+    };
     const here = local && !paired && h("button", { class: "btn",
-      onclick: async () => {
-        await quiet(call("store_local").then(() => keep(local, true)));
-        finish(true);
-      } }, "Keep it on this computer's storage node");
+      onclick: pair }, "Keep it on this computer's storage node");
+    // Desktops: one click runs one here, always on and kept up to date.
+    const start = !local && !android && h("button", { class: "btn",
+      onclick: async (e) => {
+        e.target.disabled = true;
+        e.target.textContent = "Starting a storage node here…";
+        const ok = await invoke("serve_here").then(() => true,
+          (err) => toast(`Could not start one: ${err}`, true));
+        S.me = await rpc("me");
+        if (ok && S.me.local_storage) await pair();
+      } }, "Run one on this computer, always on");
     return h("div", {},
       h("div", { class: "m-body" }, h("h2", {}, "Storage Nodes"),
         h("p", { class: "sub" }, "A storage node keeps this space " +
           "encrypted, so it waits there while everyone is offline."),
-        s.storage.map(sw), here,
+        s.storage.map(sw), here, start,
         !s.storage.length && !here && h("p", { class: "note" },
-          "Pair one with its code in My Account, or run nixos.nix on " +
-          "this computer.")),
+          "Or pair one with its code in My Account.")),
       foot(h("button", { class: "btn grey", onclick: () => finish(null) },
         "Done")));
   });

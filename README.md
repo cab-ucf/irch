@@ -6,6 +6,50 @@ calls, shaped like Discord, with no server. A small Rust core over
 [iroh](https://iroh.computer), one terminal client, one app for the
 desktop and Android.
 
+## Install
+
+Each of these keeps itself up to date.
+
+```sh
+# Windows (PowerShell)
+irm https://github.com/cab-ucf/irch/releases/latest/download/install.ps1 | iex
+# macOS, Linux
+curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh | sh
+```
+
+- **Android**: open [irch.apk](https://github.com/cab-ucf/irch/releases/latest/download/irch.apk)
+  on the phone and let the browser install it, once; or add this repository
+  to [Obtainium](https://obtainium.imranr.dev).
+- **iPhone**: not yet. Apple allows no install without its developer
+  program and review.
+- **An always-on storage node**: in the app, a space's Storage Nodes → *Run
+  one on this computer*; or `… | sh -s -- --server`; or, on Windows,
+  `& ([scriptblock]::Create((irm …/install.ps1))) -Server`.
+
+Fetched by `curl` or PowerShell, nothing is marked as downloaded from the
+internet, so neither Gatekeeper nor SmartScreen asks. The macOS app is
+signed ad hoc; with an Apple Developer ID in the release's secrets it is
+notarized too, and the `.dmg` opens from a browser download without a
+question. Until then, a browser-downloaded `.dmg` needs one click in
+System Settings → Privacy & Security, never `xattr`.
+
+### NixOS
+
+```nix
+imports = [ "${builtins.fetchTarball
+  "https://github.com/cab-ucf/irch/archive/main.tar.gz"}/nixos.nix" ];
+programs.irch.enable = true;      # the app, and `irch` in a terminal
+services.irch.enable = true;      # a storage node, always on
+services.irch.users = [ "you" ];  # your irch pairs with it in one step
+```
+
+(Flakes: `irch.nixosModules.default`, and `packages.<system>.irch`.)
+Hourly, a service fetches the newest release's source, checks it against
+irch's signing key, and builds it with Nix as its own user; the app and
+the node switch to that build.
+
+### From source
+
 ```sh
 cargo run --release -p irch                 # terminal; /help lists commands
 cargo run --release -p irch -- --serve      # a storage node: keeps ciphertext
@@ -111,28 +155,28 @@ Invites carry your relay address, not your IP, whenever a relay is known.
 
 An always-on member's desktop keeps the spaces it is in synced, but it can
 read them and covers only those. A storage node (`irch --serve`) keeps
-the spaces its users choose, ciphertext only. On NixOS,
-`nixos.nix` runs one as its own user, rebuilt hourly from the newest
-release tag signed by a key in `services.irch.signers` (ssh
-`allowed_signers` lines; sign with `git tag -s`, `gpg.format=ssh`), so a
-push alone runs nothing there: import it, set the signers, `systemctl
-start irch-update` once, and `journalctl -u irch | grep -A1 'Storage
-code'` prints the code to hand out. On the same computer the node runs
-as its own user while you use irch as yourself: list yourself in
-`services.irch.users` and its code waits in `/run/irch/code` for you
-alone, so a space's Storage Nodes offers "this computer's" in one click
-(`/store local` in the terminal).
+the spaces its users choose, ciphertext only. `irch --install` keeps one
+running as you (systemd for your user, a LaunchAgent, a scheduled task),
+at login, or at boot where Linux allows lingering; `--uninstall` stops
+it. Its code waits in your data directory, so irch on the same computer
+pairs with it in one click: a space's Storage Nodes, "this computer's"
+(`/store local` in the terminal). On NixOS `services.irch.enable` runs
+one as its own user, and its code waits in `/run/irch/code` for the
+users listed in `services.irch.users`; `journalctl -u irch | grep -A1
+'Storage code'` prints the code to hand out.
 
 ## Updates
 
 The apps check for a newer release at launch (and in My Account) and
 install it: desktops in place, the update's signature checked against
 the key in `tauri.conf.json`; Android through its installer, which takes
-only an APK signed with irch's own key. An irch the updater cannot
-replace (built with nix or cargo, an unpacked AppImage) opens the
-release page instead. A tag publishes a release:
-`git tag v0.2.0 && git push origin v0.2.0` (`release.yml`; its four
-secrets are named at its top).
+only an APK signed with irch's own key. A storage node from a release
+checks every six hours and replaces itself, under the same signature.
+An irch the updater cannot replace (built with cargo, an unpacked
+AppImage) opens the release page instead; Nix builds leave it to NixOS.
+`release.yml` publishes a release for a tag, run by hand with that tag
+(its secrets are named at its top), then installs it on Linux, macOS and
+Windows and updates an older irch to it.
 
 ## Using it
 

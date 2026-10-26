@@ -223,21 +223,37 @@ async fn tune(s: State<'_, App>, to: Channel<Body>) -> Result<(), String> {
     Ok(())
 }
 
-/// Releases: `latest.json` (Tauri's updater format) and `irch.apk`.
-const LATEST: &str = "https://github.com/cab-ucf/irch/releases/latest";
+use irch_core::release::LATEST;
+
+/// Built by package.nix: NixOS keeps it up to date.
+const NIXOS: bool = option_env!("IRCH_NIXOS").is_some();
 
 /// The latest release's version, if newer than this irch.
 async fn newer(app: &AppHandle) -> anyhow::Result<Option<String>> {
-    let url = format!("{LATEST}/download/latest.json");
-    let got = irch_core::http().get(url).send().await?.error_for_status()?;
-    let json: Value = serde_json::from_slice(&got.bytes().await?)?;
-    let latest = json["version"].as_str().context("no version")?;
-    let latest = latest.trim_start_matches('v');
-    let v = |s: &str| {
-        s.split('.').map(|x| x.parse().unwrap_or(0)).collect::<Vec<u64>>()
+    irch_core::release::newer(&app.package_info().version.to_string()).await
+}
+
+/// A storage node on this computer, always on and kept up to date: the
+/// released terminal client, checked, installed as this user's service.
+#[tauri::command]
+async fn serve_here(app: AppHandle) -> Result<(), String> {
+    let run = async {
+        anyhow::ensure!(cfg!(desktop), "phones sleep: run one on a computer");
+        anyhow::ensure!(!NIXOS, "on NixOS: services.irch.enable = true");
+        let dir = app.path().app_local_data_dir()?.join("bin");
+        std::fs::create_dir_all(&dir)?;
+        let exe = dir.join(format!("irch{}", std::env::consts::EXE_SUFFIX));
+        let bin = irch_core::release::fetch(&irch_core::release::cli()).await?;
+        irch_core::release::put(&exe, &bin)?;
+        let out = tokio::task::spawn_blocking(move || {
+            std::process::Command::new(exe).arg("--install").output()
+        });
+        let out = out.await??;
+        let say = String::from_utf8_lossy(&out.stderr);
+        anyhow::ensure!(out.status.success(), "{}", say.trim());
+        Ok(())
     };
-    let ours = app.package_info().version.to_string();
-    Ok((v(latest) > v(&ours)).then(|| latest.into()))
+    run.await.map_err(err)
 }
 
 /// A newer irch, if there is one; with `install`, install it (then, what
@@ -252,6 +268,9 @@ async fn update(
     #[cfg(desktop)]
     {
         use tauri_plugin_updater::UpdaterExt;
+        if NIXOS {
+            return Ok(None);
+        }
         let Some(v) = newer(&app).await.map_err(err)? else {
             return Ok(None);
         };
@@ -381,7 +400,7 @@ pub fn run() {
     });
     let b = b.invoke_handler(tauri::generate_handler![
         irch, link, qr, math, save, share, media, tune, opened, update,
-        viewing, hush, upload
+        viewing, hush, upload, serve_here
     ]);
     let app = b.build(tauri::generate_context!()).expect("tauri builds");
     app.run(|app, e| {
