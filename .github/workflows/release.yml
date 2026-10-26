@@ -1,4 +1,5 @@
-# A tag `vX.Y.Z` publishes a release the apps update from: signed desktop
+# A tag `vX.Y.Z` (or this run by hand, naming one: the release makes the
+# tag at this commit) publishes a release the apps update from: signed desktop
 # bundles with Tauri's latest.json, and an APK under irch's signing key.
 # Secrets: TAURI_SIGNING_PRIVATE_KEY(_PASSWORD), ANDROID_KEYSTORE (base64),
 # ANDROID_KEYSTORE_PASSWORD.
@@ -6,10 +7,16 @@ name: release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release's tag, vX.Y.Z
+        required: true
 permissions:
   contents: write
 env:
   CARGO_TERM_COLOR: always
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   desktop:
@@ -41,7 +48,7 @@ jobs:
       - name: The tag is the version
         shell: bash
         run: |
-          v='"version": "'${GITHUB_REF_NAME#v}'"'
+          v='"version": "'${TAG#v}'"'
           sed -i.bak "s/\"version\": \"[^\"]*\"/$v/" app/tauri.conf.json
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
@@ -53,8 +60,8 @@ jobs:
           projectPath: app
           tauriScript: cargo tauri
           args: --target ${{ matrix.target }}
-          tagName: ${{ github.ref_name }}
-          releaseName: irch ${{ github.ref_name }}
+          tagName: ${{ env.TAG }}
+          releaseName: irch ${{ env.TAG }}
           includeUpdaterJson: true
       - name: The terminal client and storage node, beside the app
         shell: bash
@@ -65,7 +72,7 @@ jobs:
           x=$([ "$RUNNER_OS" = Windows ] && echo .exe || true)
           cp target/${{ matrix.target }}/release/irch$x \
             irch-${{ matrix.target }}$x
-          gh release upload "$GITHUB_REF_NAME" irch-${{ matrix.target }}$x \
+          gh release upload "$TAG" irch-${{ matrix.target }}$x \
             --clobber
 
   android:
@@ -87,7 +94,7 @@ jobs:
       - run: cargo install tauri-cli --version 2.12.4 --locked
       - name: The tag is the version
         run: |
-          v='"version": "'${GITHUB_REF_NAME#v}'"'
+          v='"version": "'${TAG#v}'"'
           sed -i "s/\"version\": \"[^\"]*\"/$v/" app/tauri.conf.json
       - working-directory: app
         # Phones only: x86_64 is for emulators, which build their own.
@@ -106,7 +113,8 @@ jobs:
           "$tools/apksigner" sign --ks irch.jks --ks-pass env:PW \
             --ks-key-alias irch --out irch.apk a.apk
           rm irch.jks
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
-            gh release create "$GITHUB_REF_NAME" --title "irch $GITHUB_REF_NAME" ||
+          gh release view "$TAG" >/dev/null 2>&1 ||
+            gh release create "$TAG" --title "irch $TAG" \
+              --target "$GITHUB_SHA" ||
             true # made meanwhile by a desktop job
-          gh release upload "$GITHUB_REF_NAME" irch.apk --clobber
+          gh release upload "$TAG" irch.apk --clobber
