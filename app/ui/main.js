@@ -1283,7 +1283,13 @@ function ask({ title, sub, label, value = "", ok = "Save", placeholder,
   return modal((finish) => {
     const input = h("input", { type: "text", value, placeholder, maxLength });
     const submit = () => finish(input.value.trim());
-    input.addEventListener("keydown", (e) => e.key === "Enter" && submit());
+    // Handled, so the same Enter does not also press the button that
+    // gets the focus back when the dialog closes (and open it again).
+    input.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      submit();
+    });
     return h("div", {},
       h("div", { class: "m-body" }, h("h2", {}, title),
         sub && h("p", { class: "sub" }, sub),

@@ -2,13 +2,18 @@
 
 use irch_core::{Ch, Config, Event, Id, Invite, Net, Node, Op};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::broadcast::Receiver;
 
+// A clock alone is not enough: macOS's ticks in microseconds, and tests
+// start nodes together.
 fn dir(name: &str) -> std::path::PathBuf {
+    static N: AtomicU64 = AtomicU64::new(0);
     let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
-    std::env::temp_dir()
-        .join(format!("irch-test-{}-{name}", t.unwrap().as_nanos()))
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let t = t.unwrap().as_nanos();
+    std::env::temp_dir().join(format!("irch-test-{t}-{n}-{name}"))
 }
 
 async fn start(
@@ -175,7 +180,11 @@ async fn an_old_invite_stays_dead_after_a_reset() {
     let old = a.invite(&id).await.unwrap();
     a.rekey(&id).await.unwrap(); // Reset invite links
     let e = node("e").await;
-    e.join(&old).await.unwrap(); // its Profile goes out under the old key
+    // Its Profile goes out under the old key, unless the reset reaches it
+    // first (a fast machine), and joining is refused.
+    if let Err(err) = e.join(&old).await {
+        assert!(err.to_string().contains("ask for a new invite"), "{err}");
+    }
     until("e learns it is out", || e.locked(&id)).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let member = |u: Id| a.view(&id, |s| s.kem(&u).is_some()) == Some(true);
