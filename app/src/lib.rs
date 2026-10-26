@@ -121,7 +121,7 @@ async fn irch(
         let p = std::path::Path::new(path);
         let mut picked = PICKED.lock().unwrap_or_else(|e| e.into_inner());
         let chosen = picked.iter().position(|x| x == p);
-        let ours = app.path().app_data_dir().map(|d| d.join("offered"));
+        let ours = home(&app).map(|d| d.join("offered"));
         let ours = ours.is_ok_and(|d| p.parent() == Some(&d));
         if !ours && chosen.is_none() {
             return Err("only files you pick are shared".into());
@@ -166,16 +166,88 @@ async fn link(
             "leave your spaces first: this device becomes someone else".into(),
         );
     }
-    n.shutdown().await;
+    stop(&s).await;
+    let dir = home(&app).map_err(err)?;
+    forget(&dir, &["seed", "local", "spaces"]);
+    start(&app, Some(code)).await
+}
+
+/// Where irch keeps everything: profiles, and the first one's files.
+fn root(app: &AppHandle) -> anyhow::Result<std::path::PathBuf> {
+    Ok(app.path().app_data_dir()?)
+}
+
+/// The profile in use: its folder.
+fn home(app: &AppHandle) -> anyhow::Result<std::path::PathBuf> {
+    Ok(irch_core::profile(&root(app)?))
+}
+
+/// The node stopped (or one that never started, forgotten).
+async fn stop(s: &App) {
+    if let Ok(n) = node(s).await {
+        n.shutdown().await;
+    }
     s.0.send_replace(None);
     *NODE.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    for f in ["seed", "local", "spaces"] {
+}
+
+fn forget(dir: &std::path::Path, files: &[&str]) {
+    for f in files {
         let p = dir.join(f);
         let _ =
             std::fs::remove_file(&p).or_else(|_| std::fs::remove_dir_all(&p));
     }
-    start(&app, Some(code)).await
+}
+
+/// The profiles on this device, and which is in use ("" the first).
+#[tauri::command]
+fn profiles(app: AppHandle) -> Result<Value, String> {
+    let r = root(&app).map_err(err)?;
+    let mut all = vec![String::new()];
+    let names = std::fs::read_dir(r.join("profiles")).into_iter().flatten();
+    all.extend(names.flatten().map(|e| e.file_name().to_string_lossy().into()));
+    let on = std::fs::read_to_string(r.join("profile")).unwrap_or_default();
+    Ok(json!({ "current": on.trim(), "all": all }))
+}
+
+/// Another profile (a new one by a new name): its own identity, spaces
+/// and storage nodes, as if another device. This one waits as it is.
+#[tauri::command]
+async fn use_profile(
+    app: AppHandle,
+    s: State<'_, App>,
+    name: String,
+) -> Result<(), String> {
+    let ok = |c: char| c.is_alphanumeric() || " _-".contains(c);
+    let name = name.trim();
+    if name.len() > 32 || !name.chars().all(ok) || name.starts_with(['-', ' '])
+    {
+        return Err("a profile's name: letters, digits, spaces, - and _".into());
+    }
+    stop(&s).await;
+    let r = root(&app).map_err(err)?;
+    let set = match name {
+        "" => std::fs::remove_file(r.join("profile")).or(Ok(())),
+        n => std::fs::create_dir_all(r.join("profiles").join(n))
+            .and_then(|()| std::fs::write(r.join("profile"), n)),
+    };
+    set.map_err(|e| e.to_string())?;
+    start(&app, None).await
+}
+
+/// This device forgets the profile in use: its identity, spaces, keys and
+/// files. Others of your devices keep them; with none, they are gone.
+#[tauri::command]
+async fn sign_out(app: AppHandle, s: State<'_, App>) -> Result<(), String> {
+    stop(&s).await;
+    let (r, dir) = (root(&app).map_err(err)?, home(&app).map_err(err)?);
+    if dir == r {
+        forget(&r, &irch_core::MINE);
+    } else {
+        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_file(r.join("profile"));
+    }
+    start(&app, None).await
 }
 
 /// Save an attachment: into Downloads, or on Android to the share sheet.
@@ -226,7 +298,7 @@ fn upload(app: AppHandle, req: Request<'_>) -> Result<String, String> {
             i.len() == 32 && i.bytes().all(|b| b.is_ascii_hexdigit())
         };
         let id = id.filter(hex).context("no upload id")?;
-        let dir = app.path().app_data_dir()?.join("offered");
+        let dir = home(&app)?.join("offered");
         std::fs::create_dir_all(&dir)?;
         let part = match req.body() {
             InvokeBody::Raw(b) => b.clone(),
@@ -484,7 +556,10 @@ pub fn run() {
         upload,
         serve_here,
         notify_check,
-        pick
+        pick,
+        profiles,
+        use_profile,
+        sign_out
     ]);
     let app = b.build(tauri::generate_context!()).expect("tauri builds");
     app.run(|app, e| {
@@ -523,7 +598,7 @@ async fn start(app: &AppHandle, link: Option<String>) -> Result<(), String> {
         if let Some(n) = running().filter(|_| link.is_none()) {
             return Ok(n);
         }
-        let dir = app.path().app_data_dir()?;
+        let dir = home(app)?;
         log_to(&dir);
         // Desktop: notes go to loroh's vault (LOROH_VAULT, else ~/notes).
         let notes =

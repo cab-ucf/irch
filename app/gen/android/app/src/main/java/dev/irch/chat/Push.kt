@@ -97,7 +97,14 @@ class IrchWake : Service() {
 const val SYNCING = "syncing"
 
 /** Its owner's own servers wake it (src/android.rs): irch saved them. */
-fun wakeServers(ctx: Context) = java.io.File(ctx.dataDir, "wake.json").exists()
+fun wakeServers(ctx: Context) = java.io.File(home(ctx), "wake.json").exists()
+
+/** The profile in use: its folder (irch_core::profile). */
+fun home(ctx: Context): java.io.File {
+  val n = runCatching { java.io.File(ctx.dataDir, "profile").readText() }
+  val name = n.getOrDefault("").trim()
+  return if (name.isEmpty()) ctx.dataDir else java.io.File(ctx.dataDir, "profiles/$name")
+}
 
 /** No push app: irch stays connected, so messages and calls arrive. */
 fun live(ctx: Context) {

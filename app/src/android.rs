@@ -180,7 +180,9 @@ pub extern "system" fn Java_dev_irch_chat_Wake_run<'l>(
     push: JString<'l>,
 ) -> jstring {
     let (dir, push) = (text(&mut env, &dir), text(&mut env, &push));
-    let wake = wake(dir.unwrap_or_default().into(), push);
+    let dir =
+        irch_core::profile(std::path::Path::new(&dir.unwrap_or_default()));
+    let wake = wake(dir, push);
     reply(env, ctx, wake)
 }
 
@@ -195,7 +197,7 @@ pub extern "system" fn Java_dev_irch_chat_Wake_next<'l>(
 ) -> jstring {
     crate::LIVE.store(true, SeqCst);
     let dir = text(&mut env, &dir).unwrap_or_default();
-    reply(env, ctx, next(dir.into()))
+    reply(env, ctx, next(irch_core::profile(std::path::Path::new(&dir))))
 }
 
 fn text(env: &mut JNIEnv, s: &JString) -> Option<String> {

@@ -91,6 +91,30 @@ pub fn local_storage() -> Option<String> {
     (!code.is_empty()).then_some(code)
 }
 
+/// The profile in use under `root`: its own folder, or `root` itself for
+/// the first (all there was before profiles).
+pub fn profile(root: &std::path::Path) -> std::path::PathBuf {
+    let n = std::fs::read_to_string(root.join("profile")).unwrap_or_default();
+    match n.trim() {
+        "" => root.into(),
+        n => root.join("profiles").join(n),
+    }
+}
+
+/// A person's files in a profile's folder: what signing out takes away.
+pub const MINE: [&str; 10] = [
+    "seed",
+    "device",
+    "local",
+    "prefs",
+    "spaces",
+    "files",
+    "blobs",
+    "offered",
+    "wake.json",
+    "irch.log",
+];
+
 /// Unix time in milliseconds.
 pub fn now() -> u64 {
     std::time::SystemTime::now()

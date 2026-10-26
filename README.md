@@ -113,7 +113,10 @@ disk   : one append-only log of envs per space; nothing else to migrate
   from a 32-byte seed; every device keeps its own network key. A private
   space only you can read records what you joined and left, so linked
   devices follow each other. `/link` (My Account › Link a device) shows
-  the code.
+  the code. Profiles (My Account › Profiles and signing out) are others
+  on the same device, each with its own seed, spaces and storage nodes,
+  one at a time; signing out forgets one's seed here (link another
+  device first, or it is gone).
 - **Storage nodes keep ciphertext, never keys.** `irch --serve` on a NAS
   or a VPS prints a code; give it to irch (`/store CODE`, or My Account)
   and it keeps your private space, so a new device can link while your

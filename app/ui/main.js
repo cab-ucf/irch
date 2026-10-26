@@ -1667,6 +1667,9 @@ function settings() {
           class: "choice", onclick: () => { finish(null); linkDevice(); },
         }, icon("phone"), "Link a device"),
         h("button", {
+          class: "choice", onclick: () => { finish(null); profilesFlow(); },
+        }, icon("users"), "Profiles and signing out"),
+        h("button", {
           class: "choice", onclick: () => { finish(null); updates(false); },
         }, icon("down"), "Check for updates"),
         h("p", { class: "note" }, "Your identity is a key on your devices. " +
@@ -1674,6 +1677,49 @@ function settings() {
       foot(cancel(finish),
         h("button", { class: "btn", onclick: save }, "Save")));
   });
+}
+
+/** Profiles: other people (or other you) on this device, each with its
+ *  own identity, spaces and storage nodes; one at a time. */
+async function profilesFlow() {
+  const p = await invoke("profiles").catch(() => null);
+  if (!p) return;
+  const label = (n) => n || "First profile";
+  const go = await modal((finish) => h("div", {},
+    h("div", { class: "m-body" }, h("h2", {}, "Profiles"),
+      h("p", { class: "sub" }, "Each is someone of its own, as another " +
+        "device would be. Only the one in use is told of messages."),
+      ...p.all.map((n) => h("button", {
+        class: "choice", disabled: n === p.current,
+        onclick: () => finish({ use: n }),
+      }, icon("users"), n === p.current ? `${label(n)} (in use)` : label(n))),
+      h("button", { class: "choice", onclick: () => finish({ make: true }) },
+        icon("plus"), "New profile"),
+      h("button", { class: "choice", onclick: () => finish({ out: true }) },
+        icon("logout"), `Sign out of ${label(p.current)}`)),
+    foot(cancel(finish))));
+  if (!go) return;
+  let name = go.use;
+  if (go.make) {
+    name = await ask({ title: "New profile", label: "Its name",
+      placeholder: "Work", ok: "Create", maxLength: 32 });
+    if (!name) return;
+  }
+  if (go.out) {
+    const ok = await confirmBox({ title: `Sign out of ${label(p.current)}`,
+      sub: "This device forgets who you are here: your key, spaces and " +
+        "files on it. Your other devices keep everything; with none, it " +
+        "is gone for good. Link another device first to keep it.",
+      ok: "Sign out" });
+    if (!ok) return;
+  }
+  toast(go.out ? "Signing out…" : `Opening ${label(name)}…`);
+  try {
+    await (go.out ? invoke("sign_out") : invoke("use_profile", { name }));
+  } catch (e) {
+    return toast(String(e), true);
+  }
+  location.reload();
 }
 
 /** A phone in a pocket is told only if Android lets irch: what it allows
