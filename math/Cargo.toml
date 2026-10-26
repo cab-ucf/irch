@@ -1,0 +1,11 @@
+[package]
+name = "irch-math"
+description = "Typst math as MathML, for irch's messages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+typst = "0.15.1"
+typst-html = "0.15.1"

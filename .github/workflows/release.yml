@@ -19,9 +19,11 @@ jobs:
         os: [ubuntu-22.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y
           libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev
@@ -32,7 +34,7 @@ jobs:
         run: |
           v='"version": "'${GITHUB_REF_NAME#v}'"'
           sed -i.bak "s/\"version\": \"[^\"]*\"/$v/" app/tauri.conf.json
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -52,12 +54,13 @@ jobs:
       - name: Room for the build
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup
           /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          targets: aarch64-linux-android, x86_64-linux-android
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-java@v4
+          toolchain: stable
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: "21"
@@ -67,8 +70,9 @@ jobs:
           v='"version": "'${GITHUB_REF_NAME#v}'"'
           sed -i "s/\"version\": \"[^\"]*\"/$v/" app/tauri.conf.json
       - working-directory: app
+        # Phones only: x86_64 is for emulators, which build their own.
         run: NDK_HOME="$ANDROID_NDK_LATEST_HOME" cargo tauri android build
-          --ci --apk --target aarch64 --target x86_64
+          --ci --apk --target aarch64
       - name: Sign with irch's key, attach to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

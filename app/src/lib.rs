@@ -231,6 +231,13 @@ fn qr(text: String) -> Result<String, String> {
     Ok(svg.quiet_zone(true).min_dimensions(240, 240).build())
 }
 
+/// Typst math as MathML, off the event loop: the page checks the tags.
+#[tauri::command]
+async fn math(src: String, display: bool) -> Result<String, String> {
+    let m = move || irch_math::mathml(&src, display);
+    tauri::async_runtime::spawn_blocking(m).await.map_err(|e| e.to_string())?
+}
+
 /// Android: the share sheet.
 #[tauri::command]
 async fn share(app: AppHandle, text: String) -> Result<(), String> {
@@ -302,7 +309,7 @@ pub fn run() {
         Ok(())
     });
     let b = b.invoke_handler(tauri::generate_handler![
-        irch, link, qr, save, share, media, tune, opened, update
+        irch, link, qr, math, save, share, media, tune, opened, update
     ]);
     let app = b.build(tauri::generate_context!()).expect("tauri builds");
     app.run(|app, e| {

@@ -63,6 +63,8 @@ disk   : one append-only log of envs per space; nothing else to migrate
   wait there while everyone else is offline, and a new device can link
   while your others are off. It cannot read any of it, so it takes
   envelopes only from your devices and the member devices they vouch for.
+  An admin's storage node is listed in the space too, so members fetch
+  from it and invites send newcomers there first.
 - **Threads need no op of their own.** A message's thread is the channel
   named by the first 8 bytes of its id: replying in it is posting there,
   so two people who start the same thread at once start one, and unread
@@ -103,9 +105,12 @@ Invites carry your relay address, not your IP, whenever a relay is known.
 An always-on member's desktop keeps the spaces it is in synced, but it can
 read them and covers only those. A storage node (`irch --serve`) keeps
 every space of everyone who adds its code, ciphertext only. On NixOS,
-`nixos.nix` runs one as its own user, rebuilt from the latest commit
-hourly (as tydig's): import it, `systemctl start irch-update` once, and
-`journalctl -u irch | grep -A1 'Storage code'` prints the code to hand out.
+`nixos.nix` runs one as its own user, rebuilt hourly from the newest
+release tag signed by a key in `services.irch.signers` (ssh
+`allowed_signers` lines; sign with `git tag -s`, `gpg.format=ssh`), so a
+push alone runs nothing there: import it, set the signers, `systemctl
+start irch-update` once, and `journalctl -u irch | grep -A1 'Storage
+code'` prints the code to hand out.
 
 ## Updates
 
@@ -126,8 +131,11 @@ Ctrl-N/P switches channel; PgUp/PgDn scrolls.
 
 Messages are Markdown (markdown-it: headings, lists, tables, quotes,
 code fenced with its language, highlighted by Prism), `||spoilers||`,
-and LaTeX math (`$x^2$`, `$$...$$`) drawn as MathML by Temml; raw HTML
-is shown as text, and links are copied, never opened.
+and math, `$...$` inline and `$$...$$` displayed: Typst's (`$sum_(k=1)^n
+k = (n(n+1))/2$`, typeset by Typst itself, as MathML, in its own font),
+or LaTeX (`$\frac{1}{2}$`, by Temml) when it has a `\` or a `{`. Math
+can only be math: no `#` code, files or packages. Raw HTML is shown as
+text, and links are copied, never opened.
 
 Desktop and phone: a weechat-like tree of spaces and channels beside the
 chat, IRC-dense rows (time, nick, text), members on request. `+` creates

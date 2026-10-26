@@ -42,6 +42,9 @@ android {
             optimization {
                enable = true
             }
+            // Typst makes the library 40 MB: compressed, updates download
+            // about 15; Android unpacks it once, at install.
+            packaging { jniLibs.useLegacyPackaging = true }
             proguardFiles(
                 *fileTree(".") {
                   include("**/*.pro")

@@ -8,7 +8,7 @@ use crate::op::{File, Invite, Op, Role, Signed};
 use crate::{Ch, Id};
 use iroh::{EndpointAddr, EndpointId};
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem::take;
 
 /// Position of an op: author clock, then id. Also the paging cursor.
@@ -93,7 +93,7 @@ pub struct State {
     edits: HashMap<Id, BTreeMap<Pos, (Id, Option<String>)>>,
     reacts: HashMap<Id, Reacts>,
     authors: HashMap<Id, u64>,
-    devices: HashMap<EndpointId, (u64, Id)>,
+    devices: HashMap<(EndpointId, Id), u64>,
     // Derived from `control` by `refold`:
     name: Option<String>,
     channels: BTreeMap<Ch, String>,
@@ -132,12 +132,13 @@ impl State {
         self.sealed.insert(s.id, s.epoch);
         let t = self.authors.entry(s.author).or_default();
         *t = (*t).max(s.ts);
-        let t = self.devices.entry(s.device).or_default();
-        *t = (*t).max((s.ts, s.author));
+        let t = self.devices.entry((s.device, s.author)).or_default();
+        *t = (*t).max(s.ts);
         match s.op {
             Op::Post { channel, text, reply, files } => {
                 self.index.insert(s.id, (channel, at));
                 self.roots.insert(s.id.thread(), s.id);
+                let files = files.into_iter().map(File::safe).collect();
                 let p = Post { author: s.author, text, reply, files };
                 let ch = self.posts.entry(channel).or_default();
                 (ch.insert(at, p).is_none(), false)
@@ -220,8 +221,9 @@ impl State {
                         by: *a,
                     });
                 }
-                // Any member lists a storage node; only admins unlist.
-                Op::Host { node, on } if *on || admin => {
+                // Storage nodes are the admins' to list: an invite sends
+                // newcomers to them first.
+                Op::Host { node, on } if admin => {
                     drop(self.hosts.insert(node.id, on.then(|| node.clone())))
                 }
                 Op::Joined { invite } if own => {
@@ -403,10 +405,13 @@ impl State {
 
     /// Devices heard from, most recent first; no banned member's.
     pub fn devices(&self, n: usize) -> Vec<EndpointId> {
-        let ok = |(_, (_, a)): &(_, &(u64, Id))| self.role(a) != Role::Banned;
-        let v = self.devices.iter().filter(ok).map(|(d, (t, _))| (*t, *d));
+        let ok =
+            |((_, a), _): &(&(EndpointId, Id), _)| self.role(a) != Role::Banned;
+        let v = self.devices.iter().filter(ok).map(|((d, _), t)| (*t, *d));
         let mut v: Vec<_> = v.collect();
         v.sort_unstable_by(|a, b| b.cmp(a));
+        let mut seen = HashSet::new();
+        v.retain(|(_, d)| seen.insert(*d));
         v.into_iter().take(n).map(|(_, d)| d).collect()
     }
 
@@ -734,6 +739,31 @@ mod tests {
         assert_eq!(m, ["a, offline", "o"]);
         assert!(st.stale(&[0; 8], &(10, Id([10; 32])), &x));
         assert!(!st.stale(&[1; 8], &(10, Id([10; 32])), &x));
+    }
+
+    #[test]
+    fn hosts_are_admins_and_devices_stay_their_owners() {
+        let [o, a, b] = people();
+        let mut st = State::new(&Invite::new(o, "", None));
+        let host = |n: u8| Op::Host {
+            node: iroh::EndpointAddr::new(
+                SecretKey::from_bytes(&[n; 32]).public(),
+            ),
+            on: true,
+        };
+        let theirs = Signed { ts: 9, ..op(4, b, post("mine now", None)) };
+        let theirs = Signed { device: op(3, a, host(0)).device, ..theirs };
+        st.extend([
+            op(1, o, Op::Channel { id: CH, name: Some("g".into()) }),
+            op(2, a, host(20)),
+            op(3, a, post("hi", None)),
+            op(5, o, host(21)),
+            theirs,
+            op(6, o, Op::Role { user: b, role: Role::Banned }),
+        ]);
+        let hosts: Vec<_> = st.hosts().into_iter().map(|h| h.id).collect();
+        assert_eq!(hosts, [SecretKey::from_bytes(&[21; 32]).public()]);
+        assert!(st.devices(9).contains(&op(3, a, host(0)).device));
     }
 
     #[test]

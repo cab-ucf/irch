@@ -453,6 +453,16 @@ fn own_invite(me: &Me, peers: Vec<EndpointAddr>) -> Invite {
     Invite { owner: me.id(), nonce, key, name: String::new(), dm: None, peers }
 }
 
+// Phones skip the Mainline DHT, which keeps a routing table alive:
+// relays and n0's DNS find peers for them.
+fn dht(b: iroh::endpoint::Builder) -> iroh::endpoint::Builder {
+    #[cfg(not(target_os = "android"))]
+    let b = b.address_lookup(
+        iroh_mainline_address_lookup::DhtAddressLookup::builder(),
+    );
+    b
+}
+
 impl Node {
     pub async fn start(cfg: Config) -> Result<Arc<Self>> {
         std::fs::create_dir_all(&cfg.dir)?;
@@ -477,29 +487,13 @@ impl Node {
         local.peers.values().for_each(|a| lookup.add_endpoint_info(a.clone()));
         let bind = async |port: u16| {
             let b = match &cfg.net {
-                // Phones skip the DHT, which keeps a routing table alive:
-                // relays and n0's DNS find peers for them.
-                Net::Default if cfg!(target_os = "android") => {
-                    Endpoint::builder(presets::N0).relay_mode(
-                        RelayMode::custom(
-                            RELAYS.map(|r| r.parse().expect("relay url")),
-                        ),
-                    )
-                }
-                Net::Default => Endpoint::builder(presets::N0)
-                    .relay_mode(RelayMode::custom(
+                Net::Default => dht(Endpoint::builder(presets::N0).relay_mode(
+                    RelayMode::custom(
                         RELAYS.map(|r| r.parse().expect("relay url")),
-                    ))
-                    .address_lookup(
-                        iroh_mainline_address_lookup::DhtAddressLookup::builder(
-                        ),
                     ),
-                Net::Relay(urls) => Endpoint::builder(presets::Minimal)
-                    .relay_mode(RelayMode::custom(urls.clone()))
-                    .address_lookup(
-                        iroh_mainline_address_lookup::DhtAddressLookup::builder(
-                        ),
-                    ),
+                )),
+                Net::Relay(urls) => dht(Endpoint::builder(presets::Minimal)
+                    .relay_mode(RelayMode::custom(urls.clone()))),
                 Net::Lan => Endpoint::builder(presets::Minimal)
                     .relay_mode(RelayMode::Disabled)
                     .address_lookup(
@@ -1497,9 +1491,12 @@ impl Node {
 
     async fn host(self: &Arc<Self>, sp: &Arc<Space>, addr: EndpointAddr) {
         self.lookup.add_endpoint_info(addr.clone());
-        let listed =
-            self.view(&sp.id, |s| s.hosts().iter().any(|h| h.id == addr.id));
-        if listed == Some(false) {
+        let me = self.id();
+        let list = self.view(&sp.id, |s| {
+            s.role(&me) == Role::Admin
+                && !s.hosts().iter().any(|h| h.id == addr.id)
+        });
+        if list == Some(true) {
             let _ =
                 self.post(sp, Op::Host { node: addr.clone(), on: true }).await;
         }
@@ -1583,9 +1580,7 @@ impl Node {
     ) -> Result<PathBuf> {
         use std::io::{ErrorKind::AlreadyExists, Write};
         let data = self.file(space, f).await?;
-        let name = Path::new(&f.name).file_name().and_then(|n| n.to_str());
-        let name = name.unwrap_or_default().trim_start_matches('.');
-        let name = if name.is_empty() { "file" } else { name };
+        let name = &f.clone().safe().name;
         let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
         let dot = if ext.is_empty() { "" } else { "." };
         std::fs::create_dir_all(dir)?;
@@ -1596,7 +1591,16 @@ impl Node {
             };
             let p = dir.join(n);
             match std::fs::File::create_new(&p) {
-                Ok(mut out) => return Ok(out.write_all(&data).map(|_| p)?),
+                Ok(mut out) => {
+                    out.write_all(&data)?;
+                    // Windows: from the internet, like a browser download.
+                    #[cfg(windows)]
+                    let _ = std::fs::write(
+                        format!("{}:Zone.Identifier", p.display()),
+                        "[ZoneTransfer]\r\nZoneId=3\r\n",
+                    );
+                    return Ok(p);
+                }
                 Err(e) if e.kind() == AlreadyExists => continue,
                 Err(e) => return Err(e.into()),
             }

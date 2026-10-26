@@ -808,16 +808,59 @@ function code(src, lang) {
     h("code", {}, g ? spans(P.tokenize(src, g)) : src));
 }
 
-/** LaTeX as MathML (Temml builds nodes; browsers draw MathML). */
-function math(src, display) {
-  const el = h(display ? "div" : "span", { class: "math" });
-  try {
-    window.temml.render(src, el, { displayMode: display, trust: false,
-      throwOnError: true });
-  } catch {
-    el.className = "math bad";
-    el.textContent = display ? `$$${src}$$` : `$${src}$`;
+// Typst's MathML, rebuilt from a parse that runs nothing: math tags and
+// math attributes only.
+const NS = "http://www.w3.org/1998/Math/MathML";
+const MTAGS = new Set(("math mi mn mo ms mtext mspace mrow mfrac msqrt " +
+  "mroot msub msup msubsup munder mover munderover mtable mtr mtd mstyle " +
+  "mpadded mphantom menclose mmultiscripts mprescripts none").split(" "));
+const MATTRS = new Set(("display mathvariant lspace rspace stretchy " +
+  "symmetric largeop movablelimits accent accentunder fence separator " +
+  "form minsize maxsize columnalign rowalign columnspan rowspan " +
+  "linethickness displaystyle scriptlevel width height depth voffset " +
+  "notation class").split(" "));
+
+function mathml(n) {
+  if (n.nodeType === Node.TEXT_NODE) return document.createTextNode(n.data);
+  if (n.namespaceURI !== NS || !MTAGS.has(n.localName)) return null;
+  const el = document.createElementNS(NS, n.localName);
+  for (const a of n.attributes) {
+    if (MATTRS.has(a.name)) el.setAttribute(a.name, a.value);
   }
+  el.append(...[...n.childNodes].map(mathml).filter(Boolean));
+  return el;
+}
+
+const typeset = new Map(); // "1x^2" -> Promise of a <math>, or null
+
+/** Typst math; LaTeX (Temml) when it has a \ or a {, or Typst refuses. */
+function math(src, display) {
+  const el = h(display ? "div" : "span", { class: "math" }, src);
+  const tex = () => {
+    try {
+      window.temml.render(src, el, { displayMode: display, trust: false,
+        throwOnError: true });
+    } catch {
+      el.className = "math bad";
+      el.textContent = display ? `$$${src}$$` : `$${src}$`;
+    }
+  };
+  if (/[\\{]/.test(src)) {
+    tex();
+    return el;
+  }
+  const k = `${+display}${src}`;
+  if (!typeset.has(k)) {
+    typeset.set(k, invoke("math", { src, display }).then((m) => {
+      const doc = new DOMParser().parseFromString(m, "text/html");
+      return mathml(doc.body.firstChild);
+    }).catch(() => null));
+  }
+  typeset.get(k).then((m) => {
+    if (!m) return tex();
+    el.classList.add("typst");
+    el.replaceChildren(m.cloneNode(true));
+  });
   return el;
 }
 
@@ -1259,19 +1302,22 @@ function confirmBox({ title, sub, ok }) {
       h("button", { class: "btn red", onclick: () => finish(true) }, ok))));
 }
 
-/** A code to hand on: copy, share (Android), and a QR code to scan. */
-async function showCode({ title, label, code, note }) {
+/** A code to hand on: copy, share (Android), and a QR code to scan; a
+ *  secret one is never shared to other apps, and leaves the clipboard
+ *  after a minute. */
+async function showCode({ title, label, code, note, secret }) {
   const qr = await invoke("qr", { text: code }).catch(() => null);
   modal((finish) => {
     const b = h("button", { class: "btn", onclick: async () => {
       await copy(code);
-      b.textContent = "Copied";
+      if (secret) setTimeout(() => clip?.writeText("").catch(() => {}), 60e3);
+      b.textContent = secret ? "Copied for a minute" : "Copied";
       b.classList.add("green");
     } }, "Copy");
     const field = h("input",
       { class: "field mono", type: "text", value: code, readOnly: true });
     field.addEventListener("focus", () => field.select());
-    const share = android && h("button", { class: "btn",
+    const share = android && !secret && h("button", { class: "btn",
       onclick: () => quiet(invoke("share", { text: code })) }, "Share");
     if (share) b.classList.add("grey");
     const img = qr && h("img", { class: "qr", alt: "QR code",
@@ -1451,6 +1497,7 @@ function settings() {
 async function linkDevice() {
   const code = await call("link_code").catch(() => null);
   if (code) showCode({ title: "Link a device", label: "Your link code", code,
+    secret: true,
     note: "Open irch on the new device, choose Link this device, and paste " +
       "or scan this. It becomes you: keep this code secret, and never " +
       "post it anywhere." });
