@@ -180,7 +180,11 @@ async fn an_old_invite_stays_dead_after_a_reset() {
     let old = a.invite(&id).await.unwrap();
     a.rekey(&id).await.unwrap(); // Reset invite links
     let e = node("e").await;
-    e.join(&old).await.unwrap(); // its Profile goes out under the old key
+    // Its Profile goes out under the old key, unless the reset reaches it
+    // first (a fast machine), and joining is refused.
+    if let Err(err) = e.join(&old).await {
+        assert!(err.to_string().contains("ask for a new invite"), "{err}");
+    }
     until("e learns it is out", || e.locked(&id)).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let member = |u: Id| a.view(&id, |s| s.kem(&u).is_some()) == Some(true);
