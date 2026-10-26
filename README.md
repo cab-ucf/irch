@@ -194,7 +194,7 @@ Windows and updates an older irch to it.
 ## Using it
 
 Terminal: `/create NAME`, `/join CODE`, `/invite`, `/channel NAME`,
-`/reply TEXT`, `/thread TEXT`, `/room NAME`, `/react EMOJI`, `/edit TEXT`, `/delete`,
+`/reply TEXT`, `/thread TEXT`, `/room NAME`, `/search WORDS`, `/react EMOJI`, `/edit TEXT`, `/delete`,
 `/dm USER`, `/ban USER`, `/rekey`, `/file PATH`, `/share PATH`, `/save`, `/link`,
 `/store CODE|local|here`, `/note [FILE]`, `/todo [FILE]`, `/invisible`,
 `/help`.
@@ -213,7 +213,11 @@ chat, IRC-dense rows (time, nick, text), members on request. `+` creates
 or joins a space; the paperclip, a drop or a paste attaches files, and a
 file's name previews it (images, audio, video, PDFs, highlighted text);
 hover a message to react, reply, edit or delete; click a member to
-message, call, ban or promote them. The arrow on a message replies in
+message, call, ban or promote them; `@` in a message offers who is
+here. The magnifier (Ctrl+F) searches this room or channel (with its
+threads), this space, or everywhere: on this device, which holds the
+history decrypted, so nobody else is asked. Ctrl+K jumps to a channel
+or DM, and `@name` there to anyone to message. The arrow on a message replies in
 its thread, listed under its channel; a channel's `+` opens a named room
 (a thread before anyone replies), and its pencil renames it. The phone
 in a channel's header joins its group call, the one on a DM rings that

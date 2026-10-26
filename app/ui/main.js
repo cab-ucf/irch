@@ -66,6 +66,7 @@ const ICONS = {
   userPlus: "M15 20v-1a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v1M9 11a3.5 3.5 0 1 0 " +
     "0-7 3.5 3.5 0 0 0 0 7M19 8v6M16 11h6",
   chat: "M4 5h16v11H8l-4 4z",
+  search: "M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14M21 21l-5-5",
   key: "M15 9a3 3 0 1 0 0-.01M12.5 11.5 4 20M7 17l2 2M9 15l2 2",
   phone: "M8 3h8v18H8zM11 18h2",
   disk: "M4 6h16v5H4zM4 13h16v5H4zM7 8.5h.01M7 15.5h.01",
@@ -1680,22 +1681,37 @@ async function linkDevice() {
 
 function quickSwitch() {
   const all = S.spaces.flatMap((s) => s.channels.map((ch) => ({ s, ch })));
+  // "@…": everyone in a space with us, to message (a DM, or a new one).
+  const dmWith = new Set(S.spaces.filter((s) => s.dm).map((s) => s.with));
+  let people = [], redraw = () => {};
+  Promise.all(S.spaces.filter((s) => !s.dm).map((s) =>
+    rpc("members", { space: s.id }).then((ms) => ms.map((m) => ({ s, m })),
+      () => []))).then((v) => {
+    const seen = new Set();
+    people = v.flat().filter(({ m }) => !isMe(m.id) &&
+      m.role !== "Banned" && !dmWith.has(m.id) &&
+      !seen.has(m.id) && seen.add(m.id));
+    redraw();
+  });
   modal((finish) => {
     const input = h("input",
       { type: "text", placeholder: "Where would you like to go?" });
     const list = h("div", { class: "qs-list" });
     let sel = 0;
     let hits = [];
-    const label = ({ s, ch }) => s.dm ? `@${s.name}` : ch.name;
+    const label = ({ s, ch, m }) =>
+      m ? `@${m.name}` : s.dm ? `@${s.name}` : ch.name;
     const draw = () => {
       const q = input.value.toLowerCase();
       const hit = (x) => `${label(x)} ${x.s.name}`.toLowerCase().includes(q);
-      hits = all.filter(hit).slice(0, 50);
+      const them = q.startsWith("@") ? people : [];
+      hits = [...all, ...them].filter(hit).slice(0, 50);
       sel = Math.min(sel, Math.max(0, hits.length - 1));
       list.replaceChildren(...hits.map((x, i) => h("button", {
         class: i === sel ? "sel" : "", onclick: () => finish(x),
-      }, icon(x.s.dm ? "chat" : "hash"), h("span", {}, label(x)),
-      h("small", {}, x.s.dm ? "" : x.s.name))));
+      }, x.m ? avatar(x.m.id, x.m.name, "xs", x.m.online)
+        : icon(x.s.dm ? "chat" : "hash"), h("span", {}, label(x)),
+      h("small", {}, x.m ? "message" : x.s.dm ? "" : x.s.name))));
     };
     input.addEventListener("input", () => { sel = 0; draw(); });
     input.addEventListener("keydown", (e) => {
@@ -1706,10 +1722,81 @@ function quickSwitch() {
         draw();
       } else if (e.key === "Enter" && hits[sel]) finish(hits[sel]);
     });
-    draw();
+    (redraw = draw)();
     return h("div", { class: "m-body" },
-      h("h2", {}, "Quick Switcher"), input, list);
-  }).then((x) => x && select(x.s.id, x.ch.id));
+      h("h2", {}, "Quick Switcher"),
+      h("p", { class: "sub" }, "Channels and DMs; @ for anyone to message."),
+      input, list);
+  }).then(async (x) => {
+    if (!x?.m) return x && select(x.s.id, x.ch.id);
+    const id = await call("dm", { space: x.s.id, user: x.m.id })
+      .catch(() => null);
+    if (id) await open(id);
+  });
+}
+
+/** Messages with every word: here (this room or channel, its threads
+ *  too), in this space, or everywhere. On this device: nothing is asked
+ *  of anyone. */
+function searchFlow(scope = inThread() || chan() ? "room" : "space") {
+  const s = cur();
+  modal((finish) => {
+    const input = h("input", { type: "text", placeholder: "Search" });
+    const list = h("div", { class: "qs-list search" });
+    const scopes = [["room", inThread() ? "This thread"
+      : s?.dm ? "This conversation" : "This channel"],
+    ["space", "This space"], ["all", "Everywhere"]]
+      .filter(([k]) => k === "all" || (s && (k !== "room" || S.ch)));
+    const chips = h("div", { class: "chips" });
+    let hits = [], sel = 0, timer;
+    const where = (r) => {
+      const sp = S.spaces.find((x) => x.id === r.space);
+      const ch = sp?.channels.find((c) => c.id === r.channel);
+      const t = sp?.channels.flatMap((c) => c.threads)
+        .find((x) => x.id === r.channel);
+      return sp?.dm ? `@${sp.name}` : `${ch ? "#" + ch.name
+        : t ? "↳ " + t.name : "a thread"} · ${sp?.name ?? ""}`;
+    };
+    const draw = () => {
+      put(chips, scopes.map(([k, t]) => h("button", {
+        class: "chip" + (k === scope ? " on" : ""),
+        onclick: () => { scope = k; run(); input.focus(); },
+      }, t)));
+      list.replaceChildren(...hits.map((r, i) => h("button", {
+        class: i === sel ? "sel" : "", onclick: () => finish(r),
+      }, h("div", {}, h("b", {}, r.message.name), " ",
+        h("small", {}, `${where(r)} · ${fmtDay(r.message.ts)}`),
+        h("p", {}, r.message.text.slice(0, 200) ||
+          r.message.files.map((f) => f.name).join(", "))))));
+      if (input.value.trim() && !hits.length) {
+        list.append(h("p", { class: "note" }, "Nothing found."));
+      }
+    };
+    const run = () => {
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
+        const query = input.value.trim();
+        const args = { query, space: scope === "all" ? null : s?.id,
+          room: scope === "room" ? S.ch : null };
+        hits = query ? await rpc("search", args).catch(() => []) : [];
+        sel = 0;
+        draw();
+      }, 150);
+    };
+    input.addEventListener("input", run);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const d = e.key === "ArrowDown" ? 1 : -1;
+        sel = (sel + d + hits.length) % Math.max(1, hits.length);
+        draw();
+      } else if (e.key === "Enter" && hits[sel]) finish(hits[sel]);
+    });
+    draw();
+    return h("div", { class: "m-body" }, h("h2", {}, "Search"), input,
+      chips, list);
+  }).then((r) => r &&
+    openUrl(`irch://open/${r.space}/${r.channel}/${r.message.id}`));
 }
 
 // ---------- actions ----------
@@ -1847,6 +1934,49 @@ function insert(t, text) {
   autosize(t);
 }
 
+/** "@" in the composer: who is here, by name, as one types; ↑/↓ and Tab
+ *  or Enter pick, Esc closes. */
+function mentionPicker(input) {
+  const pop = h("div", { class: "qs-list mentions hidden" });
+  $("composer").prepend(pop);
+  let picks = [], at = 0;
+  const token = () => /(^|\s)@([^\s@]*)$/
+    .exec(input.value.slice(0, input.selectionStart));
+  const close = () => { picks = []; pop.classList.add("hidden"); };
+  const pick = (m) => {
+    const end = input.selectionStart;
+    input.setRangeText(`@${m.name} `, end - token()[2].length - 1, end, "end");
+    close();
+    autosize(input);
+    input.focus({ preventScroll: true });
+  };
+  const draw = () => {
+    const q = token()?.[2].toLowerCase();
+    picks = q == null ? [] : S.members.filter((m) => !isMe(m.id) &&
+      m.role !== "Banned" && m.name.toLowerCase().startsWith(q)).slice(0, 8);
+    at = Math.min(at, Math.max(0, picks.length - 1));
+    pop.classList.toggle("hidden", !picks.length);
+    put(pop, picks.map((m, i) => h("button", {
+      class: i === at ? "sel" : "",
+      onmousedown: (e) => { e.preventDefault(); pick(m); },
+    }, avatar(m.id, m.name, "xs", m.online), h("span", {}, m.name))));
+  };
+  input.addEventListener("input", () => { at = 0; draw(); });
+  input.addEventListener("blur", close);
+  // Before the composer's own keys: Enter picks here, not sends.
+  input.addEventListener("keydown", (e) => {
+    if (!picks.length) return;
+    const step = { ArrowDown: 1, ArrowUp: -1 }[e.key];
+    if (step) at = (at + step + picks.length) % picks.length;
+    else if (e.key === "Tab" || e.key === "Enter") pick(picks[at]);
+    else if (e.key === "Escape") close();
+    else return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (step) draw();
+  }, true);
+}
+
 /** The composer's commands, as the terminal's: /nick, /join, /dm, ... */
 const SLASH = {
   nick: async (name) => {
@@ -1877,6 +2007,7 @@ const SLASH = {
   leave: () => leaveSpace(),
   notes: () => S.msgs.at(-1) && toNotes(S.msgs.at(-1)),
   help: () => keysHelp(),
+  search: () => searchFlow(),
 };
 
 const say = (text) => {
@@ -1893,7 +2024,8 @@ const KEYS = [
   ["r", "reply"], ["t", "reply in its thread"], ["e", "edit (yours)"],
   ["dd", "delete"], ["y", "copy its text"], ["+", "react"],
   ["n", "add to notes"], ["i, a, Enter", "back to typing"],
-  ["Ctrl+K", "jump to a channel or DM"], ["Alt+↑/↓", "previous / next channel"],
+  ["Ctrl+K", "jump to a channel or DM; @ for anyone to message"],
+  ["Ctrl+F", "search"], ["Alt+↑/↓", "previous / next channel"],
   ["/nick, /join, /dm, /me, /shrug, /thread, /invite, /leave, /notes",
     "in the composer"],
 ];
@@ -1984,6 +2116,8 @@ function wire() {
   $("menu-btn").append(icon("menu"));
   $("menu-btn").onclick = () => document.body.classList.toggle("drawer");
   $("members-btn").append(icon("users"));
+  $("search-btn").append(icon("search"));
+  $("search-btn").onclick = () => searchFlow();
   $("call-btn").onclick = ring;
   av.call.changed = renderCall;
   // Tiles follow who speaks and whose video still arrives.
@@ -2065,6 +2199,7 @@ function wire() {
   };
 
   const input = $("input");
+  mentionPicker(input);
   input.addEventListener("input", () => {
     autosize(input);
     const s = cur();
@@ -2099,6 +2234,9 @@ function wire() {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
       e.preventDefault();
       quickSwitch();
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+      e.preventDefault();
+      searchFlow();
     } else if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
       e.preventDefault();
       stepChannel(e.key === "ArrowDown" ? 1 : -1);

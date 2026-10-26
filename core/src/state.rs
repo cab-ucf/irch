@@ -460,6 +460,38 @@ impl State {
         v
     }
 
+    /// Messages holding every word of `q` (in their text or files' names),
+    /// newest first: in `room` (a channel and its threads, or a thread),
+    /// else anywhere here.
+    pub fn search(
+        &self,
+        q: &str,
+        room: Option<&Ch>,
+        n: usize,
+    ) -> Vec<(Ch, Message)> {
+        let q = q.to_lowercase();
+        let words: Vec<_> = q.split_whitespace().collect();
+        let here = |c: &Ch| {
+            room.is_none_or(|r| {
+                c == r || self.thread(c).is_some_and(|t| t.parent == *r)
+            })
+        };
+        let posts = self.posts.iter().filter(|(c, _)| here(c));
+        let mut hits: Vec<_> = posts
+            .flat_map(|(c, ps)| ps.iter().map(move |(k, p)| (*c, k, p)))
+            .filter(|(_, k, p)| {
+                let Some((t, _)) = self.resolve(&k.1, p) else { return false };
+                let names = p.files.iter().map(|f| f.name.as_str());
+                let all = [t.as_str()].into_iter().chain(names);
+                let all = all.collect::<Vec<_>>().join(" ").to_lowercase();
+                !words.is_empty() && words.iter().all(|w| all.contains(w))
+            })
+            .collect();
+        hits.sort_by(|a, b| b.1.cmp(a.1));
+        let view = |(c, k, p): (Ch, &Pos, &Post)| Some((c, self.view(k, p)?));
+        hits.into_iter().filter_map(view).take(n).collect()
+    }
+
     /// Text after edits by its author; `None` if deleted or hidden.
     fn resolve(&self, id: &Id, p: &Post) -> Option<(String, bool)> {
         if self.role(&p.author) == Role::Banned {
@@ -759,6 +791,42 @@ mod tests {
         st.extend([op(5, o, topic("ours"))]);
         assert_eq!(name(&st).as_deref(), Some("ours"));
         assert_eq!(st.threads()[0].by, a);
+    }
+
+    #[test]
+    fn search_finds_words_in_a_room_or_anywhere() {
+        let [o, a, _] = people();
+        let mut st = State::new(&Invite::new(o, "", None));
+        let other = Ch([9; 8]);
+        let say = |channel, text: &str| Op::Post {
+            channel,
+            text: text.into(),
+            reply: None,
+            files: vec![],
+        };
+        st.extend([
+            op(1, o, Op::Channel { id: CH, name: Some("general".into()) }),
+            op(2, o, Op::Channel { id: other, name: Some("off".into()) }),
+            op(3, a, say(CH, "Lunch at noon?")),
+            op(4, o, say(Id([3; 32]).thread(), "noon works, lunch it is")),
+            op(5, a, say(other, "lunch again")),
+            op(
+                6,
+                a,
+                Op::Edit { target: Id([5; 32]), text: Some("dinner".into()) },
+            ),
+        ]);
+        let ids = |v: Vec<(Ch, Message)>| {
+            v.iter().map(|m| m.1.id.0[0]).collect::<Vec<_>>()
+        };
+        assert_eq!(ids(st.search("LUNCH noon", None, 9)), [4, 3]);
+        assert_eq!(ids(st.search("lunch", Some(&CH), 9)), [4, 3]);
+        assert_eq!(
+            ids(st.search("lunch", Some(&Id([3; 32]).thread()), 9)),
+            [4]
+        );
+        assert_eq!(ids(st.search("dinner", None, 9)), [5]);
+        assert!(st.search("  ", None, 9).is_empty());
     }
 
     #[test]

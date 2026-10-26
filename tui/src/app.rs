@@ -22,6 +22,7 @@ const HELP: &str = "\
 /reply TEXT      reply to the last message by someone else
 /thread TEXT     reply in its thread (indented under the channel)
 /room NAME       a named thread here (in a thread: renames it)
+/search WORDS    messages in this space with every word
 /note [FILE]     it into your notes ($LOROH_VAULT or ~/notes; Inbox.md)
 /todo [FILE]     it as a task there (in a thread: the whole thread)
 /react EMOJI     react to it        /edit TEXT   edit your last message
@@ -236,6 +237,29 @@ impl App {
                 self.post(Op::Post { channel, text, reply: None, files })
                     .await?;
                 (self.at, self.scroll) = (Some((s, Some(channel))), 0);
+            }
+            "search" => {
+                need()?;
+                let (s, _) = self.here()?;
+                let found = |st: &irch_core::State| {
+                    let rooms = st.rooms();
+                    let name = |c: &Ch| {
+                        let r = rooms.iter().find(|r| r.0 == *c);
+                        r.map_or("a thread".into(), |r| r.1.clone())
+                    };
+                    let hits = st.search(&arg, None, 20).into_iter();
+                    let line = |(c, m): (Ch, irch_core::Message)| {
+                        let text = m.text.lines().next().unwrap_or_default();
+                        format!("{} <{}> {}", name(&c), m.name, text)
+                    };
+                    hits.map(line).collect::<Vec<_>>().join("\n")
+                };
+                let got = n.view(&s, found).unwrap_or_default();
+                self.notice = Some(if got.is_empty() {
+                    format!("Nothing here says {arg:?}.")
+                } else {
+                    format!("Newest first, in this space:\n\n{got}")
+                });
             }
             "room" => {
                 need()?;
