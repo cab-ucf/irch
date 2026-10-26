@@ -2,7 +2,10 @@
 # tag at this commit) publishes a release the apps update from: signed desktop
 # bundles with Tauri's latest.json, and an APK under irch's signing key.
 # Secrets: TAURI_SIGNING_PRIVATE_KEY(_PASSWORD), ANDROID_KEYSTORE (base64),
-# ANDROID_KEYSTORE_PASSWORD.
+# ANDROID_KEYSTORE_PASSWORD. With an Apple Developer ID, also APPLE_CERTIFICATE
+# (base64 .p12), APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY, APPLE_ID,
+# APPLE_PASSWORD (app-specific), APPLE_TEAM_ID: macOS builds are then
+# notarized, and open from a browser download without a question.
 name: release
 on:
   push:
@@ -50,6 +53,20 @@ jobs:
         run: |
           v='"version": "'${TAG#v}'"'
           sed -i.bak "s/\"version\": \"[^\"]*\"/$v/" app/tauri.conf.json
+      - name: Apple's notarization, once its secrets exist (else ad hoc)
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD \
+            APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            [ -z "${!v}" ] || echo "$v=${!v}" >> "$GITHUB_ENV"
+          done
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -63,17 +80,40 @@ jobs:
           tagName: ${{ env.TAG }}
           releaseName: irch ${{ env.TAG }}
           includeUpdaterJson: false
+      # Linux: static (musl), so it runs on any distribution, NixOS too.
+      # Signed like the app: it updates itself, checking that signature.
       - name: The terminal client and storage node, beside the app
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+            ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          IRCH_RELEASE: "1"
         run: |
-          cargo build --release --locked -p irch --target ${{ matrix.target }}
+          t=${{ matrix.target }}
+          if [ "$RUNNER_OS" = Linux ]; then
+            t=${t/gnu/musl}
+            sudo apt-get install -y musl-tools && rustup target add $t
+            export "CC_${t//-/_}=musl-gcc"
+          fi
+          cargo build --release --locked -p irch --target $t
           x=$([ "$RUNNER_OS" = Windows ] && echo .exe || true)
-          cp target/${{ matrix.target }}/release/irch$x \
-            irch-${{ matrix.target }}$x
-          gh release upload "$TAG" irch-${{ matrix.target }}$x \
-            --clobber
+          cp target/$t/release/irch$x irch-$t$x
+          cargo tauri signer sign irch-$t$x
+          gh release upload "$TAG" irch-$t$x irch-$t$x.sig --clobber
+      - name: The source, signed (nixos.nix builds it), and the installers
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+            ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          git archive --format=tar.gz -o source.tar.gz HEAD
+          cargo tauri signer sign source.tar.gz
+          gh release upload "$TAG" source.tar.gz source.tar.gz.sig \
+            install.sh install.ps1 --clobber
 
   android:
     runs-on: ubuntu-latest
@@ -146,6 +186,9 @@ jobs:
           out = {}
           for sig in sorted(glob.glob("*.sig")):
               name = sig[:-4]
+              # The CLI's and the source's: they update themselves.
+              if re.match(r"irch-(x86_64|aarch64)-|source", name):
+                  continue
               a = cpu[re.search("amd64|x86_64|x64|aarch64|arm64", name)[0]]
               o, kind = next((o, k) for e, o, k in kinds if name.endswith(e))
               entry = dict(signature=open(sig).read(), url=url + name)
@@ -157,3 +200,63 @@ jobs:
                          pub_date=time.strftime("%Y-%m-%dT%H:%M:%SZ")),
                     open("latest.json", "w"), indent=2)
       - run: gh release upload "$TAG" sig/latest.json --clobber
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: gh release edit "$TAG" --notes-file .github/release.md
+
+  # The release as people get it: installed, run, and updating itself.
+  check:
+    needs: [updater, android]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      R: https://github.com/${{ github.repository }}/releases/latest/download
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: The app, in one line
+        if: runner.os != 'Windows'
+        run: |
+          curl -fsSL "$R/install.sh" | sh
+          if [ "$RUNNER_OS" = macOS ]; then
+            codesign -dv /Applications/irch.app 2>&1 | grep Signature
+          else
+            ~/.local/bin/irch.AppImage --appimage-version || true
+            test -x ~/.local/bin/irch.AppImage
+          fi
+      - name: The app, in one line
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          irm "$env:R/install.ps1" | iex
+          Get-ChildItem "$env:LOCALAPPDATA\irch" -Recurse -Filter *.exe
+      - name: A storage node, in one line
+        if: runner.os == 'macOS'
+        run: curl -fsSL "$R/install.sh" | sh -s -- --server
+      - name: A storage node, in one line
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '& ([scriptblock]::Create((irm "$env:R/install.ps1"))) -Server'
+      # Runners have no systemd for users: the node, run as it would be.
+      - name: A storage node, by hand
+        if: runner.os == 'Linux'
+        run: |
+          curl -fsSL "$R/install.sh" | sh -s -- --server || true
+          ~/.local/bin/irch --version
+          ~/.local/bin/irch --serve > serve.log 2>&1 &
+          for i in $(seq 30); do
+            grep -q irch:host serve.log && break; sleep 1
+          done
+          grep -A1 'Storage code' serve.log
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: runner.os == 'Linux'
+        with:
+          toolchain: stable
+      - name: An older irch updates itself to this one
+        if: runner.os == 'Linux'
+        run: |
+          sed -i 's/^version = ".*"/version = "0.0.0"/' Cargo.toml
+          cargo build -p irch
+          cp target/debug/irch old && ./old --update
+          ./old --version | grep -F "${TAG#v}"

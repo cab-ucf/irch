@@ -223,15 +223,43 @@ async fn tune(s: State<'_, App>, to: Channel<Body>) -> Result<(), String> {
     Ok(())
 }
 
-/// Releases: `latest.json` (Tauri's updater format) and `irch.apk`. On
-/// desktops the updater has it from tauri.conf.json.
-#[cfg(target_os = "android")]
-const LATEST: &str =
-    "https://github.com/cab-ucf/irch/releases/latest/download/";
+use irch_core::release::LATEST;
 
-/// A newer irch, if there is one; with `install`, install it. Desktop: in
-/// place, its signature checked against ours, then restart. Android: the
-/// system installer, which takes an update only under our signing key.
+/// Built by package.nix: NixOS keeps it up to date.
+const NIXOS: bool = option_env!("IRCH_NIXOS").is_some();
+
+/// The latest release's version, if newer than this irch.
+async fn newer(app: &AppHandle) -> anyhow::Result<Option<String>> {
+    irch_core::release::newer(&app.package_info().version.to_string()).await
+}
+
+/// A storage node on this computer, always on and kept up to date: the
+/// released terminal client, checked, installed as this user's service.
+#[tauri::command]
+async fn serve_here(app: AppHandle) -> Result<(), String> {
+    let run = async {
+        anyhow::ensure!(cfg!(desktop), "phones sleep: run one on a computer");
+        anyhow::ensure!(!NIXOS, "on NixOS: services.irch.enable = true");
+        let dir = app.path().app_local_data_dir()?.join("bin");
+        std::fs::create_dir_all(&dir)?;
+        let exe = dir.join(format!("irch{}", std::env::consts::EXE_SUFFIX));
+        let bin = irch_core::release::fetch(&irch_core::release::cli()).await?;
+        irch_core::release::put(&exe, &bin)?;
+        let out = tokio::task::spawn_blocking(move || {
+            std::process::Command::new(exe).arg("--install").output()
+        });
+        let out = out.await??;
+        let say = String::from_utf8_lossy(&out.stderr);
+        anyhow::ensure!(out.status.success(), "{}", say.trim());
+        Ok(())
+    };
+    run.await.map_err(err)
+}
+
+/// A newer irch, if there is one; with `install`, install it (then, what
+/// to tell). Desktop: in place, its signature checked against ours, then
+/// restart; installed otherwise (nix, cargo), the release page opens.
+/// Android: the system installer, which takes only our signing key.
 #[tauri::command]
 async fn update(
     app: AppHandle,
@@ -240,19 +268,39 @@ async fn update(
     #[cfg(desktop)]
     {
         use tauri_plugin_updater::UpdaterExt;
-        let u = app.updater().map_err(|e| e.to_string())?;
-        let Some(u) = u.check().await.map_err(|e| e.to_string())? else {
+        if NIXOS {
+            return Ok(None);
+        }
+        let Some(v) = newer(&app).await.map_err(err)? else {
             return Ok(None);
         };
-        if install {
-            let got = u.download_and_install(|_, _| {}, || {}).await;
-            got.map_err(|e| e.to_string())?;
+        if !install {
+            return Ok(Some(v));
+        }
+        if let Ok(up) = app.updater()
+            && let Ok(Some(u)) = up.check().await
+            && u.download_and_install(|_, _| {}, || {}).await.is_ok()
+        {
             app.restart();
         }
-        Ok(Some(u.version))
+        browse(LATEST).map_err(err)?;
+        Ok(Some(format!("irch {v}: its release page is open")))
     }
     #[cfg(target_os = "android")]
     android::update(&app, install).await.map_err(err)
+}
+
+/// The system's browser, at `url`.
+#[cfg(desktop)]
+fn browse(url: &str) -> anyhow::Result<()> {
+    #[cfg(target_os = "windows")]
+    let open = "explorer";
+    #[cfg(target_os = "macos")]
+    let open = "open";
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let open = "xdg-open";
+    std::process::Command::new(open).arg(url).spawn()?;
+    Ok(())
 }
 
 /// The irch:// link irch was opened with, if any.
@@ -352,7 +400,7 @@ pub fn run() {
     });
     let b = b.invoke_handler(tauri::generate_handler![
         irch, link, qr, math, save, share, media, tune, opened, update,
-        viewing, hush, upload
+        viewing, hush, upload, serve_here
     ]);
     let app = b.build(tauri::generate_context!()).expect("tauri builds");
     app.run(|app, e| {

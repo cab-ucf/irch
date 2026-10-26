@@ -209,7 +209,7 @@ svg.icon {
   box-shadow: inset 2px 0 0 var(--pink);
 }
 .channel .gear { display: none; color: var(--muted); }
-.channel:hover .gear { display: grid; }
+.channel:hover .gear, .channel.active .gear { display: grid; }
 .channel .gear:hover { color: var(--text-strong); }
 .channel .gear svg.icon { width: 16px; height: 16px; }
 .channel.thread { height: 30px; margin-left: 14px; font-size: 14px; }
@@ -1195,7 +1195,9 @@ img.attachment {
 }
 .tile {
   position: relative;
-  aspect-ratio: 16 / 9;
+  aspect-ratio: var(--ar, 16 / 9);
+  width: min(100%, calc(40vh * var(--ar, 16 / 9)));
+  justify-self: center;
   display: grid;
   place-items: center;
   overflow: hidden;

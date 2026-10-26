@@ -48,6 +48,8 @@ pub enum Op {
     // Own space: whether our storage node keeps a space (it always keeps
     // the own space).
     Store { node: EndpointId, space: Id, on: bool },
+    // A thread's name: its starter's, or an admin's, newest wins.
+    Topic { thread: Ch, name: String },
 }
 
 impl Op {

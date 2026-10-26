@@ -254,6 +254,7 @@ fn space(n: &Node, id: &Id) -> Option<Value> {
         (fresh || mentions > 0).then(|| {
             json!({
                 "id": t.id, "name": t.name, "root": t.root, "count": t.count,
+                "by": t.by,
                 "unread": unread, "mentions": mentions,
             })
         })

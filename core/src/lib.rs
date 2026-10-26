@@ -8,6 +8,7 @@ pub mod crypto;
 mod node;
 pub mod notes;
 pub mod op;
+pub mod release;
 pub mod state;
 mod store;
 mod sync;
@@ -75,16 +76,19 @@ impl Id {
     }
 }
 
-/// Unix time in milliseconds.
-/// This computer's storage node, where nixos.nix leaves its code for the
-/// local users it names (`IRCH_CODE_FILE`, else `/run/irch/code`).
+/// This computer's storage node: its code, where `irch --install` leaves
+/// it, or nixos.nix for the local users it names (`IRCH_CODE_FILE`, else
+/// `/run/irch/code`).
 pub fn local_storage() -> Option<String> {
     let p = std::env::var_os("IRCH_CODE_FILE");
     let p = p.map_or("/run/irch/code".into(), std::path::PathBuf::from);
-    let code = std::fs::read_to_string(p).ok()?.trim().to_string();
+    let mine = dirs::data_dir().map(|d| d.join("irch-serve").join("code"));
+    let read = |p| std::fs::read_to_string(p).ok();
+    let code = read(p).or_else(|| mine.and_then(read))?.trim().to_string();
     (!code.is_empty()).then_some(code)
 }
 
+/// Unix time in milliseconds.
 pub fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

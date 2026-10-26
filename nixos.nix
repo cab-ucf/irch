@@ -1,82 +1,112 @@
-# NixOS: an irch storage node, always on, kept at the latest signed
-# release. It keeps ciphertext for everyone who adds its code, and reads
-# none of it.
-#   imports = [ ./nixos.nix ];
-#   services.irch.signers = ''you@lab namespaces="git" ssh-ed25519 AAAA…'';
-#   services.irch.users = [ "you" ];     # their irch here pairs in one step
-#   nixos-rebuild switch
-#   systemctl start irch-update          # first build (then hourly)
-#   journalctl -u irch | grep -A1 'Storage code'   # give this to members
-# Needs rustc >= 1.88 (NixOS 25.11 or later).
+# NixOS: irch for this computer's people, and an always-on storage node,
+# both kept at irch's latest release: its source checked against irch's
+# signing key, then built here, hourly.
+#   imports = [ "${builtins.fetchTarball
+#     "https://github.com/cab-ucf/irch/archive/main.tar.gz"}/nixos.nix" ];
+#   (flakes: irch.nixosModules.default)
+#   programs.irch.enable = true;      # the app, and `irch` in a terminal
+#   services.irch.enable = true;      # a storage node, always on
+#   services.irch.users = [ "you" ];  # their irch pairs with it in one step
+#   journalctl -u irch | grep -A1 'Storage code'   # give this to others
 { config, lib, pkgs, ... }:
 let
-  signers = pkgs.writeText "irch-signers" config.services.irch.signers;
+  cfg = config.services.irch;
+  pinned = pkgs.callPackage ./package.nix { };
+  latest = "https://github.com/cab-ucf/irch/releases";
+  key = "RWSPfztwzR/MhakRL6cA70pN03n/nMCdTvoY5UHC2IcZuhcR+41RQI95";
+  # The newest release built here, else the one this configuration pins.
+  pick = bin: lib.hiPrio (pkgs.writeShellScriptBin bin ''
+    b=/var/lib/irch/app/bin/${bin}
+    [ -x "$b" ] || b=${pinned}/bin/${bin}
+    exec "$b" "$@"
+  '');
 in {
-  # Who may sign the release tags (ssh allowed_signers lines): a push to
-  # the repository alone runs nothing here.
-  options.services.irch.signers = lib.mkOption { type = lib.types.lines; };
-  # Local accounts whose irch (app or terminal) may pair with this node
-  # without the code being copied: it waits in /run/irch, theirs to read.
-  options.services.irch.users = lib.mkOption {
-    type = lib.types.listOf lib.types.str;
-    default = [ ];
+  imports = [
+    (lib.mkRemovedOptionModule [ "services" "irch" "signers" ]
+      "irch's releases are checked against its own signing key now. For \
+       the storage node: services.irch.enable = true.")
+  ];
+
+  options = {
+    programs.irch.enable =
+      lib.mkEnableOption "irch, the app and terminal client, kept up to date";
+    services.irch.enable =
+      lib.mkEnableOption "an always-on irch storage node, kept up to date";
+    # Local accounts whose irch (app or terminal) may pair with this node
+    # without the code being copied: it waits in /run/irch, theirs to read.
+    services.irch.users = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+    };
   };
 
-  config = {
-    users.users.irch = {
-      isSystemUser = true; group = "irch";
-      home = "/var/lib/irch"; createHome = true; homeMode = "700";
-    };
-    users.groups.irch.members = config.services.irch.users;
-
-    # Build as irch, unprivileged; a new binary restarts the node (below).
-    systemd.services.irch-update = {
-      startAt = "hourly";
-      wants = [ "network-online.target" ];
-      after = [ "network-online.target" ];
-      path = with pkgs; [ git openssh cargo rustc gcc ];
-      serviceConfig = {
-        Type = "oneshot"; User = "irch"; WorkingDirectory = "/var/lib/irch";
+  config = lib.mkIf (cfg.enable || config.programs.irch.enable) (lib.mkMerge [
+    {
+      users.users.irch = {
+        isSystemUser = true; group = "irch"; home = "/var/lib/irch";
       };
-      script = ''
-        [ -d src/.git ] || git clone -q https://github.com/cab-ucf/irch src
-        cd src && git fetch -q --force --tags
-        tag=$(git tag -l 'v*' --sort=-v:refname | head -1)
-        [ -n "$tag" ] && [ "$tag" != "$(cat ../deployed 2>/dev/null)" ] \
-          || exit 0
-        git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile=${signers} \
-          verify-tag "$tag"
-        git -c advice.detachedHead=false checkout -q "$tag"
-        cargo build -q --release --locked -p irch
-        install -D target/release/irch ../bin/irch.new
-        mv ../bin/irch.new ../bin/irch && echo "$tag" > ../deployed
-      '';
-    };
-    systemd.paths.irch-new = {
-      wantedBy = [ "multi-user.target" ];
-      pathConfig.PathChanged = "/var/lib/irch/bin/irch";
-    };
-    systemd.services.irch-new.script = "systemctl restart irch";
+      users.groups.irch.members = cfg.users;
 
-    systemd.services.irch = {
-      wantedBy = [ "multi-user.target" ];
-      wants = [ "network-online.target" ];
-      after = [ "network-online.target" ];
-      unitConfig.ConditionPathExists = "/var/lib/irch/bin/irch";
-      serviceConfig = {
-        User = "irch";
-        ExecStart = "/var/lib/irch/bin/irch --serve --dir /var/lib/irch/data";
-        Restart = "always"; RestartSec = 5;
-        NoNewPrivileges = true; PrivateTmp = true; PrivateDevices = true;
-        ProtectSystem = "strict"; ProtectHome = true;
-        StateDirectory = "irch/data";
-        RuntimeDirectory = "irch"; RuntimeDirectoryMode = "0750";
-        UMask = "0027";
-        Environment = "IRCH_CODE_FILE=/run/irch/code";
-        ProtectKernelTunables = true; ProtectControlGroups = true;
-        RestrictSUIDSGID = true; LockPersonality = true;
-        SystemCallArchitectures = "native";
+      # Unprivileged: Nix builds it; nothing here runs unchecked source.
+      systemd.services.irch-update = {
+        startAt = "hourly";
+        wants = [ "network-online.target" ];
+        after = [ "network-online.target" ];
+        path = with pkgs; [ curl jq minisign gnutar gzip coreutils nix ];
+        environment.HOME = "/var/lib/irch";
+        serviceConfig = {
+          Type = "oneshot"; User = "irch"; WorkingDirectory = "/var/lib/irch";
+          StateDirectory = "irch"; StateDirectoryMode = "0755";
+        };
+        script = ''
+          v=$(curl -fsSL ${latest}/latest/download/latest.json | jq -r .version)
+          [ "$v" != "$(cat built 2>/dev/null)" ] || exit 0
+          at=${latest}/download/v$v
+          curl -fsSL -o src.tar.gz "$at/source.tar.gz"
+          curl -fsSL "$at/source.tar.gz.sig" | base64 -d > src.minisig
+          minisign -Vqm src.tar.gz -x src.minisig -P ${key}
+          rm -rf src && mkdir src && tar -xzf src.tar.gz -C src
+          nix-build -o app -E \
+            "(import ${pkgs.path} { }).callPackage $PWD/src/package.nix { }"
+          rm -rf src src.tar.gz src.minisig
+          echo "$v" > built
+        '';
       };
-    };
-  };
+      # Soon after it is first enabled, not just on the hour.
+      systemd.timers.irch-update.timerConfig.OnBootSec = "2min";
+    }
+
+    (lib.mkIf config.programs.irch.enable {
+      environment.systemPackages = [ pinned (pick "irch-app") (pick "irch") ];
+    })
+
+    (lib.mkIf cfg.enable {
+      systemd.services.irch = {
+        wantedBy = [ "multi-user.target" ];
+        wants = [ "network-online.target" ];
+        after = [ "network-online.target" ];
+        serviceConfig = {
+          User = "irch";
+          ExecStart =
+            "${pick "irch"}/bin/irch --serve --dir /var/lib/irch/data";
+          Restart = "always"; RestartSec = 5;
+          NoNewPrivileges = true; PrivateTmp = true; PrivateDevices = true;
+          ProtectSystem = "strict"; ProtectHome = true;
+          StateDirectory = "irch/data"; StateDirectoryMode = "0700";
+          RuntimeDirectory = "irch"; RuntimeDirectoryMode = "0750";
+          UMask = "0027";
+          Environment = "IRCH_CODE_FILE=/run/irch/code";
+          ProtectKernelTunables = true; ProtectControlGroups = true;
+          RestrictSUIDSGID = true; LockPersonality = true;
+          SystemCallArchitectures = "native";
+        };
+      };
+      # A new release built: the node restarts on it.
+      systemd.paths.irch-new = {
+        wantedBy = [ "multi-user.target" ];
+        pathConfig.PathChanged = "/var/lib/irch/built";
+      };
+      systemd.services.irch-new.script = "systemctl try-restart irch";
+    })
+  ]);
 }

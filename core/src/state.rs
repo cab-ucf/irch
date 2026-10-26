@@ -44,6 +44,8 @@ pub struct Thread {
     pub id: Ch,
     pub root: Id,
     pub parent: Ch,
+    // Who started it (who, with admins, may name it).
+    pub by: Id,
     pub name: String,
     pub count: usize,
     pub last: u64,
@@ -91,6 +93,7 @@ pub struct State {
     // Every post's would-be thread, back to the post.
     roots: HashMap<Ch, Id>,
     edits: HashMap<Id, BTreeMap<Pos, (Id, Option<String>)>>,
+    topics: HashMap<Ch, BTreeMap<Pos, (Id, String)>>,
     reacts: HashMap<Id, Reacts>,
     authors: HashMap<Id, u64>,
     devices: HashMap<(EndpointId, Id), u64>,
@@ -147,6 +150,10 @@ impl State {
             Op::Edit { target, text } => {
                 let e = self.edits.entry(target).or_default();
                 (e.insert(at, (s.author, text)).is_none(), false)
+            }
+            Op::Topic { thread, name } => {
+                let t = self.topics.entry(thread).or_default();
+                (t.insert(at, (s.author, name)).is_none(), false)
             }
             Op::React { target, emoji, on } => {
                 let r = self.reacts.entry(target).or_default();
@@ -318,24 +325,37 @@ impl State {
     /// The thread `ch` is: on a message in a channel, never in a thread.
     pub fn thread(&self, ch: &Ch) -> Option<Thread> {
         let root = *self.roots.get(ch)?;
-        let parent = self.index.get(&root)?.0;
+        let (parent, (since, _)) = *self.index.get(&root)?;
         self.channels.contains_key(&parent).then_some(())?;
         let posts = self.posts.get(ch).into_iter().flatten();
         let seen = posts.filter(|(k, p)| self.resolve(&k.1, p).is_some());
-        let (count, last) = seen.fold((0, 0), |(n, _), (k, _)| (n + 1, k.0));
+        let (count, last) =
+            seen.fold((0, since), |(n, _), (k, _)| (n + 1, k.0));
+        let by = self.post(&root)?.author;
+        let named = self.topics.get(ch).into_iter().flat_map(|t| t.iter());
+        let may = |(at, (a, _)): &(&Pos, &(Id, String))| {
+            let role = self.role(a);
+            !self.stale_at(at, a)
+                && role != Role::Banned
+                && (*a == by || role == Role::Admin)
+        };
+        let topic = named.rev().find(may).map(|t| t.1.1.clone());
         let text = self.post(&root).and_then(|p| self.resolve(&root, p));
         let line = text
             .as_ref()
-            .and_then(|t| t.0.lines().find(|l| !l.trim().is_empty()));
-        let name =
-            line.map_or("Thread".into(), |l| l.chars().take(48).collect());
-        Some(Thread { id: *ch, root, parent, name, count, last })
+            .and_then(|t| t.0.lines().find(|l| !l.trim().is_empty()))
+            .map(|l| l.chars().take(48).collect());
+        let name = topic.or(line).unwrap_or("Thread".into());
+        Some(Thread { id: *ch, root, parent, by, name, count, last })
     }
 
     /// Threads with replies, most recently active first.
     pub fn threads(&self) -> Vec<Thread> {
-        let t = self.posts.keys().filter_map(|c| self.thread(c));
-        let mut v: Vec<_> = t.filter(|t| t.count > 0).collect();
+        let chs: HashSet<_> =
+            self.posts.keys().chain(self.topics.keys()).collect();
+        let t = chs.into_iter().filter_map(|c| self.thread(c));
+        let named = |t: &Thread| self.topics.contains_key(&t.id);
+        let mut v: Vec<_> = t.filter(|t| t.count > 0 || named(t)).collect();
         v.sort_by_key(|t| std::cmp::Reverse(t.last));
         v
     }
@@ -716,6 +736,29 @@ mod tests {
         assert_eq!(st.rooms().last(), Some(&(t.id, t.name)));
         st.extend([op(6, o, Op::Channel { id: CH, name: None })]);
         assert!(st.threads().is_empty() && st.thread(&root.thread()).is_none());
+    }
+
+    #[test]
+    fn threads_are_named_by_their_starter_or_an_admin() {
+        let [o, a, b] = people();
+        let mut st = State::new(&Invite::new(o, "", None));
+        let topic = |name: &str| Op::Topic {
+            thread: Id([2; 32]).thread(),
+            name: name.into(),
+        };
+        st.extend([
+            op(1, o, Op::Channel { id: CH, name: Some("general".into()) }),
+            op(2, a, post("a room", None)),
+        ]);
+        assert!(st.threads().is_empty());
+        let name = |st: &State| st.threads().first().map(|t| t.name.clone());
+        st.extend([op(3, a, topic("plans"))]);
+        assert_eq!(name(&st).as_deref(), Some("plans"));
+        st.extend([op(4, b, topic("mine"))]);
+        assert_eq!(name(&st).as_deref(), Some("plans"));
+        st.extend([op(5, o, topic("ours"))]);
+        assert_eq!(name(&st).as_deref(), Some("ours"));
+        assert_eq!(st.threads()[0].by, a);
     }
 
     #[test]

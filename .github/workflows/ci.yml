@@ -30,6 +30,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: node --test app/tests/*.test.mjs
+      - run: shellcheck -S warning install.sh
 
   # The core, the terminal client and the app compile everywhere.
   build:

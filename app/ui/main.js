@@ -371,6 +371,10 @@ function dmList() {
   }, avatar(d.with ?? d.id, d.name, "xs"), h("span", { class: "name" }, d.name),
   d.channels.some((c) => c.call.length) && icon("speaker"),
   badge(d.id !== S.sid && mentions(d)),
+  h("button", { class: "gear", title: `Call ${d.name}`, onclick: (e) => {
+    e.stopPropagation();
+    callIn(d.id);
+  } }, icon("ring")),
   h("button", { class: "gear", title: "Close conversation", onclick: (e) => {
     e.stopPropagation();
     select(d.id);
@@ -388,6 +392,10 @@ function channelList(s) {
         onclick: () => select(s.id, ch.id),
       }, icon("hash"), h("span", { class: "name" }, ch.name),
       !active && badge(ch.mentions),
+      h("button", {
+        class: "gear", title: "New room (a thread here)",
+        onclick: (e) => { e.stopPropagation(); newRoom(s, ch); },
+      }, icon("plus")),
       s.admin && h("button", {
         class: "gear", title: "Edit Channel",
         onclick: (e) => { e.stopPropagation(); editChannel(ch); },
@@ -405,7 +413,11 @@ const threadRow = (s, t) => h("div", {
     openThread(t.root);
   },
 }, icon("thread"), h("span", { class: "name" }, t.name),
-t.id !== S.ch && badge(t.mentions));
+t.id !== S.ch && badge(t.mentions),
+(isMe(t.by) || s.admin) && h("button", {
+  class: "gear", title: "Rename",
+  onclick: (e) => { e.stopPropagation(); renameRoom(s, t); },
+}, icon("pencil")));
 
 /** A newer irch: offered once at launch (`quietly`), or on request. */
 async function updates(quietly) {
@@ -420,12 +432,14 @@ async function updates(quietly) {
     h("div", { class: "m-body" }, h("h2", {}, `irch ${v} is out`),
       h("p", { class: "sub" }, android
         ? "It downloads, then Android asks to install it over this one."
-        : "It downloads, checks its signature, and irch restarts.")),
+        : "It downloads, checks its signature, and irch restarts (or, if "
+          + "irch came another way, its release page opens).")),
     foot(cancel(finish),
       h("button", { class: "btn", onclick: () => finish(true) }, "Update"))));
   if (!ok) return;
   toast(`Downloading irch ${v}…`);
   await invoke("update", { install: true })
+    .then((said) => said && toast(said))
     .catch((e) => toast(`Update failed: ${e}`, true));
 }
 
@@ -614,6 +628,12 @@ function incoming(sid, ch, who) {
   });
 }
 
+/** Call someone: their DM's call, which rings them. */
+async function callIn(sid) {
+  select(sid);
+  if (!here()) await ring();
+}
+
 async function answer(sid, ch) {
   quiet(invoke("hush"));
   select(sid, ch);
@@ -643,10 +663,14 @@ function tile(id) {
   const level = me ? av.call.level
     : Date.now() - (p?.spoke ?? 0) < 300 ? p.level : 0;
   const name = me ? S.me.name : nameOf(id);
+  const v = live && (me ? av.call.self : p.canvas);
+  // Each tile is its video's shape: a phone's upright, a laptop's wide.
+  const [w, ht] = me ? [v?.videoWidth, v?.videoHeight] : [v?.width, v?.height];
   return h("div", {
     class: "tile" + (level > 0.02 ? " speaking" : "") +
       (me && av.call.cam ? " mirror" : ""),
-  }, live ? (me ? av.call.self : p.canvas) : avatar(id, name, "big"),
+    style: w && ht ? `--ar: ${w} / ${ht}` : null,
+  }, v || avatar(id, name, "big"),
   h("span", { class: "who" }, name, me && !av.call.mic && icon("micOff")));
 }
 
@@ -1318,19 +1342,29 @@ function storageFlow(s) {
         h("small", {}, x.node === local ? "This computer" : "Storage node")),
       h("input", { type: "checkbox", checked: x.on,
         onchange: (e) => keep(x.node, e.target.checked) }), h("i"));
+    const pair = async () => {
+      await quiet(call("store_local").then(() => keep(S.me.local_storage, true)));
+      finish(true);
+    };
     const here = local && !paired && h("button", { class: "btn",
-      onclick: async () => {
-        await quiet(call("store_local").then(() => keep(local, true)));
-        finish(true);
-      } }, "Keep it on this computer's storage node");
+      onclick: pair }, "Keep it on this computer's storage node");
+    // Desktops: one click runs one here, always on and kept up to date.
+    const start = !local && !android && h("button", { class: "btn",
+      onclick: async (e) => {
+        e.target.disabled = true;
+        e.target.textContent = "Starting a storage node here…";
+        const ok = await invoke("serve_here").then(() => true,
+          (err) => toast(`Could not start one: ${err}`, true));
+        S.me = await rpc("me");
+        if (ok && S.me.local_storage) await pair();
+      } }, "Run one on this computer, always on");
     return h("div", {},
       h("div", { class: "m-body" }, h("h2", {}, "Storage Nodes"),
         h("p", { class: "sub" }, "A storage node keeps this space " +
           "encrypted, so it waits there while everyone is offline."),
-        s.storage.map(sw), here,
+        s.storage.map(sw), here, start,
         !s.storage.length && !here && h("p", { class: "note" },
-          "Pair one with its code in My Account, or run nixos.nix on " +
-          "this computer.")),
+          "Or pair one with its code in My Account.")),
       foot(h("button", { class: "btn grey", onclick: () => finish(null) },
         "Done")));
   });
@@ -1349,6 +1383,7 @@ function memberCard(id, anchor, align) {
   const actions = [];
   if (!isMe(id)) {
     actions.push(act("Message", () => startDm(id)));
+    actions.push(act("Call", () => startDm(id, true), "green"));
     const mention = () => insert($("input"), `@${m.name} `);
     if (!s?.dm) actions.push(act("Mention", mention, "grey"));
     if (s?.admin && id !== s.owner && (ownerMe || m.role !== "Admin")) {
@@ -1536,9 +1571,9 @@ async function open(id) {
   select(id);
 }
 
-async function startDm(user) {
+async function startDm(user, ring) {
   const id = await call("dm", { space: S.sid, user }).catch(() => null);
-  if (id) await open(id);
+  if (id) await (ring ? open(id).then(() => callIn(id)) : open(id));
 }
 
 async function invitePeople() {
@@ -1747,6 +1782,28 @@ async function renameSpace() {
   const name = await ask({ title: "Rename Space", label: "Space name",
     value: cur().name });
   if (name) publish({ Rename: { name } });
+}
+
+/** A room: a named thread in a channel, there before anyone replies. */
+async function newRoom(s, ch) {
+  select(s.id, ch.id);
+  const name = (await ask({ title: "New Room", label: "Room name",
+    sub: `A thread in #${ch.name}, listed under it.`, placeholder: "plans",
+    ok: "Create Room" }))?.trim();
+  if (!name) return;
+  const id = await publish({ Post: { channel: ch.id, text: name,
+    reply: null, files: [] } });
+  if (!id) return;
+  await publish({ Topic: { thread: id.slice(0, 16), name } });
+  S.spaces = await rpc("spaces");
+  await openThread(id);
+}
+
+async function renameRoom(s, t) {
+  const name = (await ask({ title: "Rename Thread", label: "Thread name",
+    value: t.name }))?.trim();
+  if (name) await call("publish", { space: s.id,
+    op: { Topic: { thread: t.id, name } } }).catch(() => {});
 }
 
 async function leaveSpace() {
@@ -1959,11 +2016,11 @@ function wire() {
     store.set("members", on ? "1" : "0");
   };
   $("attach-btn").append(icon("clip"));
-  const pick = (keep) => ((S.keep = keep), $("picker").click());
+  const choose = (keep) => ((S.keep = keep), $("picker").click());
   $("attach-btn").onclick = (e) => menu(e.currentTarget, [
-    ["Upload: storage nodes keep it (to 25 MB)", "clip", () => pick(false)],
+    ["Upload: storage nodes keep it (to 25 MB)", "clip", () => choose(false)],
     ["Share from this device (any size)", "disk",
-      () => (android ? pick(true) : offerPaths())],
+      () => (android ? choose(true) : offerPaths())],
   ]);
   $("picker").onchange = (e) => {
     addFiles([...e.target.files], S.keep);

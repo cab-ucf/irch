@@ -46,3 +46,7 @@ webkit2gtk = "2"
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
 ndk-context = "0.1"
+
+[features]
+# Built without `cargo tauri` (package.nix): the page from the binary.
+custom-protocol = ["tauri/custom-protocol"]

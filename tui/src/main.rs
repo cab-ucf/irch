@@ -2,11 +2,13 @@
 //! device of yours.
 
 mod app;
+mod service;
 
 use anyhow::Result;
 use clap::Parser;
 use irch_core::{Config, Net, Node};
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Private, peer-to-peer community chat
 #[derive(Parser)]
@@ -33,11 +35,72 @@ struct Cli {
     /// No interface: an always-on device of yours
     #[arg(long)]
     headless: bool,
+    /// Keep a storage node running here, from now on (as you)
+    #[arg(long)]
+    install: bool,
+    /// Stop the storage node --install keeps
+    #[arg(long)]
+    uninstall: bool,
+    /// Replace this irch with the latest release, if newer
+    #[arg(long)]
+    update: bool,
+}
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Released builds (IRCH_RELEASE, set by release.yml) keep themselves up to
+/// date while they serve; others leave that to whoever built them.
+async fn updated(exe: &std::path::Path) {
+    if option_env!("IRCH_RELEASE").is_none() {
+        return std::future::pending().await;
+    }
+    let mut wait = Duration::from_secs(60);
+    loop {
+        tokio::time::sleep(wait).await;
+        wait = Duration::from_secs(6 * 3600);
+        match irch_core::release::replace(exe, VERSION).await {
+            Ok(Some(v)) => return eprintln!("irch {v}: restarting"),
+            Ok(None) => {}
+            Err(e) => eprintln!("update: {e:#}"),
+        }
+    }
+}
+
+/// The same command line, on the binary now at `exe`.
+fn restart(exe: &std::path::Path) -> Result<()> {
+    let args = std::env::args_os().skip(1);
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(args);
+    #[cfg(unix)]
+    return Err(std::os::unix::process::CommandExt::exec(&mut cmd).into());
+    #[cfg(not(unix))]
+    {
+        cmd.spawn()?;
+        std::process::exit(0)
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let c = Cli::parse();
+    // Before any update: Linux names a replaced binary "… (deleted)".
+    let exe = std::env::current_exe()?;
+    if c.install {
+        return service::install(&exe);
+    }
+    if c.uninstall {
+        return service::uninstall();
+    }
+    if c.update {
+        let v = irch_core::release::replace(&exe, VERSION).await?;
+        println!(
+            "{}",
+            v.map_or("irch is up to date".into(), |v| {
+                format!("irch {v} is in place")
+            })
+        );
+        return Ok(());
+    }
     let net = match (c.lan, c.relay.is_empty()) {
         (true, _) => Net::Lan,
         (_, false) => Net::Relay(c.relay),
@@ -62,8 +125,11 @@ async fn main() -> Result<()> {
     let (name, link, serve) = (c.name, c.link, c.serve);
     let notes = std::env::var_os("LOROH_VAULT").map(Into::into);
     let notes = notes.or_else(|| dirs::home_dir().map(|h| h.join("notes")));
+    let code_file = dir.join("code");
     let n = Node::start(Config { dir, name, net, link, serve, notes }).await?;
     if let Some(code) = n.storage_code().await {
+        // Where irch on this computer finds it (irch_core::local_storage).
+        std::fs::write(code_file, &code)?;
         println!("Storage code (give it to the people you store for):");
         println!("{code}");
         // nixos.nix: where this computer's own users' irch finds it.
@@ -71,11 +137,18 @@ async fn main() -> Result<()> {
             std::fs::write(p, &code)?;
         }
     }
+    let mut fresh = false;
     if ui {
         app::run(n.clone()).await?;
     } else {
-        tokio::signal::ctrl_c().await?;
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => r?,
+            () = updated(&exe) => fresh = true,
+        }
     }
     n.shutdown().await;
+    if fresh {
+        restart(&exe)?;
+    }
     Ok(())
 }

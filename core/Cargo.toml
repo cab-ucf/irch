@@ -16,11 +16,14 @@ blake3 = "1"
 chacha20poly1305 = "0.11"
 data-encoding = "2"
 getrandom = "0.4"
+dirs = "6"
 iroh = { version = "1.4", default-features = false, features = ["tls-ring"] }
 iroh-gossip = { version = "0.101", default-features = false, features = ["net"] }
 # Files kept on their sender's device: verified, resumable, any size.
 iroh-blobs = { version = "0.103.1", default-features = false, features = ["fs-store"] }
 iroh-mdns-address-lookup = "0.6"
+# Releases are checked against the key every irch trusts.
+minisign-verify = "0.3"
 n0-future = "0.3"
 postcard = { version = "1", features = ["use-std"] }
 # Storage nodes wake phones; already built for iroh, TLS as iroh sets it.
