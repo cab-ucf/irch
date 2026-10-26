@@ -417,20 +417,32 @@ pub struct Node {
 }
 
 /// Public addresses first: a phone tries them in turn.
+/// Reachable from anywhere, as far as its address says (not a LAN's, nor
+/// a carrier's shared 100.64/10).
+fn public(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(a) => {
+            let o = a.octets();
+            !(a.is_private()
+                || a.is_loopback()
+                || a.is_link_local()
+                || a.is_unspecified()
+                || (o[0] == 100 && o[1] & 0xc0 == 64))
+        }
+        std::net::IpAddr::V6(a) => {
+            !(a.is_loopback()
+                || a.is_unspecified()
+                || (a.segments()[0] & 0xfe00) == 0xfc00
+                || (a.segments()[0] & 0xffc0) == 0xfe80)
+        }
+    }
+}
+
+/// Public addresses first.
 fn wake_order(
     mut ips: Vec<std::net::IpAddr>,
 ) -> impl Iterator<Item = std::net::IpAddr> {
-    let private = |ip: &std::net::IpAddr| match ip {
-        std::net::IpAddr::V4(a) => {
-            a.is_private() || a.is_loopback() || a.is_link_local()
-        }
-        std::net::IpAddr::V6(a) => {
-            a.is_loopback()
-                || (a.segments()[0] & 0xfe00) == 0xfc00
-                || (a.segments()[0] & 0xffc0) == 0xfe80
-        }
-    };
-    ips.sort_by_key(|ip| private(ip));
+    ips.sort_by_key(|ip| !public(ip));
     ips.dedup();
     ips.into_iter()
 }
@@ -445,7 +457,10 @@ impl ProtocolHandler for Proto {
         let n = self.0.upgrade().ok_or_else(gone)?;
         let r = match c.alpn() {
             sync::ALPN => sync::respond(&n, &c).await,
-            crate::wake::ALPN => crate::wake::answer(&n.phones, c).await,
+            crate::wake::ALPN => match n.serve {
+                Some(t) => crate::wake::answer(&n.phones, t, c).await,
+                None => Ok(()),
+            },
             call::ALPN => {
                 n.answer(c).await;
                 Ok(())
@@ -776,36 +791,75 @@ impl Node {
         lock(&self.prefs).push.is_some()
     }
 
-    /// A storage node: take phones' wake connections on `listen`; they
-    /// reach it at `at`, else at each address it has, with that port.
+    /// A storage node: take phones' wake connections on TCP `port`; they
+    /// reach it at `at`, else where its router forwards that port (asked
+    /// by UPnP, NAT-PMP or PCP), else at each address it has.
     pub async fn serve_wakes(
         self: &Arc<Self>,
-        listen: std::net::SocketAddr,
-        mut at: Vec<String>,
+        port: u16,
+        at: Vec<String>,
     ) -> Result<()> {
         let token = self.serve.context("only storage nodes take phones")?;
-        let l = tokio::net::TcpListener::bind(listen).await?;
-        if at.is_empty() {
-            let port = l.local_addr()?.port();
-            let ips = self.addr().await.ip_addrs().map(|a| a.ip()).collect();
-            at = wake_order(ips)
-                .map(|ip| (ip, port).into())
-                .map(|a: std::net::SocketAddr| a.to_string())
-                .collect();
+        // Both stacks: [::] alone is IPv6-only on some systems.
+        let mut ls = vec![];
+        for ip in ["::", "0.0.0.0"] {
+            let a = std::net::SocketAddr::new(ip.parse()?, port);
+            ls.extend(tokio::net::TcpListener::bind(a).await.ok());
         }
-        self.phones.at(at);
-        let n = Arc::downgrade(self);
-        tokio::spawn(async move {
-            while let Ok((s, _)) = l.accept().await {
-                let Some(n) = n.upgrade() else { return };
-                tokio::spawn(async move {
-                    let key = n.ep.secret_key().clone();
-                    if let Err(e) = n.phones.phone(s, &key, &token).await {
-                        debug!("wake connection: {e:#}");
-                    }
-                });
-            }
-        });
+        ensure!(!ls.is_empty(), "port {port} is taken");
+        let ips = self.addr().await.ip_addrs().map(|a| a.ip()).collect();
+        let mine: Vec<_> =
+            wake_order(ips).map(|ip| (ip, port).into()).collect();
+        let show = |a: &[std::net::SocketAddr]| {
+            a.iter().map(|a| a.to_string()).collect::<Vec<_>>()
+        };
+        self.phones.at(if at.is_empty() { show(&mine) } else { at.clone() });
+        #[cfg(not(target_os = "android"))]
+        if at.is_empty() {
+            let map = portmapper::Client::new(portmapper::Config {
+                protocol: portmapper::Protocol::Tcp,
+                ..Default::default()
+            });
+            map.update_local_port(port.try_into()?);
+            map.procure_mapping();
+            let n = Arc::downgrade(self);
+            let mut out = map.watch_external_address();
+            tokio::spawn(async move {
+                let _map = map; // kept while the node is
+                while out.changed().await.is_ok() {
+                    let Some(n) = n.upgrade() else { return };
+                    let ext = (*out.borrow_and_update()).map(Into::into);
+                    let ext = ext.filter(|a: &std::net::SocketAddr| {
+                        wake_order(vec![a.ip()]).all(|ip| public(&ip))
+                    });
+                    n.phones.at(show(
+                        &ext.into_iter()
+                            .chain(mine.clone())
+                            .collect::<Vec<_>>(),
+                    ));
+                }
+            });
+        }
+        // Handshakes at once, bounded: past that, newcomers are dropped.
+        let gate = Arc::new(tokio::sync::Semaphore::new(crate::wake::GATE));
+        for l in ls {
+            let (n, gate) = (Arc::downgrade(self), gate.clone());
+            tokio::spawn(async move {
+                while let Ok((s, _)) = l.accept().await {
+                    let Some(n) = n.upgrade() else { return };
+                    let Ok(g) = gate.clone().try_acquire_owned() else {
+                        continue;
+                    };
+                    tokio::spawn(async move {
+                        let key = n.ep.secret_key().clone();
+                        let r = n.phones.phone(s, &key, &token, g).await;
+                        if let Err(e) = r {
+                            debug!("wake connection: {e:#}");
+                        }
+                    });
+                }
+            });
+        }
         Ok(())
     }
 
@@ -816,15 +870,18 @@ impl Node {
         let paired = self.view(&self.own, |s| s.storage()).unwrap_or_default();
         let (mut targets, mut servers) = (vec![], vec![]);
         for (addr, token) in paired {
-            let at = crate::wake::find(&self.ep, addr.clone()).await;
+            let at = crate::wake::find(&self.ep, addr.clone(), &token).await;
             if let Some(at) = at.ok().filter(|a| !a.is_empty()) {
                 targets.push(crate::wake::Target { at, id: addr.id, token });
                 servers.push(addr);
             }
         }
         if !targets.is_empty() {
-            let _ = crate::wake::save(&self.dir, self.ep.id(), &targets);
-            let url = crate::wake::url(self.ep.id(), &servers);
+            let old = crate::wake::load(&self.dir).map(|w| w.1.secret);
+            let secret = old.unwrap_or_else(rand);
+            let w = crate::wake::Saved { secret, targets: targets.clone() };
+            let _ = crate::wake::save(&self.dir, &w);
+            let url = crate::wake::url(self.ep.id(), secret, &servers);
             self.set_push(Some(url)).await;
         }
         targets

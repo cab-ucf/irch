@@ -540,7 +540,7 @@ async fn a_storage_node_wakes_a_sleeping_phone() {
         .unwrap()
         .port();
     let at = format!("127.0.0.1:{port}");
-    s.serve_wakes(at.parse().unwrap(), vec![at.clone()]).await.unwrap();
+    s.serve_wakes(port, vec![at.clone()]).await.unwrap();
     let id = a.create("lab").await.unwrap();
     let ch = general(&a, &id);
     b.join(&a.invite(&id).await.unwrap()).await.unwrap();
@@ -557,9 +557,9 @@ async fn a_storage_node_wakes_a_sleeping_phone() {
     until("a knows to wake b through s", || wakes(&a)).await;
 
     // Asleep: only the cached servers, no node needed.
-    let (device, t) = irch_core::wake::load(&db).unwrap();
+    let (key, t) = irch_core::wake::load(&db).unwrap();
     let phone =
-        tokio::spawn(async move { irch_core::wake::wait(device, &t).await });
+        tokio::spawn(async move { irch_core::wake::wait(&key, &t).await });
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(!phone.is_finished(), "it waits quietly");
     say(&a, &id, ch, "lunch?").await;

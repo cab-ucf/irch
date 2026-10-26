@@ -273,7 +273,7 @@ async fn node(dir: PathBuf) -> anyhow::Result<std::sync::Arc<Node>> {
 /// (none, or none answering): the node stays connected, a heavier way.
 async fn next(dir: PathBuf) -> anyhow::Result<Vec<Notice>> {
     loop {
-        if let Some((device, servers)) = irch_core::wake::load(&dir) {
+        if let Some((key, saved)) = irch_core::wake::load(&dir) {
             if crate::FG.load(SeqCst) {
                 // In sight: the app shows what arrives.
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -281,7 +281,7 @@ async fn next(dir: PathBuf) -> anyhow::Result<Vec<Notice>> {
             }
             crate::LIVE.store(false, SeqCst);
             crate::nap().await;
-            if irch_core::wake::wait(device, &servers).await.is_ok() {
+            if irch_core::wake::wait(&key, &saved).await.is_ok() {
                 let got = wake(dir.clone(), None).await?;
                 if !got.is_empty() {
                     return Ok(got);
