@@ -2,13 +2,18 @@
 
 use irch_core::{Ch, Config, Event, Id, Invite, Net, Node, Op};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::broadcast::Receiver;
 
+// A clock alone is not enough: macOS's ticks in microseconds, and tests
+// start nodes together.
 fn dir(name: &str) -> std::path::PathBuf {
+    static N: AtomicU64 = AtomicU64::new(0);
     let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
-    std::env::temp_dir()
-        .join(format!("irch-test-{}-{name}", t.unwrap().as_nanos()))
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let t = t.unwrap().as_nanos();
+    std::env::temp_dir().join(format!("irch-test-{t}-{n}-{name}"))
 }
 
 async fn start(
