@@ -1991,7 +1991,9 @@ impl Node {
             // Real size first: a post may claim 1 byte.
             let size = self.verified(&peers, h).await;
             ensure!(size == Some(len), "not reachable now, or not as said");
-            let got = self.files.downloader(&self.ep).download(hash, peers);
+            // A link may drop mid-way (relay losses): asked again, it resumes.
+            let got =
+                self.files.downloader(&self.ep).download(hash, peers.repeat(3));
             got.await.ok().context(
                 "not reachable now: ask whoever sent it to open irch",
             )?;
@@ -2154,7 +2156,7 @@ impl Node {
         let (files, ep) = (self.files.clone(), self.ep.clone());
         let hash = iroh_blobs::Hash::from_bytes(h.0);
         tokio::spawn(async move {
-            let got = files.downloader(&ep).download(hash, vec![from]);
+            let got = files.downloader(&ep).download(hash, vec![from; 3]);
             if let Err(e) = got.await {
                 warn!("keeping a file: {e:#}");
             }
