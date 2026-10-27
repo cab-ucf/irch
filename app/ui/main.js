@@ -1192,7 +1192,7 @@ function lightbox(src, f) {
       } }, android ? "Share" : "Save"))));
 }
 
-const SEALED = 25 << 20; // what storage nodes take
+const SEALED = 5 * 2 ** 30; // what storage nodes keep without their password
 const PART = 4 << 20;
 const b64 = (blob) => new Promise((ok) => {
   const r = new FileReader();
@@ -1200,32 +1200,61 @@ const b64 = (blob) => new Promise((ok) => {
   r.readAsDataURL(blob);
 });
 
-/** Up to 25 MB sealed for storage nodes; larger, or `keep`, served here. */
 async function addFiles(list, keep) {
   for (const file of list) {
-    const here = keep || file.size > SEALED;
-    if (here) toast(`Sharing ${file.name} from this device…`);
-    const f = await (here ? offerFile(file) : sealFile(file))
+    let here = keep, password = null;
+    if (!keep && file.size > SEALED) {
+      const pw = await bigFile(file);
+      if (pw == null) continue;
+      if (pw === SHARE) here = true;
+      else password = pw;
+    }
+    const f = await (here ? offerFile(file) : sealFile(file, password))
       .catch(() => null);
     if (f) S.files.push(f);
     renderFilesBar();
   }
 }
 
-const sealFile = async (file) =>
-  call("attach", { space: S.sid, name: file.name, data: await b64(file) });
+const SHARE = Symbol("share");
+// Past 5 GB: the storage node's password, or served from here instead.
+const bigFile = (file) => modal((finish) => {
+  const pw = h("input", { type: "password", placeholder: "Its password" });
+  return h("div", {}, h("div", { class: "m-body" },
+    h("h2", {}, `${file.name} is over 5 GB`),
+    h("p", { class: "sub" }, "Storage nodes keep files this big only with " +
+      "their password. Or share it from this device: members get it while " +
+      "you are online."), pw),
+  foot(cancel(finish), h("button", { class: "btn grey",
+    onclick: () => finish(SHARE) }, "Share from here"),
+  h("button", { class: "btn", onclick: () => finish(pw.value) }, "Upload")));
+});
 
-/** Into irch's folder in parts (a page knows no paths). */
-async function offerFile(file) {
+const sealFile = async (file, password) => call("seal", { space: S.sid,
+  path: await upload(file), name: file.name, password });
+
+const offerFile = async (file) =>
+  call("offer", { path: await upload(file), name: file.name });
+
+// Into irch's folder in parts (a page knows no paths).
+async function upload(file) {
   const id = randomId(16);
+  const t = file.size > PART
+    ? toast(`Uploading ${file.name}…`, false, 6e5) : null;
   let path;
-  for (let at = 0; at === 0 || at < file.size; at += PART) {
-    const part = file.slice(at, at + PART);
-    const body = android ? { data: await b64(part) }
-      : new Uint8Array(await part.arrayBuffer());
-    path = await invoke("upload", body, { headers: { "x-upload": id } });
+  try {
+    for (let at = 0; at === 0 || at < file.size; at += PART) {
+      const part = file.slice(at, at + PART);
+      const body = android ? { data: await b64(part) }
+        : new Uint8Array(await part.arrayBuffer());
+      path = await invoke("upload", body, { headers: { "x-upload": id } });
+      if (t) t.textContent = `Uploading ${file.name}… ` +
+        `${Math.floor(100 * (at + part.size) / file.size)}%`;
+    }
+  } finally {
+    t?.remove();
   }
-  return call("offer", { path, name: file.name });
+  return path;
 }
 
 /** Desktops: files offered in place (any size, no copy). */
@@ -2458,7 +2487,7 @@ function wire() {
   $("attach-btn").append(icon("clip"));
   const choose = (keep) => ((S.keep = keep), $("picker").click());
   $("attach-btn").onclick = (e) => menu(e.currentTarget, [
-    ["Upload: storage nodes keep it (to 25 MB)", "clip", () => choose(false)],
+    ["Upload: storage nodes keep it (to 5 GB)", "clip", () => choose(false)],
     ["Share from this device (any size)", "disk",
       () => (android ? choose(true) : offerPaths())],
   ]);

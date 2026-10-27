@@ -312,11 +312,11 @@ impl App {
             }
             "file" => {
                 let (path, text) = arg.split_once(' ').unwrap_or((&arg, ""));
-                let data = std::fs::read(path)?;
-                let name = std::path::Path::new(path).file_name();
-                let name = name.and_then(|n| n.to_str()).unwrap_or("file");
+                let p = std::path::Path::new(path);
+                let name =
+                    p.file_name().and_then(|n| n.to_str()).unwrap_or("file");
                 let (space, channel) = self.here()?;
-                let files = vec![n.attach(&space, name, &data).await?];
+                let files = vec![n.seal_file(&space, p, name, None).await?];
                 let text = text.to_string();
                 self.post(Op::Post { channel, text, reply: None, files })
                     .await?;

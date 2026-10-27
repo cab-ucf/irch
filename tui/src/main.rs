@@ -29,6 +29,10 @@ struct Cli {
     /// Keep other people's ciphertext: a storage node
     #[arg(long)]
     serve: bool,
+    /// With --serve: files past 5 GB are kept for whoever gives this
+    /// (or IRCH_BIG_PASSWORD, kept out of `ps`)
+    #[arg(long)]
+    big_password: Option<String>,
     /// No interface: an always-on device of yours
     #[arg(long)]
     headless: bool,
@@ -121,7 +125,10 @@ async fn main() -> Result<()> {
     let notes = std::env::var_os("LOROH_VAULT").map(Into::into);
     let notes = notes.or_else(|| dirs::home_dir().map(|h| h.join("notes")));
     let code_file = dir.join("code");
-    let n = Node::start(Config { dir, name, net, link, serve, notes }).await?;
+    let big =
+        c.big_password.or_else(|| std::env::var("IRCH_BIG_PASSWORD").ok());
+    let n =
+        Node::start(Config { dir, name, net, link, serve, notes, big }).await?;
     if let Some(code) = n.storage_code().await {
         std::fs::write(code_file, &code)?;
         // For nixos.nix; unprinted, so no wider-read journal holds it.

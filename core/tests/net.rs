@@ -34,6 +34,7 @@ async fn start(
         link,
         serve,
         notes: None,
+        big: None,
     };
     Node::start(cfg).await.unwrap()
 }

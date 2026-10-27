@@ -90,6 +90,12 @@ pub enum Call {
     },
     StoreLocal,
     /// Served from this device, left where it is.
+    Seal {
+        space: Id,
+        path: String,
+        name: String,
+        password: Option<String>,
+    },
     Offer {
         path: String,
         name: Option<String>,
@@ -206,6 +212,10 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
         }
         Call::Store { space, node, on } => {
             json!(n.store(&space, &node, on).await?)
+        }
+        Call::Seal { space, path, name, password } => {
+            let p = std::path::Path::new(&path);
+            json!(n.seal_file(&space, p, &name, password.as_deref()).await?)
         }
         Call::Offer { path, name } => {
             json!(n.offer(std::path::Path::new(&path), name.as_deref()).await?)

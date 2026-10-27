@@ -41,7 +41,18 @@ const RELAYS: [&str; 2] =
     ["https://iroh.cxn.center./", "https://use1-1.relay.n0.iroh.link./"];
 pub const MAX_TEXT: usize = 4000;
 pub const MAX_NAME: usize = 64;
-pub const MAX_FILE: usize = 25 << 20;
+/// What storage nodes keep without their password.
+pub const MAX_FILE: u64 = 5 << 30;
+/// `MAX_FILE`, or in tests (debug builds) IRCH_TEST_MAX_FILE.
+fn limit() -> u64 {
+    let test = std::env::var("IRCH_TEST_MAX_FILE")
+        .ok()
+        .filter(|_| cfg!(debug_assertions));
+    test.and_then(|v| v.parse().ok()).unwrap_or(MAX_FILE)
+}
+
+/// What opens in memory, to preview; larger files are saved.
+const PREVIEW: usize = 25 << 20;
 const BLOB: &[u8] = b"irch/blob/1";
 const PARKED: usize = 32 << 20;
 const LOCKED: &str = "keys changed without you: ask for a new invite";
@@ -68,6 +79,8 @@ pub struct Config {
     pub serve: bool,
     /// A Markdown vault for "Add to notes".
     pub notes: Option<PathBuf>,
+    /// A storage node's password, which keeps files past `MAX_FILE`.
+    pub big: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -435,7 +448,8 @@ pub struct Node {
     clock: AtomicU64,
     invisible: AtomicBool,
     serve: Option<[u8; 16]>,
-    files: Option<FsStore>,
+    big: Option<String>,
+    files: FsStore,
     call: Mutex<Option<Call>>,
     media: call::Media,
 }
@@ -508,6 +522,8 @@ impl ProtocolHandler for Proto {
 enum Ask {
     Get(Id),
     Put([u8; 16], Vec<u8>),
+    // Fetch a sealed file from the asker and keep it (a password past 5 GB).
+    Keep([u8; 16], Id, Option<String>),
 }
 
 fn secret(path: &Path, link: Option<Key>) -> Result<Key> {
@@ -537,8 +553,12 @@ fn gate(n: std::sync::Weak<Node>) -> iroh_blobs::provider::events::EventSender {
     tokio::spawn(async move {
         while let Some(m) = rx.recv().await {
             if let ProviderMessage::ClientConnected(m) = m {
+                // A storage node holds only sealed files; a member's device
+                // serves them, and its own, to members and its storage.
                 let n = n.upgrade().zip(m.endpoint_id);
-                let ok = n.is_some_and(|(n, d)| n.member_device(&d));
+                let ok = n.is_some_and(|(n, d)| {
+                    n.serve.is_some() || n.member_device(&d) || n.mine(&d)
+                });
                 let r = if ok { Ok(()) } else { Err(AbortReason::Permission) };
                 let _ = m.tx.send(r).await;
             }
@@ -606,10 +626,7 @@ impl Node {
             .find(|a| a.is_ipv4())
             .map_or(0, |a| a.port());
         let serve = cfg.serve.then(|| *local.token.get_or_insert_with(rand));
-        let files = match serve {
-            None => Some(FsStore::load(cfg.dir.join("files")).await?),
-            Some(_) => None,
-        };
+        let files = FsStore::load(cfg.dir.join("files")).await?;
         let gossip =
             Gossip::builder().max_message_size(GOSSIP_MAX).spawn(ep.clone());
         let own_inv = own_invite(&me, link.map(|l| l.1).unwrap_or_default());
@@ -634,17 +651,14 @@ impl Node {
             events: broadcast::channel(1024).0,
             clock: AtomicU64::new(0),
             serve,
+            big: cfg.big,
             files,
             call: Mutex::new(None),
             media: broadcast::channel(128).0,
         });
-        let mut router = Router::builder(n.ep.clone());
-        if let Some(f) = &n.files {
-            let gate = Some(gate(Arc::downgrade(&n)));
-            router =
-                router.accept(iroh_blobs::ALPN, BlobsProtocol::new(f, gate));
-        }
-        let router = router
+        let gate = Some(gate(Arc::downgrade(&n)));
+        let router = Router::builder(n.ep.clone())
+            .accept(iroh_blobs::ALPN, BlobsProtocol::new(&n.files, gate))
             .accept(iroh_gossip::ALPN, n.gossip.clone())
             .accept(sync::ALPN, Proto(Arc::downgrade(&n)))
             .accept(BLOB, Proto(Arc::downgrade(&n)))
@@ -1743,38 +1757,90 @@ impl Node {
         self.dir.join("blobs").join(h.to_string())
     }
 
-    /// Seal a file and keep its ciphertext; send it in an `Op::Post`.
+    /// Seal a file (in chunks, from disk) and keep its ciphertext here and
+    /// on this user's storage nodes; send it in an `Op::Post`.
+    pub async fn seal_file(
+        self: &Arc<Self>,
+        space: &Id,
+        path: &Path,
+        name: &str,
+        password: Option<&str>,
+    ) -> Result<File> {
+        use iroh_blobs::api::blobs::{AddPathOptions, ImportMode};
+        let size = std::fs::metadata(path)?.len();
+        let key: Key = rand();
+        let out = self.scratch("sealed")?;
+        let (from, to) = (path.to_path_buf(), out.clone());
+        tokio::task::spawn_blocking(move || {
+            let r = std::io::BufReader::new(std::fs::File::open(from)?);
+            let w = std::io::BufWriter::new(std::fs::File::create(to)?);
+            crate::crypto::seal_stream(&key, r, w)
+        })
+        .await??;
+        let (format, mode) = (Default::default(), ImportMode::TryReference);
+        let opts = AddPathOptions { path: out, format, mode };
+        let tag = self.files.add_path_with_opts(opts).with_tag().await?;
+        let hash = Id(*tag.hash.as_bytes());
+        self.keep(space, &hash, password).await?;
+        let name = name.chars().take(128).collect();
+        Ok(File { name, size, hash, key: Id(key) })
+    }
+
+    /// `seal_file`, from memory.
     pub async fn attach(
         self: &Arc<Self>,
         space: &Id,
         name: &str,
         data: &[u8],
     ) -> Result<File> {
-        ensure!(data.len() <= MAX_FILE, "files are at most 25 MiB");
-        let key = rand();
-        let ct = crate::crypto::seal(&key, b"irch file", data);
-        let hash = Id(blake3::hash(&ct).into());
-        self.keep(space, &hash, &ct)?;
-        let (name, size) =
-            (name.chars().take(128).collect(), data.len() as u64);
-        Ok(File { name, size, hash, key: Id(key) })
+        let tmp = self.scratch("in")?;
+        std::fs::write(&tmp, data)?;
+        let f = self.seal_file(space, &tmp, name, None).await;
+        let _ = std::fs::remove_file(tmp);
+        f
     }
 
-    fn keep(self: &Arc<Self>, space: &Id, hash: &Id, ct: &[u8]) -> Result<()> {
-        std::fs::create_dir_all(self.dir.join("blobs"))?;
-        store::write(&self.blob(hash), ct)?;
+    /// A fresh path in our sealed files' folder.
+    fn scratch(&self, ext: &str) -> Result<PathBuf> {
+        let dir = self.dir.join("sealed");
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir.join(format!("{}.{ext}", Id(rand()))))
+    }
+
+    /// This user's storage nodes fetch `hash` from here. One that refuses
+    /// it (past 5 GB, without its password) fails it; one offline does not.
+    async fn keep(
+        self: &Arc<Self>,
+        space: &Id,
+        hash: &Id,
+        password: Option<&str>,
+    ) -> Result<()> {
         for (addr, token) in self.stores(space) {
-            let (n, put) = (self.clone(), Ask::Put(token, ct.to_vec()));
-            tokio::spawn(async move { n.ask(addr, &put).await });
+            let ask = Ask::Keep(token, *hash, password.map(Into::into));
+            let wait = Duration::from_secs(30);
+            match tokio::time::timeout(wait, self.ask(addr, &ask)).await {
+                Ok(Ok(no)) if !no.is_empty() => {
+                    bail!("{}", String::from_utf8_lossy(&no))
+                }
+                Ok(Err(e)) => warn!("storage node: {e:#}"),
+                _ => {}
+            }
         }
         Ok(())
+    }
+
+    /// One of this user's storage nodes.
+    fn mine(&self, d: &EndpointId) -> bool {
+        let s =
+            self.view(&self.own, |s| s.storage().iter().any(|a| a.0.id == *d));
+        s == Some(true)
     }
 
     /// Served from here to members while online: any size, no copy, unsealed
     /// (QUIC encrypts), checked chunk by chunk. `name`: else the path's.
     pub async fn offer(&self, path: &Path, name: Option<&str>) -> Result<File> {
         use iroh_blobs::api::blobs::{AddPathOptions, ImportMode};
-        let files = self.files.as_ref().context("storage nodes offer none")?;
+        let files = &self.files;
         let path = std::path::absolute(path)?;
         let size = std::fs::metadata(&path)?.len();
         let (format, mode) = (Default::default(), ImportMode::TryReference);
@@ -1786,40 +1852,45 @@ impl Node {
         Ok(File { name, size, hash, key: crate::op::OFFERED })
     }
 
-    /// From whichever member has it (sender first), resumed; served on.
-    async fn pull(&self, space: &Id, f: &File) -> Result<&FsStore> {
-        let files = self.files.as_ref().context("storage nodes fetch none")?;
-        let hash = iroh_blobs::Hash::from_bytes(f.hash.0);
-        if !files.has(hash).await? {
+    /// A blob's real size, proven by its hash, from the first that has it.
+    async fn verified(&self, peers: &[EndpointId], h: &Id) -> Option<u64> {
+        let hash = iroh_blobs::Hash::from_bytes(h.0);
+        for p in peers {
+            let c = self.ep.connect(*p, iroh_blobs::ALPN);
+            if let Ok(Ok(c)) =
+                tokio::time::timeout(Duration::from_secs(10), c).await
+                && let Ok((n, _)) =
+                    iroh_blobs::get::request::get_verified_size(&c, &hash).await
+            {
+                return Some(n);
+            }
+        }
+        None
+    }
+
+    /// Blob `h`, `len` bytes, from whoever has it (sender, members, storage
+    /// nodes), resumed; served on.
+    async fn pull(&self, space: &Id, h: &Id, len: u64) -> Result<&FsStore> {
+        let hash = iroh_blobs::Hash::from_bytes(h.0);
+        if !self.files.has(hash).await? {
             let sp = self.get(space)?;
             let mut peers: Vec<EndpointId> = self.bootstrap(&sp);
             peers.extend(sp.nbrs());
-            // Real size first, proven by the hash: a post may claim 1 byte.
-            let mut size = None;
-            for p in &peers {
-                let c = self.ep.connect(*p, iroh_blobs::ALPN);
-                let c = tokio::time::timeout(Duration::from_secs(10), c);
-                if let Ok(Ok(c)) = c.await {
-                    let n =
-                        iroh_blobs::get::request::get_verified_size(&c, &hash);
-                    if let Ok((n, _)) = n.await {
-                        size = Some(n);
-                        break;
-                    }
-                }
-            }
-            ensure!(size == Some(f.size), "not reachable now, or not as said");
-            let got = files.downloader(&self.ep).download(hash, peers).await;
-            got.ok().context(
+            peers.extend(self.stores(space).into_iter().map(|s| s.0.id));
+            // Real size first: a post may claim 1 byte.
+            let size = self.verified(&peers, h).await;
+            ensure!(size == Some(len), "not reachable now, or not as said");
+            let got = self.files.downloader(&self.ep).download(hash, peers);
+            got.await.ok().context(
                 "not reachable now: ask whoever sent it to open irch",
             )?;
         }
-        Ok(files)
+        Ok(&self.files)
     }
 
     async fn export(&self, space: &Id, f: &File, to: &Path) -> Result<()> {
         use iroh_blobs::api::blobs::{ExportMode, ExportOptions};
-        let files = self.pull(space, f).await?;
+        let files = self.pull(space, &f.hash, f.size).await?;
         let hash = iroh_blobs::Hash::from_bytes(f.hash.0);
         let (mode, target) = (ExportMode::TryReference, to.to_path_buf());
         std::fs::remove_file(to)?;
@@ -1833,41 +1904,73 @@ impl Node {
         self.spaces().iter().any(|id| has(id) == Some(true))
     }
 
+    /// An attachment's plaintext, in memory (a preview).
     pub async fn file(
         self: &Arc<Self>,
         space: &Id,
         f: &File,
     ) -> Result<Vec<u8>> {
+        ensure!(f.size <= PREVIEW as u64, "too big to open here: save it");
+        let hash = iroh_blobs::Hash::from_bytes(f.hash.0);
         if f.offered() {
-            ensure!(f.size <= MAX_FILE as u64, "too big to open here: save it");
-            let hash = iroh_blobs::Hash::from_bytes(f.hash.0);
-            let files = self.pull(space, f).await?;
+            let files = self.pull(space, &f.hash, f.size).await?;
             return Ok(files.get_bytes(hash).await?.to_vec());
         }
+        let len = crate::crypto::sealed_len(f.size);
         let ct = match std::fs::read(self.blob(&f.hash)) {
             Ok(ct) => ct,
-            Err(_) => {
-                let sp = self.get(space)?;
-                let (mut peers, mut got, get) =
-                    (sp.nbrs(), None, Ask::Get(f.hash));
-                peers.extend(self.bootstrap(&sp));
-                for p in peers {
-                    let ask = self.ask(p.into(), &get);
-                    let wait =
-                        tokio::time::timeout(Duration::from_secs(20), ask);
-                    if let Ok(Ok(b)) = wait.await
-                        && blake3::hash(&b) == f.hash.0
-                    {
-                        got = Some(b);
-                        break;
-                    }
+            Err(_) => match self.pull(space, &f.hash, len).await {
+                Ok(files) => {
+                    let (n, h) = (self.clone(), (*space, f.hash));
+                    tokio::spawn(async move { n.keep(&h.0, &h.1, None).await });
+                    files.get_bytes(hash).await?.to_vec()
                 }
-                let ct = got.context("nobody reachable has that file now")?;
-                self.keep(space, &f.hash, &ct)?;
-                ct
-            }
+                Err(_) => self.legacy(space, f).await?,
+            },
         };
-        crate::crypto::open(&f.key.0, b"irch file", &ct).context("damaged file")
+        if !ct.starts_with(crate::crypto::STREAM) {
+            let pt = crate::crypto::open(&f.key.0, b"irch file", &ct);
+            return pt.context("damaged file");
+        }
+        let mut pt = vec![];
+        crate::crypto::open_stream(&f.key.0, &ct[..], &mut pt)?;
+        Ok(pt)
+    }
+
+    /// Sealed whole, by an older irch: asked for by hash.
+    async fn legacy(&self, space: &Id, f: &File) -> Result<Vec<u8>> {
+        let sp = self.get(space)?;
+        let (mut peers, get) = (sp.nbrs(), Ask::Get(f.hash));
+        peers.extend(self.bootstrap(&sp));
+        for p in peers {
+            let ask = self.ask(p.into(), &get);
+            let wait = tokio::time::timeout(Duration::from_secs(20), ask);
+            if let Ok(Ok(b)) = wait.await
+                && blake3::hash(&b) == f.hash.0
+            {
+                std::fs::create_dir_all(self.dir.join("blobs"))?;
+                store::write(&self.blob(&f.hash), &b)?;
+                return Ok(b);
+            }
+        }
+        bail!("nobody reachable has that file now")
+    }
+
+    /// A sealed file too big to preview, opened straight into `to`.
+    async fn unseal(&self, space: &Id, f: &File, to: &Path) -> Result<()> {
+        let len = crate::crypto::sealed_len(f.size);
+        let files = self.pull(space, &f.hash, len).await?;
+        let tmp = self.scratch("out")?;
+        files.export(iroh_blobs::Hash::from_bytes(f.hash.0), &tmp).await?;
+        let (key, to, t) = (f.key.0, to.to_path_buf(), tmp.clone());
+        let r = tokio::task::spawn_blocking(move || {
+            let r = std::io::BufReader::new(std::fs::File::open(t)?);
+            let w = std::io::BufWriter::new(std::fs::File::create(to)?);
+            crate::crypto::open_stream(&key, r, w)
+        })
+        .await;
+        let _ = std::fs::remove_file(tmp);
+        Ok(r??)
     }
 
     /// An attachment written into `dir`, never over anything already there.
@@ -1878,10 +1981,8 @@ impl Node {
         dir: &Path,
     ) -> Result<PathBuf> {
         use std::io::{ErrorKind::AlreadyExists, Write};
-        let data = match f.offered() {
-            true => vec![],
-            false => self.file(space, f).await?,
-        };
+        let small = !f.offered() && f.size <= PREVIEW as u64;
+        let data = if small { self.file(space, f).await? } else { vec![] };
         let name = &f.clone().safe().name;
         let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
         let dot = if ext.is_empty() { "" } else { "." };
@@ -1895,9 +1996,12 @@ impl Node {
             match std::fs::File::create_new(&p) {
                 Ok(mut out) => {
                     out.write_all(&data)?;
-                    if f.offered() {
+                    if !small {
                         drop(out);
-                        let got = self.export(space, f, &p).await;
+                        let got = match f.offered() {
+                            true => self.export(space, f, &p).await,
+                            false => self.unseal(space, f, &p).await,
+                        };
                         got.inspect_err(|_| drop(std::fs::remove_file(&p)))?;
                     }
                     // Windows: from the internet, like a browser download.
@@ -1920,7 +2024,7 @@ impl Node {
         let (mut tx, mut rx) = c.open_bi().await?;
         tx.write_all(&postcard::to_allocvec(a)?).await?;
         tx.finish()?;
-        let b = rx.read_to_end(MAX_FILE + 1024).await?;
+        let b = rx.read_to_end(PREVIEW + 1024).await?;
         c.close(0u32.into(), b"done");
         Ok(b)
     }
@@ -1931,8 +2035,8 @@ impl Node {
         let mut head = [0u8; 17];
         rx.read_exact(&mut head).await?;
         let max = match (head[0], self.serve) {
-            (1, Some(t)) if head[1..] == t => MAX_FILE + 16,
-            (1, _) => bail!("not a storage node of yours"),
+            (1 | 2, Some(t)) if head[1..] == t => PREVIEW + 16,
+            (1 | 2, _) => bail!("not a storage node of yours"),
             _ => 64,
         };
         let rest = rx.read_to_end(max).await?;
@@ -1945,7 +2049,34 @@ impl Node {
                 std::fs::create_dir_all(self.dir.join("blobs"))?;
                 store::write(&self.blob(&Id(blake3::hash(&b).into())), &b)?;
             }
-            Ask::Put(..) => bail!("not a storage node of yours"),
+            Ask::Keep(t, h, pw) if self.serve == Some(t) => {
+                let from = c.remote_id();
+                let size = self.verified(&[from], &h).await;
+                let size = size.context("not reachable, or not there")?;
+                let same = |a: &str, b: &str| {
+                    blake3::hash(a.as_bytes()) == blake3::hash(b.as_bytes())
+                };
+                let open = self.big.as_deref().zip(pw.as_deref());
+                if size > crate::crypto::sealed_len(limit())
+                    && !open.is_some_and(|(a, b)| same(a, b))
+                {
+                    let no = "over 5 GB: storage nodes keep it only with their password";
+                    tx.write_all(no.as_bytes()).await?;
+                } else {
+                    let (files, ep) = (self.files.clone(), self.ep.clone());
+                    let hash = iroh_blobs::Hash::from_bytes(h.0);
+                    tokio::spawn(async move {
+                        let got =
+                            files.downloader(&ep).download(hash, vec![from]);
+                        if let Err(e) = got.await {
+                            warn!("keeping a file: {e:#}");
+                        }
+                    });
+                }
+            }
+            Ask::Put(..) | Ask::Keep(..) => {
+                bail!("not a storage node of yours")
+            }
         }
         tx.finish()?;
         let _ = tokio::time::timeout(Duration::from_secs(10), c.closed()).await;

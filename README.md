@@ -32,8 +32,9 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
 - Spaces with channels (admins drag them into order), threads and named
   rooms, replies, reactions, edits, pins, @mentions, Markdown with code
   highlighting and Typst or LaTeX math, `||spoilers||`.
-- DMs, voice messages, files (sealed, to 25 MiB) and shared files of any
-  size served from your device; previews of images, audio, video, PDFs.
+- DMs, voice messages, files sealed in chunks and kept by storage nodes
+  (to 5 GB; more with the node's `--big-password`), or shared from your
+  device at any size; previews of images, audio, video, PDFs.
 - Voice and video calls with screen sharing; a DM call rings like a phone.
 - Notifications on desktops and phones, per space: all, @mentions or none.
 - Search on this device, Ctrl+K switcher, drafts per channel, vim keys
