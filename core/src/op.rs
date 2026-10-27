@@ -45,6 +45,9 @@ pub enum Op {
     Topic { thread: Ch, name: String },
     Order { channels: Vec<Ch> },
     Pin { target: Id, on: bool },
+    // What any member hands a storage node listed by `Host` to keep the
+    // space's small files: derived from its token, opening nothing else.
+    Hold { node: EndpointId, token: [u8; 16] },
 }
 
 impl Op {
