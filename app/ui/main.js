@@ -96,6 +96,8 @@ const ICONS = {
   speaker: "M4 9h4l5-4v14l-5-4H4zM16 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12",
   thread: "M5 4v9a4 4 0 0 0 4 4h10M15 13l4 4-4 4",
   note: "M6 3h12v18l-6-4-6 4zM9 8h6M9 11h4",
+  pin: "M12 16v5M9 3h6l-1 6 4 4v2H6v-2l4-4z",
+  up: "m6 15 6-6 6 6",
 };
 
 function icon(name) {
@@ -171,6 +173,79 @@ const theme = (t) => {
   store.set("theme", t);
 };
 theme(store.get("theme"));
+
+/** A theme at a glance: its ground and accents (UCF: gold on black). */
+const SWATCH = { neon: ["#000", "#b44dff", "#ff2bd6"],
+  midnight: ["#313338", "#5865f2", "#eb459e"],
+  nord: ["#2e3440", "#5e81ac", "#88c0d0"], ucf: ["#000", "#edb80d", "#ffc904"],
+  light: ["#fff", "#5865f2", "#c2187f"] };
+function swatch(k) {
+  const [bg, a, b] = SWATCH[k];
+  const t = document.createElement("template");
+  t.innerHTML = k === "ucf"
+    ? `<svg class="swatch" viewBox="0 0 24 24"><rect width="24" height="24"
+      rx="6" fill="${bg}"/><path d="M3 18h18" stroke="${b}" stroke-width="2"/>
+      <text x="12" y="14" fill="${a}" font-size="8.5" font-weight="900"
+      text-anchor="middle" font-family="system-ui,sans-serif">UCF</text></svg>`
+    : `<svg class="swatch" viewBox="0 0 24 24"><rect width="24" height="24"
+      rx="6" fill="${bg}"/><circle cx="9" cy="12" r="5" fill="${a}"/>
+      <circle cx="15" cy="12" r="5" fill="${b}" opacity=".85"/></svg>`;
+  return t.content.firstChild;
+}
+
+/** Tap to record, tap again to send it: a voice message, as WAV (which
+ *  every system plays), through the calls' microphone worklet. */
+let rec = null;
+async function voice() {
+  if (rec) return rec();
+  if (!chan()) return;
+  let mic, ctx;
+  try {
+    mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+    ctx = new AudioContext({ sampleRate: 16000 });
+    await ctx.audioWorklet.addModule("audio.js");
+  } catch (e) {
+    mic?.getTracks().forEach((t) => t.stop());
+    return toast(`No microphone: ${e?.message ?? e}`, true);
+  }
+  const frames = [];
+  const node = new AudioWorkletNode(ctx, "mic");
+  node.port.onmessage = ({ data }) => frames.push(data);
+  ctx.createMediaStreamSource(mic).connect(node)
+    .connect(new GainNode(ctx, { gain: 0 })).connect(ctx.destination);
+  quiet(ctx.resume());
+  $("mic-btn").classList.add("live");
+  rec = async () => {
+    rec = null;
+    $("mic-btn").classList.remove("live");
+    mic.getTracks().forEach((t) => t.stop());
+    await ctx.close();
+    const at = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-");
+    await addFiles([new File([wav(frames, 16000)], `voice-${at}.wav`)]);
+    send();
+  };
+}
+
+/** Samples as a 16-bit mono WAV file. */
+function wav(frames, rate) {
+  const n = frames.reduce((k, f) => k + f.length, 0);
+  const v = new DataView(new ArrayBuffer(44 + 2 * n));
+  const put4 = (at, s) => [...s].forEach((c, i) => v.setUint8(at + i,
+    c.charCodeAt(0)));
+  put4(0, "RIFF"); v.setUint32(4, 36 + 2 * n, true); put4(8, "WAVE");
+  put4(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+  v.setUint16(22, 1, true); v.setUint32(24, rate, true);
+  v.setUint32(28, 2 * rate, true); v.setUint16(32, 2, true);
+  v.setUint16(34, 16, true); put4(36, "data"); v.setUint32(40, 2 * n, true);
+  let at = 44;
+  for (const f of frames) {
+    for (const x of f) {
+      v.setInt16(at, Math.max(-1, Math.min(1, x)) * 0x7fff, true);
+      at += 2;
+    }
+  }
+  return v.buffer;
+}
 
 // ---------- state ----------
 
@@ -324,7 +399,12 @@ function select(sid, ch) {
       (ch === S.thread?.id ? S.thread.unread : 0);
     cancelReply();
   }
+  const moved = ch !== S.ch;
   S.ch = ch;
+  if (moved) { // the unsent text where it was left
+    $("input").value = store.get(draft()) ?? "";
+    autosize($("input"));
+  }
   quiet(invoke("viewing", { space: sid ?? null, room: ch ?? null }));
   if (ch) store.set("ch." + sid, inThread() ? S.thread.parent : ch);
   document.body.classList.remove("drawer");
@@ -334,6 +414,8 @@ function select(sid, ch) {
   schedule("members", "msgs");
   if (!mobile()) setTimeout(() => $("input").focus({ preventScroll: true }));
 }
+
+const draft = () => `draft.${S.sid}.${S.ch}`;
 
 function stepChannel(d) {
   const list = cur()?.channels ?? [];
@@ -421,6 +503,14 @@ function channelList(s) {
         class: `channel${active ? " active" : ""}` +
           (ch.unread && !active ? " unread" : ""),
         onclick: () => select(s.id, ch.id),
+        // Admins drag channels into order.
+        draggable: s.admin,
+        ondragstart: (e) => e.dataTransfer.setData("ch", ch.id),
+        ondragover: (e) => s.admin && e.preventDefault(),
+        ondrop: (e) => {
+          e.preventDefault();
+          reorder(s, e.dataTransfer.getData("ch"), ch.id);
+        },
       }, icon("hash"), h("span", { class: "name" }, ch.name),
       !active && badge(ch.mentions),
       h("button", {
@@ -429,7 +519,14 @@ function channelList(s) {
       }, icon("plus")),
       s.admin && h("button", {
         class: "gear", title: "Edit Channel",
-        onclick: (e) => { e.stopPropagation(); editChannel(ch); },
+        onclick: (e) => {
+          e.stopPropagation();
+          menu(e.currentTarget, [
+            ["Rename or Delete", "pencil", () => editChannel(ch)],
+            ["Move Up", "up", () => reorder(s, ch.id, -1)],
+            ["Move Down", "chevron", () => reorder(s, ch.id, 1)],
+          ]);
+        },
       }, icon("gear")), ch.call.length > 0 && icon("speaker"));
     }).flatMap((row, i) => [row, callers(s.channels[i].call),
       ...s.channels[i].threads.map((t) => threadRow(s, t))]),
@@ -580,6 +677,7 @@ function renderHeader() {
     $(id).classList.toggle("hidden", !s || (id === "members" && s.dm));
   }
   $("members-btn").classList.toggle("hidden", !s || s.dm);
+  $("pins-btn").classList.toggle("hidden", !ch);
   $("empty").classList.toggle("hidden", !!s);
   renderCall();
   put($("welcome"),
@@ -804,7 +902,7 @@ function renderMessages(keepScroll) {
     const editing = S.editing === m.id;
     const authorAdmin = memberOf(m.author)?.role === "Admin";
     const sig = JSON.stringify([m.text, m.edited, m.name, m.reactions, m.quote,
-      m.thread, cont, mentioned, editing, admin, authorAdmin]);
+      m.thread, m.pinned, cont, mentioned, editing, admin, authorAdmin]);
     items.push({ k: m.id, sig,
       make: () => msgRow(m, { cont, mentioned, editing, authorAdmin }) });
     prev = m;
@@ -848,7 +946,7 @@ function mentionsMe(m) {
 function msgRow(m, { cont, mentioned, editing, authorAdmin }) {
   const row = h("div", {
     class: `msg${cont ? " cont" : ""}${mentioned ? " mentioned" : ""}` +
-      (m.reply ? " has-reply" : ""),
+      (m.reply ? " has-reply" : "") + (m.pinned ? " pinned" : ""),
     "data-id": m.id,
   });
   if (m.reply) row.append(replyRef(m));
@@ -1039,6 +1137,13 @@ function image(f) {
 
 function attachments(files) {
   return h("div", { class: "attachments" }, files.map((f) => {
+    const type = MEDIA[f.name.split(".").pop().toLowerCase()];
+    if (type?.startsWith("audio")) { // a voice message, say: played here
+      const a = h("audio", { controls: true, preload: "none" });
+      rpc("file", { space: S.sid, file: f })
+        .then((b64) => a.src = `data:${type};base64,${b64}`, () => {});
+      return h("div", { class: "voice" }, a, fileChip(f));
+    }
     if (!mime(f.name)) return fileChip(f);
     const img = h("img", { class: "attachment", alt: f.name, title: f.name });
     const box = h("div", { class: "image loading" }, img);
@@ -1208,6 +1313,8 @@ function toolbar(m) {
     tool("reply", "Reply", () => startReply(m)),
     !inThread() && tool("thread", "Reply in thread", () => openThread(m.id)),
     tool("note", "Add to notes", () => toNotes(m)),
+    tool("pin", m.pinned ? "Unpin" : "Pin",
+      () => publish({ Pin: { target: m.id, on: !m.pinned } })),
     mine && tool("pencil", "Edit", () => startEdit(m)),
     (mine || cur()?.admin) &&
       tool("trash", "Delete (hold Shift to skip confirmation)",
@@ -1753,11 +1860,11 @@ function settings() {
               ? " on" : ""),
             onclick: (e) => {
               theme(k);
-              for (const c of e.target.parentNode.children) {
-                c.classList.toggle("on", c === e.target);
+              for (const c of e.currentTarget.parentNode.children) {
+                c.classList.toggle("on", c === e.currentTarget);
               }
             },
-          }, v))),
+          }, swatch(k), v))),
         h("label", {}, "User ID (your public key)"),
         h("div", { class: "row" },
           h("input", { class: "field mono", type: "text", value: S.me.id,
@@ -2079,6 +2186,31 @@ async function editChannel(ch) {
 
 const slug = (s) => s.trim().toLowerCase().replace(/\s+/g, "-");
 
+/** `id` moved by a step (-1, 1) or to where `to` is, for everyone. */
+function reorder(s, id, to) {
+  const ids = s.channels.map((c) => c.id);
+  const from = ids.indexOf(id);
+  const at = typeof to === "number" ? from + to : ids.indexOf(to);
+  if (from < 0 || at < 0 || at >= ids.length || at === from) return;
+  ids.splice(at, 0, ...ids.splice(from, 1));
+  publish({ Order: { channels: ids } });
+}
+
+/** The channel's pinned messages; one picked is shown. */
+async function pinsFlow() {
+  const pins = await rpc("pins", { space: S.sid, channel: S.ch })
+    .catch(() => []);
+  const id = await modal((finish) => h("div", { class: "m-body" },
+    h("h2", {}, "Pinned"),
+    pins.length ? h("div", { class: "qs-list" }, pins.map((m) =>
+      h("div", { class: "qs-item", onclick: () => finish(m.id) },
+        h("b", {}, m.name), " ",
+        inl(inline((m.text || "(file)").split("\n")[0])))))
+      : h("p", { class: "sub" }, "Nothing pinned here yet: pin a message " +
+        "from its menu.")));
+  if (id) jumpTo(id);
+}
+
 async function renameSpace() {
   const name = await ask({ title: "Rename Space", label: "Space name",
     value: cur().name });
@@ -2320,6 +2452,7 @@ async function send() {
   if ((!text && !files.length) || !s || !ch) return;
   const reply = S.reply?.id ?? null;
   input.value = "";
+  store.set(draft(), "");
   S.files = [];
   renderFilesBar();
   autosize(input);
@@ -2344,6 +2477,13 @@ function wire() {
   $("members-btn").append(icon("users"));
   $("search-btn").append(icon("search"));
   $("search-btn").onclick = () => searchFlow();
+  $("pins-btn").append(icon("pin"));
+  $("pins-btn").onclick = pinsFlow;
+  $("latest").append(icon("chevron"));
+  $("latest").onclick = () => ($("scroller").scrollTop = 1e9);
+  $("mic-btn").append(icon("mic"));
+  $("mic-btn").onclick = voice;
+  $("mic-btn").classList.toggle("hidden", !window.AudioWorkletNode);
   $("call-btn").onclick = ring;
   av.call.changed = renderCall;
   // Tiles follow who speaks and whose video still arrives.
@@ -2428,6 +2568,7 @@ function wire() {
   mentionPicker(input);
   input.addEventListener("input", () => {
     autosize(input);
+    store.set(draft(), input.value);
     const s = cur();
     const ch = chan();
     if (input.value.trim() && s && ch && Date.now() - S.lastTyping > 4000) {
@@ -2451,6 +2592,8 @@ function wire() {
   const sc = $("scroller");
   sc.addEventListener("scroll", () => {
     if (sc.scrollTop < 300) loadOlder();
+    $("latest").classList.toggle("hidden",
+      sc.scrollHeight - sc.scrollTop - sc.clientHeight < 400);
     if (nearBottom() && chan()?.unread) markRead();
   }, { passive: true });
   addEventListener("focus", () => nearBottom() && markRead());

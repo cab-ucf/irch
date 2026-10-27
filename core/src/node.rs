@@ -1348,7 +1348,8 @@ impl Node {
             Op::Topic { name: n, .. } => n.is_empty() || fits(n, MAX_NAME),
             Op::React { emoji, .. } => fits(emoji, 32),
             Op::Role { role, .. } => *role != Role::Banned,
-            Op::Edit { .. } | Op::Channel { .. } => true,
+            Op::Order { channels } => channels.len() <= 500,
+            Op::Edit { .. } | Op::Channel { .. } | Op::Pin { .. } => true,
             _ => false,
         };
         ensure!(ok, "that cannot be sent (empty, too long, or not allowed)");

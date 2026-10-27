@@ -50,6 +50,10 @@ pub enum Op {
     Store { node: EndpointId, space: Id, on: bool },
     // A thread's name: its starter's, or an admin's, newest wins.
     Topic { thread: Ch, name: String },
+    // The channels' order: an admin's, newest wins.
+    Order { channels: Vec<Ch> },
+    // A message pinned in its channel, or not: newest wins.
+    Pin { target: Id, on: bool },
 }
 
 impl Op {

@@ -34,6 +34,7 @@ pub struct Message {
     pub quote: Option<Quote>,
     pub reactions: Vec<(String, Vec<Id>)>,
     pub files: Vec<File>,
+    pub pinned: bool,
     /// Replies in its thread.
     pub thread: usize,
 }
@@ -96,11 +97,13 @@ pub struct State {
     edits: HashMap<Id, BTreeMap<Pos, (Id, Option<String>)>>,
     topics: HashMap<Ch, BTreeMap<Pos, (Id, String)>>,
     reacts: HashMap<Id, Reacts>,
+    pins: HashMap<Id, (Pos, Id, bool)>,
     authors: HashMap<Id, u64>,
     devices: HashMap<(EndpointId, Id), u64>,
     // Derived from `control` by `refold`:
     name: Option<String>,
     channels: BTreeMap<Ch, String>,
+    order: Vec<Ch>,
     profiles: HashMap<Id, (String, Vec<u8>)>,
     profiled: HashMap<Id, Pos>,
     roles: HashMap<Id, Role>,
@@ -172,6 +175,13 @@ impl State {
                     ),
                 }
             }
+            Op::Pin { target, on } => match self.pins.get(&target) {
+                Some((p, ..)) if *p >= at => (false, false),
+                _ => {
+                    let v = (at, s.author, on);
+                    (self.pins.insert(target, v) != Some(v), false)
+                }
+            },
             Op::Push { url } => match self.pushes.get(&(s.author, s.device)) {
                 Some((p, _)) if *p >= at => (false, false),
                 _ => {
@@ -194,6 +204,7 @@ impl State {
 
     fn refold(&mut self) {
         (self.name, self.channels) = (None, BTreeMap::new());
+        self.order = vec![];
         (self.profiles, self.roles) = (HashMap::new(), HashMap::new());
         self.profiled = HashMap::new();
         (self.epochs, self.hosts, self.bans) =
@@ -225,6 +236,9 @@ impl State {
                         }
                         None => drop(self.channels.remove(id)),
                     }
+                }
+                Op::Order { channels } if admin => {
+                    self.order = channels.clone()
                 }
                 Op::Role { user, role: r } if admin && *user != self.owner => {
                     let admins =
@@ -368,10 +382,24 @@ impl State {
     }
 
     pub fn channels(&self) -> Vec<(Ch, String)> {
+        let at = |c: &Ch| self.order.iter().position(|o| o == c);
         let mut v: Vec<_> =
             self.channels.iter().map(|(i, n)| (*i, n.clone())).collect();
-        v.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+        // An admin's order; channels it leaves out after, by name.
+        v.sort_by_key(|(c, n)| (at(c).unwrap_or(usize::MAX), n.clone(), *c));
         v
+    }
+
+    /// A channel's pinned messages, newest pin first.
+    pub fn pins(&self, ch: &Ch) -> Vec<Message> {
+        let mut v: Vec<_> = (self.pins.iter())
+            .filter_map(|(id, (at, ..))| {
+                let (c, m) = self.message(id)?;
+                (c == *ch && m.pinned).then_some((*at, m))
+            })
+            .collect();
+        v.sort_by(|a, b| b.0.cmp(&a.0));
+        v.into_iter().map(|p| p.1).collect()
     }
 
     /// The thread `ch` is: on a message in a channel, never in a thread.
@@ -621,6 +649,9 @@ impl State {
         let (author, name) = (p.author, self.display_name(&p.author));
         let reactions = reactions.into_iter().collect();
         let (reply, files) = (p.reply, p.files.clone());
+        let pinned = self.pins.get(&id).is_some_and(|(at, by, on)| {
+            *on && self.role(by) != Role::Banned && !self.stale_at(at, by)
+        });
         let t = self.posts.get(&id.thread()).and(self.thread(&id.thread()));
         let thread = t.map_or(0, |t| t.count);
         Some(Message {
@@ -634,6 +665,7 @@ impl State {
             quote,
             reactions,
             files,
+            pinned,
             thread,
         })
     }
@@ -843,6 +875,34 @@ mod tests {
         assert_eq!(st.rooms().last(), Some(&(t.id, t.name)));
         st.extend([op(6, o, Op::Channel { id: CH, name: None })]);
         assert!(st.threads().is_empty() && st.thread(&root.thread()).is_none());
+    }
+
+    #[test]
+    fn an_admin_orders_channels_and_anyone_pins() {
+        let [o, a, _] = people();
+        let mut st = State::new(&Invite::new(o, "", None));
+        let (x, y) = (Ch([1; 8]), Ch([2; 8]));
+        let names = |st: &State| {
+            st.channels().into_iter().map(|c| c.1).collect::<Vec<_>>()
+        };
+        st.extend([
+            op(1, o, Op::Channel { id: CH, name: Some("general".into()) }),
+            op(2, o, Op::Channel { id: x, name: Some("b".into()) }),
+            op(3, o, Op::Channel { id: y, name: Some("a".into()) }),
+        ]);
+        assert_eq!(names(&st), ["a", "b", "general"], "by name");
+        st.extend([op(4, o, Op::Order { channels: vec![CH, x] })]);
+        assert_eq!(names(&st), ["general", "b", "a"], "theirs, then the rest");
+        st.extend([op(5, a, Op::Order { channels: vec![y] })]);
+        assert_eq!(names(&st), ["general", "b", "a"], "not a member's");
+
+        st.extend([op(6, a, post("hi", None))]);
+        let pinned = |st: &State| st.pins(&CH).len();
+        st.extend([op(7, a, Op::Pin { target: Id([6; 32]), on: true })]);
+        assert_eq!(pinned(&st), 1);
+        assert!(st.message(&Id([6; 32])).unwrap().1.pinned);
+        st.extend([op(8, o, Op::Pin { target: Id([6; 32]), on: false })]);
+        assert_eq!(pinned(&st), 0, "newest wins");
     }
 
     #[test]

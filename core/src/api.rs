@@ -35,6 +35,10 @@ pub enum Call {
         space: Id,
         channel: Ch,
     },
+    Pins {
+        space: Id,
+        channel: Ch,
+    },
     MarkRead {
         space: Id,
         channel: Ch,
@@ -181,6 +185,9 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
             }))
             .flatten()
         ),
+        Call::Pins { space, channel } => {
+            json!(n.view(&space, |s| s.pins(&channel)).unwrap_or_default())
+        }
         Call::MarkRead { space, channel } => {
             json!(n.mark_read(&space, &channel))
         }
