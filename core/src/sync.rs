@@ -1,5 +1,4 @@
 //! Set reconciliation over one QUIC stream; gossip's safety net.
-//!
 //! ```text
 //! A → B  Hello { space, root, token, devices }   root: hash of day buckets
 //! B → A  None (same) | Some(B's buckets)    (unknown space: stream closed)
@@ -7,9 +6,8 @@
 //! B → A  ids B wants, then the items A lacks, then an empty frame
 //! A → B  the items B wants, then an empty frame; B finishes, A closes
 //! ```
-//! Items are opaque envelopes, so peers that cannot read a space (storage
-//! nodes) reconcile it too. Fingerprints hash sorted ids, never XOR them.
-//! Lists arrive as maps and sets: whatever a peer repeats counts once.
+//! Items are opaque, so storage nodes reconcile too. Fingerprints hash
+//! sorted ids, never XOR them; lists are sets, so repeats count once.
 
 use crate::Id;
 use crate::node::{Node, Space};
@@ -30,7 +28,7 @@ pub struct Hello {
     pub space: Id,
     root: [u8; 32],
     pub token: Option<[u8; 16]>,
-    // With the token: the devices a storage node may take this space from.
+    // With a token: the devices a storage node may take this space from.
     pub devices: Vec<EndpointId>,
 }
 
@@ -38,7 +36,6 @@ pub fn root(b: &[Bucket]) -> [u8; 32] {
     blake3::hash(&postcard::to_allocvec(b).expect("buckets")).into()
 }
 
-/// Reconcile `sp` with the peer behind `c`; returns how many ops were new.
 pub async fn initiate(
     n: &Arc<Node>,
     sp: &Arc<Space>,
@@ -64,13 +61,12 @@ pub async fn initiate(
     let got = take(n, sp, &mut rx).await?;
     give(sp, &mut tx, &want.into_iter().collect::<Vec<_>>()).await?;
     tx.finish()?;
-    // Closing now could drop what is still in flight: wait for B's end.
+    // Closing now could drop what is in flight: wait for B's end.
     let _ = rx.read_to_end(0).await;
     Ok(got)
 }
 
-/// Serve one session, then let its last bytes land before we go.
-/// Sessions answered at once: past that, refused (a peer retries).
+/// Past this many at once, refused (peers retry).
 static SESSIONS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(32);
 
 pub async fn respond(n: &Arc<Node>, c: &Connection) -> Result<()> {
@@ -96,7 +92,7 @@ async fn session(n: &Arc<Node>, c: &Connection) -> Result<()> {
     write(&mut tx, &Some(mine)).await?;
     let keep = n.takes(&sp, &c.remote_id());
     let (mut want, mut have): (Vec<Id>, Vec<Id>) = (vec![], vec![]);
-    // What they hold of the days that differ: 500,000 ids at most.
+    // 500,000 ids at most.
     let days: BTreeMap<u32, BTreeSet<Id>> =
         postcard::from_bytes(&unframe(&mut rx, 16 << 20).await?)?;
     for (day, theirs) in days {
@@ -122,7 +118,6 @@ async fn give(sp: &Space, tx: &mut SendStream, ids: &[Id]) -> Result<()> {
     frame(tx, &[]).await
 }
 
-/// Receive items up to the empty frame, ingesting 512 at a time.
 async fn take(
     n: &Arc<Node>,
     sp: &Arc<Space>,

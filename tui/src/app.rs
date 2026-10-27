@@ -1,5 +1,3 @@
-//! The terminal client: the core's state on screen, IRC-style commands.
-
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use crossterm::event::{Event as Term, EventStream, KeyCode, KeyEvent};
 use crossterm::event::{KeyEventKind, KeyModifiers};
@@ -137,7 +135,6 @@ impl App {
         false
     }
 
-    /// Tell the channel we are typing, at most every four seconds.
     async fn typed(&mut self) {
         let due = self.typed.is_none_or(|t| t.elapsed().as_secs() >= 4);
         if let Some((s, Some(c))) = self.at
@@ -396,8 +393,7 @@ impl App {
         Ok(false)
     }
 
-    /// Sidebar rows: each space's channels, each followed by its threads
-    /// active this week; or the space while it syncs.
+    /// Channels, each with its threads of this week; a syncing space alone.
     fn rows(&self) -> Vec<(Id, Option<Ch>)> {
         let mut v = vec![];
         let week = irch_core::now().saturating_sub(7 * 86_400_000);
@@ -423,7 +419,6 @@ impl App {
         (self.at, self.scroll) = (rows.get(i as usize).copied(), 0);
     }
 
-    /// Keep the selection pointing at something that still exists.
     fn fix(&mut self) {
         let rows = self.rows();
         let space = self.at.map(|a| a.0);
@@ -656,7 +651,6 @@ fn rand() -> [u8; 8] {
     irch_core::crypto::rand()
 }
 
-/// Ask the terminal to put `text` on the clipboard.
 fn osc52(text: &str) {
     use std::io::Write;
     let b64 = data_encoding::BASE64.encode(text.as_bytes());
@@ -664,7 +658,6 @@ fn osc52(text: &str) {
     let _ = write!(out, "\x1b]52;c;{b64}\x07").and_then(|_| out.flush());
 }
 
-/// Neon edges, as in the app.
 fn panel<'a>(title: impl Into<Line<'a>>) -> Block<'a> {
     Block::bordered().border_style(Color::Magenta).title(title)
 }

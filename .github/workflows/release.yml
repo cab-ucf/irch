@@ -1,11 +1,8 @@
-# A tag `vX.Y.Z` (or this run by hand, naming one: the release makes the
-# tag at this commit) publishes a release the apps update from: signed desktop
-# bundles with Tauri's latest.json, and an APK under irch's signing key.
+# A tag vX.Y.Z (or a run naming one, tagged here) publishes a signed release.
 # Secrets: TAURI_SIGNING_PRIVATE_KEY(_PASSWORD), ANDROID_KEYSTORE (base64),
-# ANDROID_KEYSTORE_PASSWORD. With an Apple Developer ID, also APPLE_CERTIFICATE
-# (base64 .p12), APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY, APPLE_ID,
-# APPLE_PASSWORD (app-specific), APPLE_TEAM_ID: macOS builds are then
-# notarized, and open from a browser download without a question.
+# ANDROID_KEYSTORE_PASSWORD; to notarize macOS builds, APPLE_CERTIFICATE
+# (base64 .p12), APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
+# APPLE_ID, APPLE_PASSWORD (app-specific), APPLE_TEAM_ID.
 name: release
 on:
   push:
@@ -48,8 +45,7 @@ jobs:
           libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev
           libjavascriptcoregtk-4.1-dev librsvg2-dev
       - run: cargo install tauri-cli --version 2.12.4 --locked
-      # A tag is only ever a version, and the one irch says it is: anything
-      # else would reach sed (and the shell), or update forever.
+      # Only irch's own version: else it reaches sed, or updates forever.
       - name: The tag is the version
         shell: bash
         run: |
@@ -84,8 +80,7 @@ jobs:
           tagName: ${{ env.TAG }}
           releaseName: irch ${{ env.TAG }}
           includeUpdaterJson: false
-      # Linux: static (musl), so it runs on any distribution, NixOS too.
-      # Signed like the app: it updates itself, checking that signature.
+      # Static on Linux, for any distribution; signed, as it updates itself.
       - name: The terminal client and storage node, beside the app
         shell: bash
         env:
@@ -146,8 +141,7 @@ jobs:
         # Phones only: x86_64 is for emulators, which build their own.
         run: NDK_HOME="$ANDROID_NDK_LATEST_HOME" cargo tauri android build
           --ci --apk --target aarch64
-      # Android's key for Android; irch's too, which irch checks before
-      # it installs an update.
+      # Android's key, and irch's, which irch checks before updating.
       - name: Sign with irch's keys, attach to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -171,8 +165,7 @@ jobs:
             true # made meanwhile by a desktop job
           gh release upload "$TAG" irch.apk irch.apk.sig --clobber
 
-  # One latest.json from every signature: jobs that each merged their own
-  # into it raced, and the last one's won.
+  # One latest.json, here: jobs merging their own into it raced.
   updater:
     needs: desktop
     if: ${{ !cancelled() }}
@@ -198,8 +191,7 @@ jobs:
           out = {}
           for sig in sorted(glob.glob("*.sig")):
               name = sig[:-4]
-              # The CLI's, the source's and the APK's: they update
-              # themselves.
+              # The CLI, source and APK update themselves.
               if re.match(r"irch-(x86_64|aarch64)-|source|irch\.apk", name):
                   continue
               a = cpu[re.search("amd64|x86_64|x64|aarch64|arm64", name)[0]]

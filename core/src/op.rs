@@ -1,6 +1,5 @@
-//! Ops: small signed facts, sealed under a space's epoch key. On the wire
-//! and on disk an op is an [`Env`]: epoch tag, time, and ciphertext that
-//! hides author, device, signature and content.
+//! Signed ops, sealed under a space's epoch key. An [`Env`] shows only the
+//! epoch tag and time; author, device and signature are ciphertext too.
 
 use crate::crypto::{self, Key, kdf};
 use crate::{Ch, Id};
@@ -9,50 +8,42 @@ use data_encoding::BASE32_NOPAD_NOCASE as B32;
 use iroh::{EndpointAddr, EndpointId, PublicKey, SecretKey, Signature};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-/// The largest envelope: a rekey of a few thousand members.
+/// A rekey of a few thousand members.
 pub const MAX_ENV: usize = 4 << 20;
 
 /// Append variants only: postcard tags are positions.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum Op {
-    // Your name, and the key that rekeys reach you with.
+    // `kem`: the key rekeys reach you by.
     Profile { name: String, kem: Vec<u8> },
     Rename { name: String },
-    // `None` deletes.
-    Channel { id: Ch, name: Option<String> },
+    Channel { id: Ch, name: Option<String> }, // `None` deletes
     Role { user: Id, role: Role },
     Post { channel: Ch, text: String, reply: Option<Id>, files: Vec<File> },
-    // `None` deletes.
-    Edit { target: Id, text: Option<String> },
+    Edit { target: Id, text: Option<String> }, // `None` deletes
     React { target: Id, emoji: String, on: bool },
-    // A new epoch key, boxed to every member left.
     Rekey { epoch: [u8; 8], boxes: Vec<(Id, Vec<u8>)> },
-    // Sealed under a new epoch: the key it replaced, so history stays.
+    // Under a new epoch, the key it replaced: history stays readable.
     Back { key: Key },
-    // An always-on peer that keeps this space's ciphertext.
+    // An always-on peer keeping this space's ciphertext.
     Host { node: EndpointAddr, on: bool },
     // A direct-message invite only its recipient opens.
     Knock { sealed: Vec<u8> },
-    // In your own space, on every device: what you joined and left.
+    // In your own space: what you joined and left.
     Joined { invite: Invite },
     Left { space: Id },
     Storage { addr: EndpointAddr, token: [u8; 16], on: bool },
-    // Live only: never stored, synced or folded.
     Typing { channel: Ch },
     Here,
-    // In a channel's call (or out of any); offline (invisible, or quit).
+    // `None`: in no call. `Gone`: invisible, or quit.
     Call { channel: Option<Ch> },
     Gone,
-    // Where to wake the signing device when someone writes (UnifiedPush).
+    // Where to wake the signing device (UnifiedPush).
     Push { url: Option<String> },
-    // Own space: whether our storage node keeps a space (it always keeps
-    // the own space).
+    // Own space: whether our storage node keeps a space (always its own).
     Store { node: EndpointId, space: Id, on: bool },
-    // A thread's name: its starter's, or an admin's, newest wins.
     Topic { thread: Ch, name: String },
-    // The channels' order: an admin's, newest wins.
     Order { channels: Vec<Ch> },
-    // A message pinned in its channel, or not: newest wins.
     Pin { target: Id, on: bool },
 }
 
@@ -73,7 +64,6 @@ fn hidden(c: char) -> bool {
             | '\u{2066}'..='\u{2069}' | '\u{feff}')
 }
 
-/// A name as others' ops give it: nothing hidden, at most 64 bytes.
 pub fn name(n: &str) -> String {
     let mut n: String = n.chars().filter(|c| !hidden(*c)).collect();
     while n.len() > 64 {
@@ -82,8 +72,7 @@ pub fn name(n: &str) -> String {
     n.trim().to_string()
 }
 
-/// An attachment. Its ciphertext lives apart, named by its BLAKE3 hash;
-/// the key travels only inside the sealed post.
+/// Ciphertext stored apart by BLAKE3 hash; the key only in the sealed post.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct File {
     pub name: String,
@@ -92,18 +81,15 @@ pub struct File {
     pub key: Id,
 }
 
-/// A file's key when it is not sealed: its sender's devices serve it.
+/// An unsealed file's key: its sender's devices serve it.
 pub const OFFERED: Id = Id([0; 32]);
 
 impl File {
-    /// Kept on its sender's device rather than sealed for storage nodes.
     pub fn offered(&self) -> bool {
         self.key == OFFERED
     }
 
-    /// The name, safe to show and to save anywhere: no control or
-    /// direction characters (`photo\u{202e}gnp.exe`), nothing Windows
-    /// reserves.
+    /// Safe to show and save: nothing hidden, nothing Windows reserves.
     pub fn safe(mut self) -> Self {
         let bad = |c: char| hidden(c) || "<>:\"/\\|?*".contains(c);
         let n: String = self.name.chars().filter(|c| !bad(*c)).collect();
@@ -130,14 +116,12 @@ pub enum Role {
     Banned,
 }
 
-/// Everything needed to enter a space: shared out of band.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Invite {
     pub owner: Id,
     pub nonce: [u8; 16],
     pub key: Key,
     pub name: String,
-    /// A direct-message space: who it is with.
     pub dm: Option<Id>,
     pub peers: Vec<EndpointAddr>,
 }
@@ -190,7 +174,6 @@ struct Inner {
     op: Op,
 }
 
-/// An opened, verified op.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Signed {
     pub id: Id,
@@ -198,7 +181,6 @@ pub struct Signed {
     pub device: EndpointId,
     pub ts: u64,
     pub op: Op,
-    /// The epoch whose key sealed it.
     pub epoch: [u8; 8],
 }
 

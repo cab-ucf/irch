@@ -1,13 +1,13 @@
 /* irch: neon on black. No external fonts or assets (CSP). */
 
 :root {
-  --bg-1: #000; /* dialog footers */
-  --bg-2: #000; /* sidebars */
-  --bg-3: #000; /* chat */
-  --bg-4: #150b24; /* composer, chips */
-  --bg-float: #0e0719; /* menus, tooltips, dialogs */
-  --field: #160c26; /* inputs, code */
-  --line: rgba(180, 77, 255, 0.24); /* panel edges */
+  --bg-1: #000;
+  --bg-2: #000;
+  --bg-3: #000;
+  --bg-4: #150b24;
+  --bg-float: #0e0719;
+  --field: #160c26;
+  --line: rgba(180, 77, 255, 0.24);
   --hover: rgba(180, 77, 255, 0.12);
   --active: rgba(180, 77, 255, 0.24);
   --msg-hover: rgba(180, 77, 255, 0.06);
@@ -21,7 +21,7 @@
   --cyan: #00e5ff;
   --soft: #ecd2ff;
   --neon: linear-gradient(135deg, var(--brand), var(--pink));
-  --on-brand: #fff; /* text on --neon */
+  --on-brand: #fff;
   --glow: 0 0 14px rgba(255, 43, 214, 0.45);
   --green: #39ff9a;
   --red: #ff2d6f;
@@ -39,7 +39,6 @@
     monospace;
   color-scheme: dark;
 }
-/* Other themes (My Account): the same names, other colors. */
 :root[data-theme="midnight"] {
   --bg-1: #232428; --bg-2: #2b2d31; --bg-3: #313338; --bg-4: #383a40;
   --bg-float: #111214; --field: #1e1f22;
@@ -67,7 +66,6 @@
   --scroll: #4c566a; --grey: #4c566a; --grey-hover: #5e6a82;
 }
 :root[data-theme="ucf"] {
-  /* UCF's colors: Bold Gold #edb80d and Bright Gold #ffc904 on black. */
   --bg-1: #000; --bg-2: #0d0d0d; --bg-3: #000; --bg-4: #1c1c1c;
   --bg-float: #141414; --field: #1c1c1c;
   --line: rgba(237, 184, 13, 0.22); --border: rgba(237, 184, 13, 0.18);
@@ -185,7 +183,6 @@ svg.icon {
 }
 #server-header button { display: grid; color: var(--muted); }
 #server-header button:hover { color: var(--pink); }
-/* A space: its name folds its channels. */
 .space {
   display: flex;
   align-items: center;
@@ -479,7 +476,6 @@ svg.icon {
   text-transform: uppercase;
 }
 
-/* IRC-dense: time, nick, text; a new speaker gets a little air. */
 .msg {
   position: relative;
   display: grid;
@@ -561,7 +557,7 @@ table.keys kbd {
 /* Temml makes every <math> a flexbox; Typst's need MathML's own layout. */
 .typst math { display: math; }
 .typst math[display="block"] { display: block math; }
-/* Code: Prism's token types, in the neon palette. */
+/* Code: Prism's tokens */
 .tok.comment, .tok.prolog, .tok.doctype, .tok.cdata { color: var(--dim); }
 .tok.keyword, .tok.important, .tok.atrule, .tok.selector { color: var(--pink); }
 .tok.string, .tok.char, .tok.regex, .tok.attr-value { color: var(--cyan); }
@@ -1180,7 +1176,6 @@ dialog .m-foot .spacer { flex: 1; }
     box-shadow: -8px 0 16px rgba(0, 0, 0, 0.3);
   }
   #menu-btn { display: grid; }
-  /* Narrow: time and nick above, the text the full width. */
   .msg { padding-right: 16px; grid-template-columns: auto minmax(0, 1fr); }
   .msg .author { text-align: left; }
   .msg > :not(.head, .side-time, .toolbar) { grid-column: 1 / -1; }
@@ -1377,7 +1372,6 @@ dialog:has(.preview) { width: min(900px, calc(100vw - 32px)); }
 .preview :is(video, audio) { width: 100%; max-height: 60vh; }
 .preview pre { font: 13px/1.45 var(--mono); white-space: pre-wrap; margin: 0; }
 
-/* Chat first: a channel's start is one modest line, not a banner. */
 #welcome .big, #welcome .avatar.big { display: none; }
 #welcome h1 { font-size: 20px; margin: 0 0 2px; }
 #health:empty { display: none; }
@@ -1390,7 +1384,7 @@ dialog:has(.preview) { width: min(900px, calc(100vw - 32px)); }
 .check { margin: 4px 0; color: var(--red); font-size: 14px; }
 .check.ok { color: var(--green); }
 
-/* The camera, reading a QR code. */
+/* QR scanner */
 video.scan {
   width: 100%;
   max-height: 50vh;

@@ -1,7 +1,5 @@
-// Calls: the page captures, encodes and decodes (WebCodecs); irch carries
-// the frames over iroh, peer to peer. A frame is kind (0 audio, 1 video,
-// 2 keyframe) ‖ codec ‖ timestamp (f64) ‖ data; frames heard arrive with
-// the sender's 32-byte id in front.
+// Frame: kind (0 audio, 1 video, 2 key) ‖ codec ‖ f64 timestamp ‖ data;
+// heard ones lead with the sender's 32-byte id.
 
 const core = window.__TAURI__?.core;
 const VIDEO = ["vp8", "avc1.42E01F"];
@@ -18,15 +16,14 @@ export const call = {
   cam: false,
   screen: false,
   self: null, // <video> of what we send
-  level: 0, // how loud we are
+  level: 0,
   peers: new Map(), // id -> { canvas, video (last frame), level, ... }
   changed: () => {},
-  // Why video fails here (the page says so, once): silent, it never shows.
+  // Why video fails, said once: silent, it would just never show.
   trouble: () => {},
 };
 
-// Software VP8 where it can be: some phones' hardware encoders take
-// frames and never give any back.
+// Some phones' hardware encoders take frames and never give any back.
 const SOFT = { hardwareAcceleration: "prefer-software" };
 
 export const supported = () => typeof AudioEncoder === "function" &&
@@ -91,7 +88,6 @@ export async function leave(rpc) {
   await quiet(rpc("hangup"));
 }
 
-/** Send the camera, the screen, or (null) no video. */
 export async function video(kind) {
   clearInterval(timer);
   shut(venc);
@@ -100,7 +96,6 @@ export async function video(kind) {
   if (kind && call.on) {
     const m = navigator.mediaDevices;
     const fps = kind === "screen" ? 10 : 15;
-    // A phone held upright sends upright video.
     const tall = matchMedia("(pointer: coarse) and (orientation: portrait)");
     const [x, y] = tall.matches ? [480, 640] : [640, 480];
     const s = await (kind === "screen"

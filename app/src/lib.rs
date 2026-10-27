@@ -16,23 +16,21 @@ use tokio::sync::{broadcast::error::RecvError, watch};
 
 type Started = Option<Result<Arc<Node>, String>>;
 
-/// The node, whoever started it: the app, or a push wake (android.rs).
+/// Shared with push wakes (android.rs).
 static NODE: std::sync::Mutex<Option<Arc<Node>>> = std::sync::Mutex::new(None);
-/// irch is in sight (phones; desktops always are). Only the activity's
-/// app says so: a process Android starts for the service alone is not.
+/// In sight; never in a process Android started for the service alone.
 #[cfg(target_os = "android")]
 static FG: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// The room on screen: its messages need no notification while in sight.
+/// The room on screen: no notifications for it while in sight.
 static VIEW: std::sync::Mutex<Option<(Id, Ch)>> = std::sync::Mutex::new(None);
 
-/// Android: in sight, the node runs; out of it for a minute, it stops
-/// (no keepalives: they wake the radio every few seconds). Pushes wake it.
+/// Out of sight a minute, the node stops: keepalives would wake the radio.
 #[cfg(target_os = "android")]
 async fn seen(app: &AppHandle, fg: bool) {
     use std::sync::atomic::Ordering::SeqCst;
-    // Only a change counts: in sight at launch, the app is starting.
+    // Only a change counts: at launch, the app starts the node itself.
     if FG.swap(fg, SeqCst) == fg {
         return;
     }
@@ -51,8 +49,6 @@ async fn seen(app: &AppHandle, fg: bool) {
     }
 }
 
-/// Stop the node, out of sight and out of any call; it starts again on
-/// return, or on a push.
 #[cfg(target_os = "android")]
 async fn nap() {
     use std::sync::atomic::Ordering::SeqCst;
@@ -88,7 +84,6 @@ fn config(
     Ok(Config { dir, name, net, link, serve, notes })
 }
 
-/// The node once it started, or why it could not.
 struct App(watch::Sender<Started>);
 
 async fn node(s: &App) -> Result<Arc<Node>, String> {
@@ -101,8 +96,7 @@ fn err(e: anyhow::Error) -> String {
     format!("{e:#}")
 }
 
-/// Files the person picked (desktop): the page may offer those, and what
-/// it uploaded into irch's own folder, nothing else on this computer.
+/// The page may offer only these (desktop) and its own uploads.
 static PICKED: std::sync::Mutex<Vec<std::path::PathBuf>> =
     std::sync::Mutex::new(vec![]);
 
@@ -126,7 +120,6 @@ async fn irch(
     api::call(&node(&s).await?, call).await.map_err(err)
 }
 
-/// Files to share, picked here (desktop): kept, by path, as they are.
 #[cfg(desktop)]
 #[tauri::command]
 async fn pick(app: AppHandle) -> Vec<String> {
@@ -147,13 +140,11 @@ fn pick() -> Vec<String> {
     vec![]
 }
 
-/// In the tray (where the desktop has one): closing the window hides it.
 #[cfg(desktop)]
 static TRAY: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// The tray's icon and menu; at first, irch starts at login (NixOS: its
-/// configuration says). Started at login: in the tray, no window.
+/// Starts at login by default, except on NixOS, whose config decides.
 #[cfg(desktop)]
 fn tray(app: &tauri::App) {
     use tauri::menu::{CheckMenuItem, Menu, MenuItem};
@@ -164,7 +155,7 @@ fn tray(app: &tauri::App) {
     if let Some(f) = first.filter(|f| !f.exists() && !NIXOS) {
         let _ = auto.enable().and_then(|()| Ok(std::fs::write(f, "")?));
     } else if auto.is_enabled().unwrap_or(false) {
-        let _ = auto.enable(); // where irch is now: it may have moved
+        let _ = auto.enable(); // irch may have moved
     }
     let on = auto.is_enabled().unwrap_or(false);
     // Linux: a tray only with the library it loads (else it aborts).
@@ -223,7 +214,7 @@ fn tray(app: &tauri::App) {
         t.inspect_err(|e| tracing::warn!("tray: {e}")).is_ok()
     });
     TRAY.store(tray, std::sync::atomic::Ordering::SeqCst);
-    // No tray to come back from: a window, whatever started it.
+    // Hidden only with a tray to come back from.
     let hidden = std::env::args().any(|a| a == "--hidden");
     if hidden
         && tray
@@ -240,8 +231,7 @@ fn show(app: &AppHandle) {
     }
 }
 
-/// Become another device of the person behind `code`. A fresh
-/// install only: this device's own identity is thrown away.
+/// Fresh installs only: this device's identity is thrown away.
 #[tauri::command]
 async fn link(
     app: AppHandle,
@@ -260,17 +250,14 @@ async fn link(
     start(&app, Some(code)).await
 }
 
-/// Where irch keeps everything: profiles, and the first one's files.
 fn root(app: &AppHandle) -> anyhow::Result<std::path::PathBuf> {
     Ok(app.path().app_data_dir()?)
 }
 
-/// The profile in use: its folder.
 fn home(app: &AppHandle) -> anyhow::Result<std::path::PathBuf> {
     Ok(irch_core::profile(&root(app)?))
 }
 
-/// The node stopped (or one that never started, forgotten).
 async fn stop(s: &App) {
     if let Ok(n) = node(s).await {
         n.shutdown().await;
@@ -287,7 +274,7 @@ fn forget(dir: &std::path::Path, files: &[&str]) {
     }
 }
 
-/// The profiles on this device, and which is in use ("" the first).
+/// "" is the first profile.
 #[tauri::command]
 fn profiles(app: AppHandle) -> Result<Value, String> {
     let r = root(&app).map_err(err)?;
@@ -298,8 +285,6 @@ fn profiles(app: AppHandle) -> Result<Value, String> {
     Ok(json!({ "current": on.trim(), "all": all }))
 }
 
-/// Another profile (a new one by a new name): its own identity, spaces
-/// and storage nodes, as if another device. This one waits as it is.
 #[tauri::command]
 async fn use_profile(
     app: AppHandle,
@@ -323,8 +308,7 @@ async fn use_profile(
     start(&app, None).await
 }
 
-/// This device forgets the profile in use: its identity, spaces, keys and
-/// files. Others of your devices keep them; with none, they are gone.
+/// Only your other devices keep what this forgets.
 #[tauri::command]
 async fn sign_out(app: AppHandle, s: State<'_, App>) -> Result<(), String> {
     stop(&s).await;
@@ -338,7 +322,6 @@ async fn sign_out(app: AppHandle, s: State<'_, App>) -> Result<(), String> {
     start(&app, None).await
 }
 
-/// Save an attachment: into Downloads, or on Android to the share sheet.
 #[tauri::command]
 async fn save(
     app: AppHandle,
@@ -360,8 +343,7 @@ async fn save(
     Ok(f.display().to_string())
 }
 
-/// One encoded frame from the page, to everyone in our call. Android's IPC
-/// carries no bytes: there they arrive as a JSON array of numbers.
+/// Android's IPC carries no bytes: frames come as JSON arrays of numbers.
 #[tauri::command]
 async fn media(s: State<'_, App>, req: Request<'_>) -> Result<(), String> {
     let n = node(&s).await?;
@@ -374,9 +356,7 @@ async fn media(s: State<'_, App>, req: Request<'_>) -> Result<(), String> {
     Ok(())
 }
 
-/// A picked file in parts (a page knows no paths), appended to its copy in
-/// irch's folder, which is then offered; the reply is that copy's path.
-/// Bytes, or base64 where IPC carries none (Android).
+/// A picked file in parts, as a page knows no paths; base64 on Android.
 #[tauri::command]
 fn upload(app: AppHandle, req: Request<'_>) -> Result<String, String> {
     use std::io::Write;
@@ -404,7 +384,7 @@ fn upload(app: AppHandle, req: Request<'_>) -> Result<String, String> {
     r().map_err(err)
 }
 
-/// Frames from our call, to the page: the sender's id, then the frame.
+/// Each frame to the page: the sender's id, then the frame.
 #[tauri::command]
 async fn tune(s: State<'_, App>, to: Channel<Body>) -> Result<(), String> {
     let mut rx = node(&s).await?.media();
@@ -429,13 +409,11 @@ use irch_core::release::LATEST;
 /// Built by package.nix: NixOS keeps it up to date.
 const NIXOS: bool = option_env!("IRCH_NIXOS").is_some();
 
-/// The latest release's version, if newer than this irch.
 async fn newer(app: &AppHandle) -> anyhow::Result<Option<String>> {
     irch_core::release::newer(&app.package_info().version.to_string()).await
 }
 
-/// A storage node on this computer, always on and kept up to date: the
-/// released terminal client, checked, installed as this user's service.
+/// A storage node here: the released CLI, as this user's service.
 #[tauri::command]
 async fn serve_here(app: AppHandle) -> Result<(), String> {
     let run = async {
@@ -459,7 +437,6 @@ async fn serve_here(app: AppHandle) -> Result<(), String> {
     run.await.map_err(err)
 }
 
-/// A newer irch's version, if there is one (NixOS updates its own).
 #[tauri::command]
 async fn update(app: AppHandle) -> Result<Option<String>, String> {
     if NIXOS {
@@ -468,10 +445,7 @@ async fn update(app: AppHandle) -> Result<Option<String>, String> {
     newer(&app).await.map_err(err)
 }
 
-/// The newer irch, installed; then what to tell, if anything. Desktop: in
-/// place, its signature checked against ours, then restart; installed
-/// otherwise (cargo), the release page opens. Android: the browser
-/// downloads it, and the system installer takes only ours.
+/// In place, signature checked; else (cargo installs) the release page.
 #[tauri::command]
 async fn upgrade(
     app: AppHandle,
@@ -496,8 +470,6 @@ async fn upgrade(
     }
 }
 
-/// Phones: what decides whether they are told of messages and calls, and
-/// asking for what is missing. Desktops are told while irch runs: null.
 #[tauri::command]
 async fn notify_check(app: AppHandle, ask: String) -> Result<Value, String> {
     #[cfg(target_os = "android")]
@@ -509,7 +481,6 @@ async fn notify_check(app: AppHandle, ask: String) -> Result<Value, String> {
     }
 }
 
-/// Bytes as they arrive, as a percentage for the page (each once).
 #[cfg(desktop)]
 fn percent(to: Channel<u32>) -> impl FnMut(usize, Option<u64>) {
     let (mut got, mut last) = (0u64, u32::MAX);
@@ -523,7 +494,6 @@ fn percent(to: Channel<u32>) -> impl FnMut(usize, Option<u64>) {
     }
 }
 
-/// The system's browser, at `url`.
 #[cfg(desktop)]
 fn browse(url: &str) -> anyhow::Result<()> {
     #[cfg(target_os = "windows")]
@@ -536,7 +506,6 @@ fn browse(url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The irch:// link irch was opened with, if any.
 #[tauri::command]
 fn opened(app: AppHandle) -> Option<String> {
     use tauri_plugin_deep_link::DeepLinkExt;
@@ -544,13 +513,11 @@ fn opened(app: AppHandle) -> Option<String> {
     urls.first().map(|u| u.to_string())
 }
 
-/// What the page saw go wrong (a call's video, say), into irch's log.
 #[tauri::command]
 fn log(msg: String) {
     tracing::warn!("page: {}", msg.chars().take(500).collect::<String>());
 }
 
-/// A QR code, as SVG, for codes shown to a camera.
 #[tauri::command]
 fn qr(text: String) -> Result<String, String> {
     let q = qrcode::QrCode::new(text.as_bytes()).map_err(|e| e.to_string())?;
@@ -558,14 +525,13 @@ fn qr(text: String) -> Result<String, String> {
     Ok(svg.quiet_zone(true).min_dimensions(240, 240).build())
 }
 
-/// Typst math as MathML, off the event loop: the page checks the tags.
+/// MathML; the page checks the tags.
 #[tauri::command]
 async fn math(src: String, display: bool) -> Result<String, String> {
     let m = move || irch_math::mathml(&src, display);
     tauri::async_runtime::spawn_blocking(m).await.map_err(|e| e.to_string())?
 }
 
-/// Android: the share sheet.
 #[tauri::command]
 async fn share(app: AppHandle, text: String) -> Result<(), String> {
     #[cfg(target_os = "android")]
@@ -579,11 +545,9 @@ async fn share(app: AppHandle, text: String) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Calls ask for the camera, the microphone or the screen only after
-    // a click on irch's own page; the operating system may still ask too.
+    // Media allowed: the page asks only on a click; the OS may ask too.
     let b = tauri::Builder::default();
-    // One irch per device: a second launch (an irch:// link from a note,
-    // say) hands its link to the first and leaves.
+    // One irch per device: a second launch hands its link to the first.
     #[cfg(desktop)]
     let b = b.plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)));
     #[cfg(desktop)]
@@ -631,8 +595,6 @@ pub fn run() {
                 use webkit2gtk::{SettingsExt, WebViewExt};
                 if let Some(s) = w.inner().settings() {
                     s.set_enable_media_stream(true);
-                    // Debug builds, tested: a camera to call with, and
-                    // the page's console.
                     if cfg!(debug_assertions)
                         && std::env::var_os("IRCH_TEST_JS").is_some()
                     {
@@ -642,7 +604,6 @@ pub fn run() {
                 }
             });
         }
-        // Debug builds: a script driving the page, for tests.
         #[cfg(debug_assertions)]
         if let (Some(f), Some(w)) =
             (std::env::var_os("IRCH_TEST_JS"), app.get_webview_window("main"))
@@ -702,7 +663,7 @@ pub fn run() {
             // macOS: the Dock's icon, clicked, with the window in the tray.
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => show(app),
-            // Back in front: connections may have died while frozen.
+            // Connections may have died while frozen.
             #[cfg(mobile)]
             tauri::RunEvent::Resumed => {
                 if let Some(n) = n() {
@@ -713,8 +674,7 @@ pub fn run() {
             }
             // Leave cleanly, so peers see us go now, not at a timeout.
             tauri::RunEvent::Exit => {
-                // Inside the runtime: this thread has none, and a panic
-                // here would end a restart (an update's) before it relaunches.
+                // No runtime here; a panic would stop an update's restart.
                 if let Some(n) = n() {
                     let bye = async {
                         let two = Duration::from_secs(2);
@@ -728,16 +688,14 @@ pub fn run() {
     });
 }
 
-/// Start the node off the UI thread; failures reach the page as text.
 async fn start(app: &AppHandle, link: Option<String>) -> Result<(), String> {
     let r = async {
-        // Started by a push before the app opened: the same node.
+        // A push may have started it already.
         if let Some(n) = running().filter(|_| link.is_none()) {
             return Ok(n);
         }
         let dir = home(app)?;
         log_to(&dir);
-        // Desktop: notes go to loroh's vault (LOROH_VAULT, else ~/notes).
         let notes =
             std::env::var_os("LOROH_VAULT").map(Into::into).or_else(|| {
                 let home = app.path().home_dir().ok();
@@ -756,8 +714,7 @@ async fn start(app: &AppHandle, link: Option<String>) -> Result<(), String> {
     done
 }
 
-/// Core events to the page; a lagging receiver means "refresh everything".
-/// Each alert also goes to the page, which sounds it.
+/// Core events to the page; lagging, it refreshes everything.
 fn forward(app: AppHandle, n: Arc<Node>) {
     use irch_core::Event::{Call, Changed};
     // Weak: a node stopped (on Android, out of sight) goes, and this ends.
@@ -784,14 +741,12 @@ fn forward(app: AppHandle, n: Arc<Node>) {
     });
 }
 
-/// What to tell of: all but messages in the room on screen.
 fn alerts(n: &Node, front: bool) -> Vec<Notice> {
     let view = *VIEW.lock().unwrap_or_else(|e| e.into_inner());
     let shown = |x: &Notice| front && view == Some((x.space, x.room));
     n.notices().into_iter().filter(|x| x.ring || !shown(x)).collect()
 }
 
-/// A call answered or declined in the page: Android's ringing stops.
 #[tauri::command]
 async fn hush(app: AppHandle) {
     #[cfg(target_os = "android")]
@@ -801,7 +756,6 @@ async fn hush(app: AppHandle) {
     let _ = app;
 }
 
-/// The room on screen, or none.
 #[tauri::command]
 fn viewing(space: Option<Id>, room: Option<Ch>) {
     *VIEW.lock().unwrap_or_else(|e| e.into_inner()) = space.zip(room);
@@ -817,7 +771,6 @@ fn front(app: &AppHandle) -> bool {
     app.webview_windows().values().any(|w| w.is_focused().unwrap_or(false))
 }
 
-/// Android: the system's sound and vibration, a call's ringtone.
 #[cfg(target_os = "android")]
 async fn notify(app: &AppHandle, x: &Notice) {
     if let Some(b) = app.try_state::<android::Bridge>() {
@@ -825,10 +778,7 @@ async fn notify(app: &AppHandle, x: &Notice) {
     }
 }
 
-/// A desktop's banner, with the system's sound, while no irch window is
-/// in front (the page chimes otherwise); a call, always, and then irch
-/// itself comes to the front, from the tray if need be, ringing (its page
-/// asks to answer), as a phone's would.
+/// A banner unless in front (the page chimes); a call also raises irch.
 #[cfg(not(target_os = "android"))]
 async fn notify(app: &AppHandle, x: &Notice) {
     use tauri_plugin_notification::NotificationExt;

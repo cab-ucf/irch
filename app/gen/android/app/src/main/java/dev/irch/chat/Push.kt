@@ -14,33 +14,24 @@ import org.unifiedpush.android.connector.PushService
 import org.unifiedpush.android.connector.data.PushEndpoint
 import org.unifiedpush.android.connector.data.PushMessage
 
-/**
- * The Rust side (src/android.rs), without the app: a push can arrive after
- * Android stopped irch, when no activity (and so no Tauri) is running.
- */
+/** Rust without Tauri: a push may come when no activity is running. */
 object Wake {
   init { System.loadLibrary("irch_app") }
 
-  /** Start or wake the node, take in what rang; what to notify, as
-   *  JSON: at once, or ([full]) after catching up. */
   @JvmStatic external fun run(
     ctx: Context, dir: String, push: String?, full: Boolean,
   ): String
 
-  /** Another network: the doorbell finds its relay again. */
   @JvmStatic external fun moved()
 
-  /** Until irch's doorbell rings (waiting, with the CPU let sleep). */
+  /** Waits for the doorbell, letting the CPU sleep. */
   @JvmStatic external fun rung(ctx: Context, dir: String): String
 
   /** Hand Android's context back before the activity's runtime takes it. */
   @JvmStatic external fun release()
 }
 
-/**
- * UnifiedPush (ntfy, or another distributor the user picked): someone in
- * a space wrote. The ping carries nothing; irch fetches from peers.
- */
+/** UnifiedPush: the ping carries nothing; irch fetches from peers. */
 class IrchPush : PushService() {
   override fun onNewEndpoint(endpoint: PushEndpoint, instance: String) =
     wake(endpoint.url)
@@ -53,10 +44,8 @@ class IrchPush : PushService() {
 
   private fun wake(push: String?) {
     val i = Intent(this, IrchWake::class.java).putExtra("push", push)
-    // The distributor holds us in the foreground for a few seconds: enough
-    // to start a short foreground service from the background. Refused
-    // (Android 12+, irch under battery optimization): catch up here, in
-    // the seconds this service has.
+    // The distributor lends a few foreground seconds to start a service;
+    // refused (Android 12+, battery optimized), catch up in those seconds.
     runCatching { startForegroundService(i) }.onFailure {
       Thread {
         catchUp(this, push)
@@ -65,12 +54,7 @@ class IrchPush : PushService() {
   }
 }
 
-/**
- * Tell of what rang (the ring carries it), then catch up and tell of the
- * rest, with the CPU held awake (at most a minute): asleep, Android would
- * freeze irch mid-sync, and the notification with it, until something
- * else woke the phone.
- */
+/** CPU held awake: asleep, Android would freeze irch mid-sync. */
 fun catchUp(ctx: Context, push: String?) {
   val pm = ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
   val lock = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "irch:catch-up")
@@ -86,7 +70,6 @@ fun catchUp(ctx: Context, push: String?) {
   }
 }
 
-/** A few seconds of catching up, then notifications, then sleep again. */
 class IrchWake : Service() {
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -116,8 +99,7 @@ class IrchWake : Service() {
 
 const val SYNCING = "syncing"
 
-/** No push app: irch keeps its doorbell (src/android.rs), which those
- *  who write ring: messages and calls arrive, for little battery. */
+/** No push app: a doorbell (src/android.rs) rings, for little battery. */
 fun live(ctx: Context) {
   runCatching { ctx.startForegroundService(Intent(ctx, IrchLive::class.java)) }
 }
@@ -140,12 +122,9 @@ class IrchLive : Service() {
       startForeground(3, n)
     }
     if (running.compareAndSet(false, true)) {
-      // Relays drop a client that does not answer their ping (every ~18
-      // s) within 5 s; asleep, a phone often cannot, and its doorbell
-      // falls silent until Android next wakes it, minutes later. So the
-      // CPU stays awake (idle) while the doorbell waits: the radio wakes
-      // for those pings regardless. Android honors it while irch runs
-      // unrestricted, which irch asks for.
+      // Relays drop clients that miss a ping (~18 s) by 5 s; asleep, a
+      // phone often does, silencing the doorbell for minutes. So the CPU
+      // idles awake, which Android honors while irch runs unrestricted.
       val pm = getSystemService(android.os.PowerManager::class.java)
       awake = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "irch:doorbell")
         .apply { setReferenceCounted(false) }
@@ -178,8 +157,6 @@ class IrchLive : Service() {
   }
 }
 
-/** After a restart, before irch is opened: connected again, unless a
- *  push app will wake it. */
 class Boot : android.content.BroadcastReceiver() {
   override fun onReceive(ctx: Context, i: Intent) {
     if (i.action != Intent.ACTION_BOOT_COMPLETED) return

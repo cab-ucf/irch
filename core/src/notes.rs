@@ -1,5 +1,4 @@
-//! Into notes (loroh, Obsidian, nvim: plain Markdown): a message or a
-//! thread as a quote or a task, with an irch:// link back to it.
+//! Messages and threads into Markdown notes, linked back by irch://.
 
 use crate::{Ch, Id, State};
 use anyhow::{Result, ensure};
@@ -10,8 +9,8 @@ pub fn link(space: &Id, ch: &Ch, id: &Id) -> String {
     format!("irch://open/{space}/{ch}/{id}")
 }
 
-/// `id` as Markdown: a `- [ ]` task, or a quote. With `thread`, the whole
-/// thread it starts or sits in.
+/// A `- [ ]` task, an event (not a task, with a time: loroh's calendar),
+/// or a quote; with `thread`, its whole thread.
 pub fn markdown(
     st: &State,
     space: &Id,
@@ -32,11 +31,13 @@ pub fn markdown(
         let l = t.lines().find(|l| !l.trim().is_empty());
         l.unwrap_or("(attachment)").trim().to_string()
     };
+    let due = due.filter(|d| d.chars().all(|c| "0123456789-T:".contains(c)));
     if todo {
-        let due =
-            due.filter(|d| d.chars().all(|c| "0123456789-T:".contains(c)));
         let due = due.map(|d| format!(" due:{d}")).unwrap_or_default();
         return Some(format!("- [ ] {} ({at}){due}\n", first(&m.text)));
+    }
+    if let Some(d) = due {
+        return Some(format!("- {} ({at}) at:{d}\n", first(&m.text)));
     }
     let replies =
         if thread { st.messages(&m.id.thread(), None, 500) } else { vec![] };
@@ -65,14 +66,11 @@ fn plain(s: &str) -> String {
     o
 }
 
-/// Someone else's Markdown, kept, but nothing a note would fetch or run:
-/// no images (they load from anywhere), no fenced blocks (a plugin may
-/// run them).
+/// Inert: no images (they load anywhere), no fences (plugins run them).
 fn tame(s: &str) -> String {
     s.replace("![", "\\![").replace("```", "\\`\\`\\`").replace("~~~", "\\~~~")
 }
 
-/// Every note in `vault`, shared folders included: relative, sorted.
 pub fn list(vault: &Path) -> Vec<String> {
     fn walk(root: &Path, d: &Path, out: &mut Vec<String>) {
         for e in fs::read_dir(d).into_iter().flatten().flatten() {
@@ -96,8 +94,7 @@ pub fn list(vault: &Path) -> Vec<String> {
     out
 }
 
-/// Add `md` at the end of `file`, a note inside `vault` (never a hidden
-/// path or one outside), written whole so sync never sees half of it.
+/// Never hidden or outside `vault`; written whole so sync never sees half.
 pub fn append(vault: &Path, file: &str, md: &str) -> Result<()> {
     let rel = Path::new(file);
     let plain = |c: Component| match c {
@@ -118,7 +115,7 @@ pub fn append(vault: &Path, file: &str, md: &str) -> Result<()> {
         _ if old.ends_with('\n') => "\n",
         _ => "\n\n",
     };
-    // A new file of our own, never one planted there (or what it links to).
+    // Our own new file, never one planted there (or what it links to).
     let mut f =
         fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
     std::io::Write::write_all(&mut f, (old + gap + md).as_bytes())?;
@@ -155,15 +152,20 @@ fn messages_and_threads_become_markdown() {
         op(3, post(root.thread(), "I can help")),
         op(4, Op::Profile { name: "ann".into(), kem: vec![] }),
     ]);
-    let md = |id, thread, todo| {
-        markdown(&st, &o, &Id([id; 32]), thread, todo, Some("2030-01-02"))
+    let md = |id, thread, todo, due| {
+        markdown(&st, &o, &Id([id; 32]), thread, todo, due)
     };
     let at = format!("[ann in #ideas]({})", link(&o, &ch, &root));
     assert_eq!(
-        md(2, false, true).unwrap(),
+        md(2, false, true, Some("2030-01-02")).unwrap(),
         format!("- [ ] zero-g crystals ({at}) due:2030-01-02\n")
     );
-    let thread = md(3, true, false).unwrap();
+    assert_eq!(
+        md(2, false, false, Some("2030-01-02T14:30")).unwrap(),
+        format!("- zero-g crystals ({at}) at:2030-01-02T14:30\n"),
+        "an event"
+    );
+    let thread = md(3, true, false, None).unwrap();
     assert!(thread.starts_with("## zero-g crystals\n\n- **ann**: zero-g"));
     assert!(thread.contains("\n  why not\n- **ann**: I can help\n"));
     assert!(thread.ends_with(&format!("\n— {at}\n")));
@@ -179,7 +181,6 @@ fn messages_and_threads_become_markdown() {
     for bad in ["../x.md", ".siroh/key.md", "/etc/x.md", "x.txt"] {
         assert!(append(&dir, bad, "x").is_err(), "{bad}");
     }
-    // Others' names and Markdown: text, nothing fetched or run.
     assert_eq!(plain("a](x)\n![b"), "a\\]\\(x\\) \\!\\[b");
     assert_eq!(
         tame("![x](https://t/p.png)\n```dataviewjs"),

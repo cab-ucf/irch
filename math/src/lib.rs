@@ -1,5 +1,4 @@
-//! Typst math as MathML: `$x$` inline, `$ x $` displayed. Only math: no
-//! `#` code, no files, no packages, so a message can only typeset.
+//! Typst math as MathML: no code, files or packages, so it only typesets.
 
 use std::sync::LazyLock;
 use typst::diag::{FileError, FileResult};
@@ -47,11 +46,9 @@ impl World for Math {
     }
 }
 
-/// `src`'s `<math>` element, or why Typst would not typeset it.
 pub fn mathml(src: &str, display: bool) -> Result<String, String> {
-    // No code: `#` and `$` leave math, `std` reaches all of Typst's
-    // library (a loop that never ends, an array that fills memory), and a
-    // string's methods compute.
+    // `#` and `$` leave math, `std` reaches all of Typst (endless loops,
+    // memory-filling arrays), and a string's methods compute.
     let code = src.contains(['#', '$']) || src.contains("std");
     if src.len() > MAX || code || src.contains("\".") {
         return Err("not plain Typst math".into());

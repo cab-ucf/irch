@@ -1,13 +1,9 @@
-// irch: a Discord-style page over irch_core, through one Tauri command.
-// The core is the only source of truth: its events schedule a refresh of
-// what they touch, at most once a frame. Message rows are keyed and reused,
-// the window is paged as you scroll and trimmed back at the bottom.
+// The core is the only truth; its events refresh at most once a frame.
 // User content only ever becomes text nodes; links are copied, not opened.
 
 import { inline, markdown } from "./markdown.js";
 import * as av from "./call.js";
 
-// What keeps video from working, said once per call, and kept in irch's log.
 let troubled = new Set();
 av.call.trouble = (why) => {
   if (troubled.has(why)) return;
@@ -44,7 +40,6 @@ function h(tag, props, ...kids) {
   return e;
 }
 
-/** replaceChildren that skips null/false, for inline conditionals. */
 const put = (el, ...kids) =>
   el.replaceChildren(
     ...kids.flat(Infinity).filter((x) => x != null && x !== false));
@@ -164,7 +159,6 @@ const store = {
   set: (k, v) => { try { localStorage.setItem("irch." + k, v); } catch {} },
 };
 
-/** Looks, on this device: style.css has each. */
 const THEMES = { neon: "Neon", midnight: "Midnight", nord: "Nord",
   ucf: "UCF", light: "Light" };
 const theme = (t) => {
@@ -174,7 +168,6 @@ const theme = (t) => {
 };
 theme(store.get("theme"));
 
-/** A theme at a glance: its ground and accents (UCF: gold on black). */
 const SWATCH = { neon: ["#000", "#b44dff", "#ff2bd6"],
   midnight: ["#313338", "#5865f2", "#eb459e"],
   nord: ["#2e3440", "#5e81ac", "#88c0d0"], ucf: ["#000", "#edb80d", "#ffc904"],
@@ -193,8 +186,7 @@ function swatch(k) {
   return t.content.firstChild;
 }
 
-/** Tap to record, tap again to send it: a voice message, as WAV (which
- *  every system plays), through the calls' microphone worklet. */
+/** Voice messages as WAV, which every system plays. */
 let rec = null;
 async function voice() {
   if (rec) return rec();
@@ -226,7 +218,6 @@ async function voice() {
   };
 }
 
-/** Samples as a 16-bit mono WAV file. */
 function wav(frames, rate) {
   const n = frames.reduce((k, f) => k + f.length, 0);
   const v = new DataView(new ArrayBuffer(44 + 2 * n));
@@ -254,12 +245,12 @@ const S = {
   limit: 50, more: true, loading: false, reply: null, editing: null,
   newFrom: null, unreadAtOpen: 0, stick: false, lastTyping: 0, files: [],
   typing: new Map(), // "space|channel" -> Map(user -> expiry)
-  thread: null, // the thread open, or last open: { id, root, parent, msg… }
+  thread: null, // open, or last open
 };
 
 const cur = () => S.spaces.find((s) => s.id === S.sid);
 const inThread = () => !!S.ch && S.thread?.id === S.ch;
-// Where we read and write: a channel, or a thread (a channel of its own).
+// A thread is a channel of its own.
 const chan = () => inThread() ? S.thread
   : cur()?.channels.find((c) => c.id === S.ch);
 const dms = () => S.spaces.filter((s) => s.dm);
@@ -317,7 +308,7 @@ async function loadMessages() {
     Object.assign(S, { msgs: [], more: false });
     return renderMessages();
   }
-  if (nearBottom() && S.limit > 100) S.limit = 100; // trim at the bottom
+  if (nearBottom() && S.limit > 100) S.limit = 100;
   const msgs = await rpc("messages",
     { space: s.id, channel: ch.id, before: null, limit: S.limit });
   if (s.id !== S.sid || ch.id !== S.ch) return; // selection moved on
@@ -401,7 +392,7 @@ function select(sid, ch) {
   }
   const moved = ch !== S.ch;
   S.ch = ch;
-  if (moved) { // the unsent text where it was left
+  if (moved) {
     $("input").value = store.get(draft()) ?? "";
     autosize($("input"));
   }
@@ -431,11 +422,8 @@ const mentions = (s) => s.channels.reduce((n, x) =>
 const badge = (n) =>
   n ? h("span", { class: "badge" }, String(Math.min(n, 99))) : null;
 
-/** One list, as weechat's: each space and its channels and threads,
- *  then direct messages. A space folds by its name. */
 function renderSidebar() {
-  // A phone in a space now has someone to hear from: Android is asked,
-  // once, to let irch run unrestricted (else, asleep, it cannot ring).
+  // Asleep, a restricted Android app cannot ring: ask once.
   if (android && S.spaces.length && !store.get("askedBg")) {
     store.set("askedBg", "1");
     quiet(invoke("notify_check", { ask: "background" }));
@@ -444,7 +432,6 @@ function renderSidebar() {
     h("button", { title: "Add a space (create or join)", onclick: addSpace },
       icon("plus")));
   const d = dms();
-  // Someone new to message: "@" and their name, from a dropdown.
   const anyone = S.spaces.some((s) => !s.dm);
   put($("channels"), S.spaces.filter((s) => !s.dm).map(spaceTree),
     (anyone || d.length > 0) && [h("div", { class: "space dms" },
@@ -503,7 +490,6 @@ function channelList(s) {
         class: `channel${active ? " active" : ""}` +
           (ch.unread && !active ? " unread" : ""),
         onclick: () => select(s.id, ch.id),
-        // Admins drag channels into order.
         draggable: s.admin,
         ondragstart: (e) => e.dataTransfer.setData("ch", ch.id),
         ondragover: (e) => s.admin && e.preventDefault(),
@@ -551,7 +537,6 @@ t.id !== S.ch && badge(t.mentions),
   onclick: (e) => { e.stopPropagation(); deleteRoom(s, t); },
 }, icon("trash")));
 
-/** A newer irch: offered once at launch (`quietly`), or on request. */
 async function updates(quietly) {
   let v;
   try {
@@ -570,7 +555,6 @@ async function updates(quietly) {
     foot(cancel(finish),
       h("button", { class: "btn", onclick: () => finish(true) }, "Update"))));
   if (!ok) return;
-  // A percentage, so a slow download never looks like nothing.
   const t = toast(`Downloading irch ${v}…`, false, 6e5);
   const progress = new T.core.Channel();
   progress.onmessage = (p) => t.textContent = p < 100
@@ -581,14 +565,10 @@ async function updates(quietly) {
     .finally(() => t.remove());
 }
 
-/** irch://open/SPACE/CHANNEL/MESSAGE, from a note: there, if we can;
- *  irch://call/SPACE/CHANNEL, a call answered from its notification, and
- *  irch://ring/…, the notification opened (answer or decline here). */
 async function openUrl(url) {
   const c = /^irch:\/\/(call|ring)\/([0-9a-f]{64})\/([0-9a-f]{16})$/
     .exec(url);
-  // Answering at once: only Android's own Answer button (MainActivity
-  // checks its token); any other link asks first.
+  // Only Android's Answer button (its token checked) answers unasked.
   if (c) {
     return c[1] === "call" && android
       ? answer(c[2], c[3]) : incoming(c[2], c[3]);
@@ -605,7 +585,6 @@ async function openUrl(url) {
   await openThread(ch);
 }
 
-/** A message's thread: a channel of its own, there once anyone writes. */
 async function openThread(root) {
   const r = await rpc("thread", { space: S.sid, channel: root.slice(0, 16) });
   if (!r) return toast("Threads hang off messages in channels", true);
@@ -615,7 +594,7 @@ async function openThread(root) {
   select(S.sid, t.id);
 }
 
-/** The open thread and its row in the sidebar: one object, read as one. */
+/** S.thread and its sidebar row become one object. */
 function adopt() {
   for (const c of cur()?.channels ?? []) {
     c.threads = c.threads.map((t) =>
@@ -623,7 +602,6 @@ function adopt() {
   }
 }
 
-/** Who is in a channel's call, under it. */
 const callers = (ids) => ids.length > 0 && h("div", { class: "callers" },
   ids.map((id) => h("div", { class: "caller" },
     avatar(id, isMe(id) ? S.me.name : nameOf(id), "xs"),
@@ -662,7 +640,6 @@ function renderHeader() {
   net.className = s?.peers ? "up" : "";
   put(net, s && [h("i", { class: "dot" }),
     `${s.peers} peer${s.peers === 1 ? "" : "s"}`]);
-  // Who, device by device: on hover, or a tap on a phone.
   const near = (s?.near ?? []).map((p) => `${p.who} (device ${p.device})`);
   net.title = near.length ? `Connected with:\n${near.join("\n")}`
     : "Connected with no one now";
@@ -731,8 +708,7 @@ async function ring() {
 
 // ---------- alerts ----------
 
-// Desktops sound alerts here (phones: the system's sound, the ringtone).
-// A web view lets sound play only once someone has clicked or typed.
+// A web view plays sound only once someone has clicked or typed.
 let audio;
 for (const e of ["pointerdown", "keydown"]) {
   addEventListener(e, () => {
@@ -756,12 +732,11 @@ function tone(notes, gain) {
   }
 }
 const chime = () => tone([[880, 0, 0.12], [1320, 0.13, 0.25]], 0.15);
-// A phone's ring: 440 and 480 Hz together, two seconds in every six.
+// A phone's ring: 440 and 480 Hz, 2 s in every 6.
 const ringing = () => tone([[440, 0, 2], [480, 0, 2]], 0.07);
 
 let calling = null;
 
-/** Someone calls (a DM): answer or decline; after 45 s, missed. */
 function incoming(sid, ch, who) {
   if (calling) return;
   const ids = callOf(sid, ch)?.call ?? [];
@@ -769,7 +744,6 @@ function incoming(sid, ch, who) {
   const rings = android ? 0 : setInterval(ringing, 6000);
   if (!android) ringing();
   const late = setTimeout(() => $("modal").close(), 45e3);
-  // Hung up before it was answered: it stops ringing.
   let seen = false;
   const gone = setInterval(() => {
     if ((callOf(sid, ch)?.call ?? []).length) seen = true;
@@ -792,7 +766,6 @@ function incoming(sid, ch, who) {
   });
 }
 
-/** Call someone: their DM's call, which rings them. */
 async function callIn(sid) {
   select(sid);
   if (!here()) await ring();
@@ -828,7 +801,6 @@ function tile(id) {
     : Date.now() - (p?.spoke ?? 0) < 300 ? p.level : 0;
   const name = me ? S.me.name : nameOf(id);
   const v = live && (me ? av.call.self : p.canvas);
-  // Each tile is its video's shape: a phone's upright, a laptop's wide.
   const [w, ht] = me ? [v?.videoWidth, v?.videoHeight] : [v?.width, v?.height];
   return h("div", {
     class: "tile" + (level > 0.02 ? " speaking" : "") +
@@ -871,7 +843,7 @@ function renderCall() {
     control("hangup", "Leave call", () => av.leave(rpc), "panel-btn off")));
 }
 
-/** Just the tiles, often: controls stay put under the pointer. */
+/** Just the tiles, so controls stay put under the pointer. */
 function renderTiles() {
   const on = av.call.on;
   const tiles = here() && $("call").querySelector(".tiles");
@@ -914,8 +886,7 @@ function renderMessages(keepScroll) {
   if (stick) $("scroller").scrollTop = $("scroller").scrollHeight;
 }
 
-/** Keyed diff: unchanged rows are never touched; a new message costs one
- *  insertion, a page of history one per row. */
+/** Keyed diff: unchanged rows are never touched. */
 function reconcile(list, items) {
   const next = new Map();
   const els = items.map((it) => {
@@ -985,7 +956,7 @@ function replyRef(m) {
       : h("span", {}, "Original message was deleted"));
 }
 
-// Block and inline tags a message may make: anything else is a span.
+// Tags a message may make; anything else is a span.
 const TAGS = new Set(("p h1 h2 h3 h4 h5 h6 ul ol li blockquote strong em s " +
   "table thead tbody tr th td").split(" "));
 const LANG = { rs: "rust", py: "python", js: "javascript", ts: "typescript",
@@ -1004,7 +975,6 @@ function content(text, edited) {
   return div;
 }
 
-/** markdown-it's tokens as elements; text only ever as text nodes. */
 function render(tokens, root) {
   const stack = [root];
   const add = (...n) => stack.at(-1).append(...n);
@@ -1030,9 +1000,8 @@ function render(tokens, root) {
   return root;
 }
 
-// Links are copied, never opened: irch opens nothing on its own.
 const link = (href) => h("span", { class: "link", title: `Copy ${href}`,
-  onclick: () => copy(href, `Copied ${href}`) }); // where it goes, said
+  onclick: () => copy(href, `Copied ${href}`) });
 
 function spoiler() {
   const s = h("span", { class: "spoiler", title: "Spoiler" });
@@ -1040,12 +1009,11 @@ function spoiler() {
   return s;
 }
 
-// @names, marked.
 const AT = /((?<![\p{L}\p{N}_])@[\p{L}\p{N}_.-]*[\p{L}\p{N}_])/u;
 const tagged = (text) => text.split(AT)
   .map((x, i) => i % 2 ? h("span", { class: "mention" }, x) : x);
 
-/** Prism's token tree as spans (its HTML output is never used). */
+/** Prism's token tree as spans; its HTML is never used. */
 function code(src, lang) {
   const P = window.Prism;
   const name = LANG[lang?.toLowerCase()] ?? lang?.toLowerCase();
@@ -1057,8 +1025,7 @@ function code(src, lang) {
     h("code", {}, g ? spans(P.tokenize(src, g)) : src));
 }
 
-// Typst's MathML, rebuilt from a parse that runs nothing: math tags and
-// math attributes only.
+// Typst's MathML, rebuilt inertly: math tags and attributes only.
 const NS = "http://www.w3.org/1998/Math/MathML";
 const MTAGS = new Set(("math mi mn mo ms mtext mspace mrow mfrac msqrt " +
   "mroot msub msup msubsup munder mover munderover mtable mtr mtd mstyle " +
@@ -1138,7 +1105,7 @@ function image(f) {
 function attachments(files) {
   return h("div", { class: "attachments" }, files.map((f) => {
     const type = MEDIA[f.name.split(".").pop().toLowerCase()];
-    if (type?.startsWith("audio")) { // a voice message, say: played here
+    if (type?.startsWith("audio")) {
       const a = h("audio", { controls: true, preload: "none" });
       rpc("file", { space: S.sid, file: f })
         .then((b64) => a.src = `data:${type};base64,${b64}`, () => {});
@@ -1178,7 +1145,6 @@ const MEDIA = { mp3: "audio/mpeg", ogg: "audio/ogg", oga: "audio/ogg",
   mp4: "video/mp4", m4v: "video/mp4", webm: "video/webm",
   mov: "video/quicktime" };
 
-/** Text as UTF-8, or null for anything binary. */
 function utf8(b) {
   try {
     const t = new TextDecoder("utf-8", { fatal: true }).decode(b);
@@ -1188,8 +1154,6 @@ function utf8(b) {
   }
 }
 
-/** A file, opened in irch: media plays, text and code show (Markdown
- *  rendered); anything else is for saving. */
 async function preview(f) {
   if (mime(f.name)) return image(f).then((src) => lightbox(src, f));
   const ext = f.name.split(".").pop().toLowerCase();
@@ -1236,8 +1200,7 @@ const b64 = (blob) => new Promise((ok) => {
   r.readAsDataURL(blob);
 });
 
-/** Up to 25 MB, sealed for storage nodes (there while you are offline);
- *  larger, or `keep`, served from this device while it is online. */
+/** Up to 25 MB sealed for storage nodes; larger, or `keep`, served here. */
 async function addFiles(list, keep) {
   for (const file of list) {
     const here = keep || file.size > SEALED;
@@ -1252,7 +1215,7 @@ async function addFiles(list, keep) {
 const sealFile = async (file) =>
   call("attach", { space: S.sid, name: file.name, data: await b64(file) });
 
-/** Into irch's folder in parts (a page knows no paths), then offered. */
+/** Into irch's folder in parts (a page knows no paths). */
 async function offerFile(file) {
   const id = randomId(16);
   let path;
@@ -1265,7 +1228,7 @@ async function offerFile(file) {
   return call("offer", { path, name: file.name });
 }
 
-/** Desktops: files chosen by path stay where they are (any size, no copy). */
+/** Desktops: files offered in place (any size, no copy). */
 async function offerPaths() {
   const paths = await invoke("pick").catch(() => []);
   for (const path of paths) {
@@ -1321,12 +1284,11 @@ function toolbar(m) {
         (e) => del(m, e), "danger"));
 }
 
-/** Into your notes (loroh's vault, a lab's shared folder in it) as a task
- *  or a quote, linked back here; on phones, onto the clipboard. */
 async function toNotes(m) {
   const files = await rpc("notes").catch(() => null);
   const last = store.get("note") ?? "Inbox.md";
-  const todo = h("select", {}, h("option", { value: "1" }, "A task"),
+  const todo = h("select", {}, h("option", { value: "task" }, "A task"),
+    h("option", { value: "event" }, "An event (calendar)"),
     h("option", { value: "" }, "A note (quoted)"));
   const whole = (inThread() || m.thread > 0) &&
     h("input", { type: "checkbox", checked: inThread() });
@@ -1334,17 +1296,23 @@ async function toNotes(m) {
     h("input", { type: "text", value: last, maxLength: 200 });
   into?.setAttribute("list", "notes-list");
   const due = h("input", { type: "date" });
-  todo.onchange = () => due.parentElement.classList.toggle("hidden",
-    !todo.value);
+  todo.onchange = () => {
+    const ev = todo.value === "event";
+    due.parentElement.classList.toggle("hidden", !todo.value);
+    due.type = ev ? "datetime-local" : "date";
+    if (into) into.value = ev ? store.get("cal") ?? "Calendar.md" : last;
+  };
   const add = async (finish) => {
     let file = into?.value.trim() || null;
     if (file && !file.endsWith(".md")) file += ".md";
+    const ev = todo.value === "event";
+    if (ev && !due.value) return toast("An event needs a time", true);
     const md = await call("note", { space: S.sid, message: m.id,
-      thread: !!whole?.checked, todo: !!todo.value, due: due.value || null,
-      file });
+      thread: !!whole?.checked, todo: todo.value === "task",
+      due: todo.value && due.value || null, file });
     finish(true);
     if (file) {
-      store.set("note", file);
+      store.set(ev ? "cal" : "note", file);
       toast(`Added to ${file}`);
     } else await copy(md, "Copied as Markdown: paste it into your notes");
   };
@@ -1354,7 +1322,7 @@ async function toNotes(m) {
         "loroh (or any notes app). A shared folder (Lab/Ideas.md) reaches " +
         "everyone who shares it."),
       h("label", {}, "As"), todo,
-      h("div", {}, h("label", {}, "Due (optional)"), due),
+      h("div", {}, h("label", {}, "When (optional for a task)"), due),
       whole && h("label", { class: "check" }, whole, "The whole thread"),
       into && [h("label", {}, "Into"), into, h("datalist", { id: "notes-list" },
         files.map((f) => h("option", { value: f })))]),
@@ -1502,9 +1470,6 @@ function spaceMenu(anchor) {
   ]);
 }
 
-
-/** Which of your storage nodes keep this space: encrypted, there while
- *  everyone is offline. */
 function storageFlow(s) {
   const local = S.me.local_storage;
   const keep = (node, on) => quiet(call("store", { space: s.id, node, on }));
@@ -1521,7 +1486,6 @@ function storageFlow(s) {
     };
     const here = local && !paired && h("button", { class: "btn",
       onclick: pair }, "Keep it on this computer's storage node");
-    // Desktops: one click runs one here, always on and kept up to date.
     const start = !local && !android && h("button", { class: "btn",
       onclick: async (e) => {
         e.target.disabled = true;
@@ -1594,11 +1558,9 @@ function modal(build) {
       resolve(v);
     };
     d.replaceChildren(build(finish));
-    // A dialog closed just before this one fires its close event late,
-    // on this one: only a close that left it closed counts.
+    // A dialog closed just before fires its close late, on this one.
     d.onclose = () => d.open || finish(null);
-    // A click outside closes; never return false here, which would
-    // cancel every click inside (checkboxes would not toggle).
+    // Never return false: it would cancel every click inside.
     d.onclick = (e) => {
       if (e.target === d) finish(null);
     };
@@ -1614,8 +1576,6 @@ const foot = (...btns) =>
 const cancel = (finish) =>
   h("button", { class: "btn link", onclick: () => finish(null) }, "Cancel");
 
-/** A QR code read with the camera, or null (closed, or no camera). jsQR
- *  comes only when first wanted. */
 async function scanQR() {
   let stream;
   try {
@@ -1655,7 +1615,6 @@ async function scanQR() {
   return got;
 }
 
-/** What `ask` gives when its Scan button was pressed instead. */
 const SCAN = Symbol("scan");
 
 function ask({ title, sub, label, value = "", ok = "Save", placeholder,
@@ -1663,8 +1622,7 @@ function ask({ title, sub, label, value = "", ok = "Save", placeholder,
   return modal((finish) => {
     const input = h("input", { type: "text", value, placeholder, maxLength });
     const submit = () => finish(input.value.trim());
-    // Handled, so the same Enter does not also press the button that
-    // gets the focus back when the dialog closes (and open it again).
+    // Handled, or this Enter also presses the button refocused on close.
     input.addEventListener("keydown", (e) => {
       if (e.key !== "Enter") return;
       e.preventDefault();
@@ -1690,9 +1648,7 @@ function confirmBox({ title, sub, ok }) {
       h("button", { class: "btn red", onclick: () => finish(true) }, ok))));
 }
 
-/** A code to hand on: copy, share (Android), and a QR code to scan; a
- *  secret one is never shared to other apps, and leaves the clipboard
- *  after a minute. */
+// A secret code: never to other apps, and off the clipboard after a minute.
 async function showCode({ title, label, code, note, secret }) {
   const qr = await invoke("qr", { text: code }).catch(() => null);
   modal((finish) => {
@@ -1844,7 +1800,6 @@ function settings() {
       finish(true);
     };
     name.addEventListener("keydown", (e) => e.key === "Enter" && save());
-    // Switches act at once, like the eye in the user panel.
     const sw = (title, small, checked, change) => h("label",
       { class: "switch" }, h("span", {}, title, h("small", {}, small)),
       h("input", { type: "checkbox", checked,
@@ -1894,8 +1849,6 @@ function settings() {
   });
 }
 
-/** Profiles: other people (or other you) on this device, each with its
- *  own identity, spaces and storage nodes; one at a time. */
 async function profilesFlow() {
   const p = await invoke("profiles").catch(() => null);
   if (!p) return;
@@ -1937,8 +1890,6 @@ async function profilesFlow() {
   location.reload();
 }
 
-/** Android: what keeps calls and messages from this phone, said atop the
- *  sidebar until it is fixed (one tap asks for it). */
 async function health(ask = "") {
   if (!android) return;
   const a = await invoke("notify_check", { ask }).catch(() => null);
@@ -1952,8 +1903,6 @@ async function health(ask = "") {
 document.addEventListener("visibilitychange",
   () => !document.hidden && health());
 
-/** A phone in a pocket is told only if Android lets irch: what it allows
- *  now, a way to allow the rest, and a test. */
 function notifyCheck() {
   const box = h("div", { class: "checks" });
   const draw = async (ask = "") => {
@@ -1975,7 +1924,6 @@ function notifyCheck() {
           { class: "btn", onclick: () => draw("fix") }, "Allow"),
         h("button", { class: "btn grey", onclick: () => draw("test") },
           "Send a test notification")));
-    // Back from Android's settings: what they allow now.
     document.addEventListener("visibilitychange", () =>
       !document.hidden && box.isConnected && draw(),
     { once: true });
@@ -1995,7 +1943,6 @@ async function linkDevice() {
 
 function quickSwitch(start = "") {
   const all = S.spaces.flatMap((s) => s.channels.map((ch) => ({ s, ch })));
-  // "@…": everyone in a space with us, to message (a DM, or a new one).
   const dmWith = new Set(S.spaces.filter((s) => s.dm).map((s) => s.with));
   let people = [], redraw = () => {};
   Promise.all(S.spaces.filter((s) => !s.dm).map((s) =>
@@ -2050,9 +1997,7 @@ function quickSwitch(start = "") {
   });
 }
 
-/** Messages with every word: here (this room or channel, its threads
- *  too), in this space, or everywhere. On this device: nothing is asked
- *  of anyone. */
+/** Searched on this device: nothing is asked of anyone. */
 function searchFlow(scope = inThread() || chan() ? "room" : "space") {
   const s = cur();
   modal((finish) => {
@@ -2186,7 +2131,6 @@ async function editChannel(ch) {
 
 const slug = (s) => s.trim().toLowerCase().replace(/\s+/g, "-");
 
-/** `id` moved by a step (-1, 1) or to where `to` is, for everyone. */
 function reorder(s, id, to) {
   const ids = s.channels.map((c) => c.id);
   const from = ids.indexOf(id);
@@ -2196,7 +2140,6 @@ function reorder(s, id, to) {
   publish({ Order: { channels: ids } });
 }
 
-/** The channel's pinned messages; one picked is shown. */
 async function pinsFlow() {
   const pins = await rpc("pins", { space: S.sid, channel: S.ch })
     .catch(() => []);
@@ -2217,7 +2160,6 @@ async function renameSpace() {
   if (name) publish({ Rename: { name } });
 }
 
-/** A room: a named thread in a channel, there before anyone replies. */
 async function newRoom(s, ch) {
   select(s.id, ch.id);
   const name = (await ask({ title: "New Room", label: "Room name",
@@ -2239,8 +2181,7 @@ async function renameRoom(s, t) {
     op: { Topic: { thread: t.id, name } } }).catch(() => {});
 }
 
-/** Gone for everyone, replies and all (its first message stays where it
- *  was): an admin's to do, or its starter's while the replies are theirs. */
+/** An admin's to do, or its starter's while the replies are theirs. */
 async function deleteRoom(s, t) {
   const ok = await confirmBox({ title: `Delete '${t.name}'`,
     sub: "It and every reply in it go, for everyone. The message it " +
@@ -2292,8 +2233,6 @@ function insert(t, text) {
   autosize(t);
 }
 
-/** "@" in the composer: who is here, by name, as one types; ↑/↓ and Tab
- *  or Enter pick, Esc closes. */
 function mentionPicker(input) {
   const pop = h("div", { class: "qs-list mentions hidden" });
   $("composer").prepend(pop);
@@ -2335,7 +2274,6 @@ function mentionPicker(input) {
   }, true);
 }
 
-/** The composer's commands, as the terminal's: /nick, /join, /dm, ... */
 const SLASH = {
   nick: async (name) => {
     if (!name) return toast("/nick NAME", true);
@@ -2374,7 +2312,6 @@ const say = (text) => {
 };
 
 // ---------- vim ----------
-// Esc in the composer is normal mode: keys act on a selected message.
 
 const KEYS = [
   ["Esc", "out of the composer: pick messages (normal mode)"],
@@ -2406,7 +2343,6 @@ function pick(m) {
   el?.scrollIntoView({ block: "nearest" });
 }
 
-/** A key in normal mode; true if it did something. */
 function vim(e) {
   const k = e.key, m = sel(), i = S.msgs.indexOf(m), last = S.vimLast;
   S.vimLast = k;
@@ -2486,15 +2422,13 @@ function wire() {
   $("mic-btn").classList.toggle("hidden", !window.AudioWorkletNode);
   $("call-btn").onclick = ring;
   av.call.changed = renderCall;
-  // Tiles follow who speaks and whose video still arrives.
   setInterval(renderTiles, 400);
   const showMembers = (on) => {
     $("members").classList.toggle("hidden-panel", !on);
     $("members-btn").classList.toggle("on", on);
   };
-  showMembers(store.get("members") === "1"); // chat first: shown on request
-  // Phones: swipe right for channels (or away from members), left away
-  // from channels (or to members), as in Discord. Not in text or code.
+  showMembers(store.get("members") === "1");
+  // Phones swipe between panes, as in Discord; not in text or code.
   let touch = null;
   addEventListener("touchstart", (e) => {
     const t = e.touches[0];
@@ -2547,8 +2481,7 @@ function wire() {
   $("chat").addEventListener("click", (e) => {
     if (e.target === $("chat")) document.body.classList.remove("drawer");
   });
-  // Android's Back (MainActivity.kt): close the topmost thing; with nothing
-  // left to close, returning false sends irch to the background.
+  // Android's Back (MainActivity.kt): false sends irch to the background.
   window.irchBack = () => {
     const body = document.body.classList;
     if ($("modal").open) $("modal").close();
@@ -2617,7 +2550,7 @@ function wire() {
         pick(null);
       }
       else if (e.target === input && S.msgs.length) {
-        input.blur(); // vim: normal mode, on the newest message
+        input.blur();
         S.normal = true;
         pick(S.msgs.at(-1));
       } else if (inThread()) select(S.sid, S.thread.parent);
@@ -2630,7 +2563,7 @@ function wire() {
       if (vim(e)) e.preventDefault();
     } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey &&
       !typing && !$("modal").open && !input.disabled) {
-      input.focus({ preventScroll: true }); // type anywhere
+      input.focus({ preventScroll: true });
     }
   });
 }

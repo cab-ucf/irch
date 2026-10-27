@@ -16,11 +16,10 @@ class MainActivity : TauriActivity() {
     // The UI is dark: light system-bar icons whatever the system theme.
     val bars = SystemBarStyle.dark(Color.TRANSPARENT)
     enableEdgeToEdge(bars, bars)
-    Wake.release() // a push may have started irch without us: our turn
+    Wake.release() // a push may have started irch first
     answerable(intent)
     super.onCreate(savedInstanceState)
-    // Edge to edge, the page would sit under the status and navigation bars,
-    // cutouts and the keyboard: inset the web view's frame by all of them.
+    // Edge to edge: inset the page by the bars, cutouts and keyboard.
     val root = findViewById<View>(android.R.id.content)
     ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
       val i = insets.getInsets(
@@ -38,9 +37,8 @@ class MainActivity : TauriActivity() {
     super.onNewIntent(intent)
   }
 
-  // Back closes what the page has open (dialog, menu, drawer). With nothing
-  // open, irch moves to the background instead of finishing, which would
-  // stop the node.
+  // Back closes what the page has open; else irch goes to the background,
+  // as finishing would stop the node.
   override fun onWebViewCreate(webView: WebView) {
     val back = object : OnBackPressedCallback(true) {
       override fun handleOnBackPressed() {

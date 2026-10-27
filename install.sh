@@ -1,8 +1,6 @@
 #!/bin/sh
-# irch on Linux or macOS, in one line; it keeps itself up to date.
-#   curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh | sh
-# An always-on storage node for you instead (a service, at login or boot):
-#   curl -fsSL …/install.sh | sh -s -- --server
+# Self-updating irch: curl -fsSL $R/install.sh | sh [-s -- --server]
+# --server: an always-on storage node instead (a service).
 # Fetched by curl, nothing is quarantined: no Gatekeeper, no xattr.
 set -eu
 R=https://github.com/cab-ucf/irch/releases/latest/download

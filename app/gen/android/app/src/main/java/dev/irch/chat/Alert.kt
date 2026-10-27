@@ -18,7 +18,6 @@ const val CHAT = "chat"
 const val CALLS = "calls"
 const val CALL = 1
 
-/** What irch tells of: a message, or a call in a DM, which rings. */
 fun alert(ctx: Context, a: JSONObject) {
   if (!notificationsAllowed(ctx)) return
   val (space, room) = a.getString("space") to a.getString("room")
@@ -39,7 +38,7 @@ private fun channel(ctx: Context, id: String, name: String, sound: Uri,
   )
 }
 
-/** Like a text: a sound and a buzz. Locked, only "New message" shows. */
+/** Locked, only "New message" shows. */
 fun postMessage(ctx: Context, tag: String, title: String, body: String) {
   // Its first channel left sound and vibration to the system: replaced.
   NotificationManagerCompat.from(ctx).deleteNotificationChannel("messages")
@@ -64,10 +63,9 @@ fun postMessage(ctx: Context, tag: String, title: String, body: String) {
   NotificationManagerCompat.from(ctx).notify(tag, 0, n)
 }
 
-/** Tokens of the Answer buttons on show. */
 val answers: MutableSet<String> = java.util.Collections.synchronizedSet(HashSet())
 
-/** An irch://call link without one of them only rings, asking first. */
+/** An irch://call link without a shown Answer's token only rings. */
 fun answerable(i: Intent?) {
   if (i == null) return
   val u = i.data?.takeIf { it.scheme == "irch" } ?: return
@@ -77,19 +75,14 @@ fun answerable(i: Intent?) {
   i.setData(Uri.parse("irch://$verb${u.path}"))
 }
 
-/**
- * Like a phone call: the ringtone and a long buzz, again and again, full
- * screen when locked, until answered, declined or 45 s pass. Answer joins
- * the call; the screen itself (or a tap) asks first.
- */
+/** Rings like a phone; only Answer joins, the screen or a tap asks first. */
 fun postCall(ctx: Context, space: String, room: String, who: String) {
   channel(ctx, CALLS, "Calls", Settings.System.DEFAULT_RINGTONE_URI,
     AudioAttributes.USAGE_NOTIFICATION_RINGTONE, longArrayOf(0, 1000, 1000))
   val tag = space + room
   val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
   val open = { verb: String, code: Int ->
-    // Answering needs this notification's own token: a link from anywhere
-    // else only rings (MainActivity), never opens the microphone.
+    // Only this notification's token answers; other links just ring.
     val k = java.util.UUID.randomUUID().toString()
     if (verb == "call") answers.add(k)
     val uri = Uri.parse("irch://$verb/$space/$room?k=$k")
@@ -115,8 +108,6 @@ fun postCall(ctx: Context, space: String, room: String, who: String) {
   NotificationManagerCompat.from(ctx).notify(tag, CALL, n)
 }
 
-/** Every ringing call stops (answered or declined), or `space`'s (its
- *  caller hung up). */
 fun hush(ctx: Context, space: String = "") {
   val nm = NotificationManagerCompat.from(ctx)
   nm.activeNotifications.filter { it.id == CALL && it.tag.startsWith(space) }

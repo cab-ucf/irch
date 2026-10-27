@@ -1,5 +1,4 @@
-# By hand only: each release builds, installs and runs everything itself
-# (release.yml's check), so pushes and pull requests cost nothing.
+# By hand only: each release tests itself (release.yml's check).
 name: ci
 on:
   workflow_dispatch:
@@ -31,7 +30,6 @@ jobs:
       - run: node --test app/tests/*.test.mjs
       - run: shellcheck -S warning install.sh
 
-  # The core, the terminal client and the app compile everywhere.
   build:
     strategy:
       fail-fast: false
@@ -56,13 +54,11 @@ jobs:
             target/release/irch-app.exe
           retention-days: 14
 
-  # One job builds the APK and runs it on an emulator.
   android:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
-      # Gradle's debug variant is the one signed (with a throwaway key) and
-      # so installable; optimize its Rust side instead.
+      # Only the debug variant is signed, so installable: optimize its Rust.
       CARGO_PROFILE_DEV_OPT_LEVEL: "2"
       CARGO_PROFILE_DEV_DEBUG: "false"
     steps:

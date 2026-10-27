@@ -1,6 +1,5 @@
-//! irch: communities of channels whose history lives on members' devices.
-//! A space is a grow-only set of signed, sealed ops; its state is a
-//! deterministic fold of that set; peers reconcile sets over iroh.
+//! irch: a space is a grow-only set of sealed ops on members' devices,
+//! folded deterministically, reconciled over iroh.
 
 pub mod api;
 mod call;
@@ -70,16 +69,13 @@ macro_rules! bytes {
 bytes!(Id 32, Ch 8);
 
 impl Id {
-    /// The thread on this message: a channel named by the id's first bytes,
-    /// so everyone who starts it at once starts the same one.
+    /// Named by the id's prefix, so everyone starting it at once agrees.
     pub fn thread(&self) -> Ch {
         Ch(self.0[..8].try_into().expect("8 of 32"))
     }
 }
 
-/// This computer's storage node: its code, where `irch --install` leaves
-/// it, or nixos.nix for the local users it names (`IRCH_CODE_FILE`, else
-/// `/run/irch/code`).
+/// This computer's storage node code, from `irch --install` or nixos.nix.
 pub fn local_storage() -> Option<String> {
     // /run is root's on Linux; elsewhere (C:\\run) anyone could plant one.
     let run = cfg!(target_os = "linux").then(|| "/run/irch/code".into());
@@ -91,8 +87,7 @@ pub fn local_storage() -> Option<String> {
     (!code.is_empty()).then_some(code)
 }
 
-/// The profile in use under `root`: its own folder, or `root` itself for
-/// the first (all there was before profiles).
+/// Its own folder, or `root` itself for the first (from before profiles).
 pub fn profile(root: &std::path::Path) -> std::path::PathBuf {
     let n = std::fs::read_to_string(root.join("profile")).unwrap_or_default();
     match n.trim() {
@@ -101,7 +96,7 @@ pub fn profile(root: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
-/// A person's files in a profile's folder: what signing out takes away.
+/// What signing out takes away.
 pub const MINE: [&str; 10] = [
     "seed",
     "device",

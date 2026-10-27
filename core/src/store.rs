@@ -1,6 +1,5 @@
-//! Disk: one append-only log of envelopes per space, plus small files
-//! replaced atomically. Records are `len u32 ‖ checked u8 ‖ bytes`; a torn
-//! tail (crash mid-append) is cut off on open.
+//! An append-only envelope log per space, and small files replaced whole.
+//! Records: `len u32 ‖ checked u8 ‖ bytes`; a torn tail is cut on open.
 
 use anyhow::Result;
 use serde::{Serialize, de::DeserializeOwned};
@@ -16,7 +15,6 @@ pub struct Log {
 pub type Rec = (u64, bool, Vec<u8>);
 
 impl Log {
-    /// Open, returning every intact record as `(offset, checked, bytes)`.
     pub fn open(path: &Path) -> Result<(Self, Vec<Rec>)> {
         fs::create_dir_all(path.parent().expect("in a dir"))?;
         let mut o = OpenOptions::new();
@@ -25,7 +23,7 @@ impl Log {
         let (mut recs, mut end, mut r) = (vec![], 0, BufReader::new(&f));
         let mut head = [0; 5];
         while r.read_exact(&mut head).is_ok() {
-            // Never more than an envelope: a damaged length ends the log.
+            // A damaged length ends the log.
             let len = u32::from_le_bytes(head[..4].try_into()?) as usize;
             if len > crate::op::MAX_ENV {
                 break;
