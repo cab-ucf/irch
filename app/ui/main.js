@@ -1102,13 +1102,22 @@ function image(f) {
   return images.get(f.hash);
 }
 
+// A loop: `Uint8Array.from` with a mapper takes seconds for 25 MB.
+const bytes = (f) => rpc("file", { space: S.sid, file: f }).then((b64) => {
+  const s = atob(b64);
+  const b = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i);
+  return b;
+});
+
 function attachments(files) {
   return h("div", { class: "attachments" }, files.map((f) => {
     const type = MEDIA[f.name.split(".").pop().toLowerCase()];
     if (type?.startsWith("audio")) {
       const a = h("audio", { controls: true, preload: "none" });
-      rpc("file", { space: S.sid, file: f })
-        .then((b64) => a.src = `data:${type};base64,${b64}`, () => {});
+      // A blob: the page's policy plays no data: media.
+      bytes(f).then((b) => a.src = URL.createObjectURL(new Blob([b], { type })),
+        () => {});
       return h("div", { class: "voice" }, a, fileChip(f));
     }
     if (!mime(f.name)) return fileChip(f);
@@ -1159,8 +1168,7 @@ async function preview(f) {
   const ext = f.name.split(".").pop().toLowerCase();
   let b;
   try {
-    const b64 = await rpc("file", { space: S.sid, file: f });
-    b = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    b = await bytes(f);
   } catch (e) {
     return toast(String(e?.message ?? e), true);
   }
@@ -2611,9 +2619,6 @@ async function start() {
   }
   wire();
   renderEmpty();
-  if (android && store.get("bg") === "1") {
-    quiet(invoke("background", { on: true }));
-  }
   // Member lists change rarely but can be large: at most every 2 s.
   let membersDue = 0;
   const members = () => {

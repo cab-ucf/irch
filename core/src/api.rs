@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-/// `Attach` and `File` carry bytes as base64.
+/// `File` carries bytes as base64.
 #[derive(Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Call {
@@ -77,11 +77,6 @@ pub enum Call {
     LinkCode,
     AddStorage {
         code: String,
-    },
-    Attach {
-        space: Id,
-        name: String,
-        data: String,
     },
     Store {
         space: Id,
@@ -206,10 +201,6 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
         Call::Dm { space, user } => json!(n.dm(&space, &user).await?),
         Call::LinkCode => json!(n.link_code().await),
         Call::AddStorage { code } => json!(n.add_storage(&code).await?),
-        Call::Attach { space, name, data } => {
-            let data = BASE64.decode(data.as_bytes())?;
-            json!(n.attach(&space, &name, &data).await?)
-        }
         Call::Store { space, node, on } => {
             json!(n.store(&space, &node, on).await?)
         }
