@@ -255,15 +255,13 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
 fn space(n: &Node, id: &Id) -> Option<Value> {
     let me = n.id();
     let v = n.view(id, |s| {
+        // A DM is named by who else is in it (members: no cost elsewhere).
+        let others = s.dm.map(|_| s.members()).unwrap_or_default();
         let others: Vec<_> =
-            s.members().into_iter().filter(|m| m.id != me).collect();
-        let name = match others.is_empty() || s.dm.is_none() {
+            others.into_iter().filter(|m| m.id != me).map(|m| m.name).collect();
+        let name = match others.is_empty() {
             true => s.name().to_string(),
-            false => others
-                .iter()
-                .map(|m| m.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", "),
+            false => others.join(", "),
         };
         let with = s.peer(&me);
         (
