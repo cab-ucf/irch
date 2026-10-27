@@ -252,6 +252,26 @@ async fn direct_messages() {
     .await;
 }
 
+/// A DM's very first message is news, though it came before b was in it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_dm_notifies() {
+    let (a, b) = (node("a").await, node("b").await);
+    let id = a.create("hub").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let keyed = || a.view(&id, |s| s.kem(&b.id()).is_some()) == Some(true);
+    until("b's key", keyed).await;
+    let _ = b.notices(); // the hub's history: quiet
+    let dm = a.dm(&id, &b.id()).await.unwrap();
+    say(&a, &dm, irch_core::state::DM, "are you there?").await;
+    until("b got the DM", || !texts(&b, &dm, &irch_core::state::DM).is_empty())
+        .await;
+    let n = b.notices();
+    assert_eq!(
+        n.iter().map(|n| &*n.body).collect::<Vec<_>>(),
+        ["are you there?"]
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dm_call_rings_once() {
     let (a, b) = (node("a").await, node("b").await);
@@ -263,6 +283,7 @@ async fn a_dm_call_rings_once() {
     say(&a, &dm, irch_core::state::DM, "psst").await;
     until("b in the DM", || b.spaces().contains(&dm)).await;
     b.notices(); // the message, told
+    b.call(Some((id, general(&b, &id)))).await.unwrap(); // call waiting
     a.call(Some((dm, irch_core::state::DM))).await.unwrap();
     until("b sees the call", || !b.calls(&dm).is_empty()).await;
     let rings = |n: &Node| n.notices().into_iter().filter(|n| n.ring).count();
@@ -544,6 +565,7 @@ async fn writing_rings_a_sleeping_phone() {
     let told =
         |n: &Node| n.view(&id, |s| s.pushes().iter().any(|p| p.1 == url));
     until("a knows b's doorbell", || told(&a) == Some(true)).await;
+    let b_id = b.id();
     b.shutdown().await;
     drop(b);
 
@@ -554,4 +576,14 @@ async fn writing_rings_a_sleeping_phone() {
     say(&a, &id, ch, "lunch?").await;
     let woke = tokio::time::timeout(Duration::from_secs(10), phone).await;
     assert!(woke.expect("rung within seconds").unwrap().is_ok());
+
+    // Asleep again: a new DM (and a call in it) rings it too, though b's
+    // doorbell is told only to spaces b is in.
+    let d = db.clone();
+    let phone = tokio::spawn(async move { wake::rung(&d, &Net::Direct).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!phone.is_finished());
+    a.dm(&id, &b_id).await.unwrap();
+    let woke = tokio::time::timeout(Duration::from_secs(10), phone).await;
+    assert!(woke.expect("a new DM rings").unwrap().is_ok());
 }

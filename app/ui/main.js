@@ -7,6 +7,15 @@
 import { inline, markdown } from "./markdown.js";
 import * as av from "./call.js";
 
+// What keeps video from working, said once per call, and kept in irch's log.
+let troubled = new Set();
+av.call.trouble = (why) => {
+  if (troubled.has(why)) return;
+  troubled.add(why);
+  toast(`Video: ${why}`, true);
+  quiet(invoke("log", { msg: `call: ${why}` }));
+};
+
 const T = window.__TAURI__;
 const invoke = T?.core?.invoke;
 const clip = T?.clipboardManager;
@@ -152,6 +161,16 @@ const store = {
   get: (k) => { try { return localStorage.getItem("irch." + k); } catch {} },
   set: (k, v) => { try { localStorage.setItem("irch." + k, v); } catch {} },
 };
+
+/** Looks, on this device: style.css has each. */
+const THEMES = { neon: "Neon", midnight: "Midnight", nord: "Nord",
+  light: "Light" };
+const theme = (t) => {
+  t = THEMES[t] ? t : "neon";
+  document.documentElement.dataset.theme = t;
+  store.set("theme", t);
+};
+theme(store.get("theme"));
 
 // ---------- state ----------
 
@@ -343,9 +362,13 @@ function renderSidebar() {
     h("button", { title: "Add a space (create or join)", onclick: addSpace },
       icon("plus")));
   const d = dms();
+  // Someone new to message: "@" and their name, from a dropdown.
+  const anyone = S.spaces.some((s) => !s.dm);
   put($("channels"), S.spaces.filter((s) => !s.dm).map(spaceTree),
-    d.length > 0 && [h("div", { class: "space dms" },
-      h("span", { class: "name" }, "Direct messages")), dmList()]);
+    (anyone || d.length > 0) && [h("div", { class: "space dms" },
+      h("span", { class: "name" }, "Direct messages"),
+      anyone && h("button", { class: "gear", title: "Message someone",
+        onclick: () => quickSwitch("@") }, icon("plus"))), dmList()]);
   renderUserPanel();
 }
 
@@ -425,7 +448,11 @@ t.id !== S.ch && badge(t.mentions),
 (isMe(t.by) || s.admin) && h("button", {
   class: "gear", title: "Rename",
   onclick: (e) => { e.stopPropagation(); renameRoom(s, t); },
-}, icon("pencil")));
+}, icon("pencil")),
+(isMe(t.by) || s.admin) && h("button", {
+  class: "gear", title: "Delete",
+  onclick: (e) => { e.stopPropagation(); deleteRoom(s, t); },
+}, icon("trash")));
 
 /** A newer irch: offered once at launch (`quietly`), or on request. */
 async function updates(quietly) {
@@ -537,6 +564,11 @@ function renderHeader() {
   net.className = s?.peers ? "up" : "";
   put(net, s && [h("i", { class: "dot" }),
     `${s.peers} peer${s.peers === 1 ? "" : "s"}`]);
+  // Who, device by device: on hover, or a tap on a phone.
+  const near = (s?.near ?? []).map((p) => `${p.who} (device ${p.device})`);
+  net.title = near.length ? `Connected with:\n${near.join("\n")}`
+    : "Connected with no one now";
+  net.onclick = () => toast(net.title);
   const input = $("input");
   input.placeholder = parent ? `Reply in ${ch.name}`
     : s?.dm ? `Message @${s.name}`
@@ -590,6 +622,7 @@ async function ring() {
   if (here()) return av.leave(rpc);
   if (!av.supported()) return toast("Calls need a newer system web view", 1);
   try {
+    troubled = new Set();
     await av.join(S.sid, S.ch, rpc);
   } catch (e) {
     toast(String(e?.message ?? e), true);
@@ -1459,8 +1492,52 @@ const foot = (...btns) =>
 const cancel = (finish) =>
   h("button", { class: "btn link", onclick: () => finish(null) }, "Cancel");
 
+/** A QR code read with the camera, or null (closed, or no camera). jsQR
+ *  comes only when first wanted. */
+async function scanQR() {
+  let stream;
+  try {
+    if (!window.jsQR) await new Promise((ok, no) => document.head.append(
+      h("script", { src: "./vendor/jsQR.js", onload: ok, onerror: no })));
+    stream = await navigator.mediaDevices.getUserMedia(
+      { video: { facingMode: "environment" } });
+  } catch (e) {
+    return toast(`No camera: ${e?.message ?? e}`, true), null;
+  }
+  const video = h("video", { class: "scan", autoplay: true, muted: true,
+    playsInline: true, srcObject: stream });
+  const c = h("canvas");
+  const g = c.getContext("2d", { willReadFrequently: true });
+  let live = true;
+  const got = await modal((finish) => {
+    const tick = () => {
+      if (!live) return;
+      if (video.videoWidth) {
+        [c.width, c.height] = [video.videoWidth, video.videoHeight];
+        g.drawImage(video, 0, 0);
+        const q = window.jsQR(g.getImageData(0, 0, c.width, c.height).data,
+          c.width, c.height);
+        if (q?.data) return finish(q.data);
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+    return h("div", {},
+      h("div", { class: "m-body" }, h("h2", {}, "Scan the code"),
+        h("p", { class: "sub" }, "Hold the other device's code in view."),
+        video),
+      foot(cancel(finish)));
+  });
+  live = false;
+  stream.getTracks().forEach((t) => t.stop());
+  return got;
+}
+
+/** What `ask` gives when its Scan button was pressed instead. */
+const SCAN = Symbol("scan");
+
 function ask({ title, sub, label, value = "", ok = "Save", placeholder,
-  maxLength = 64, danger }) {
+  maxLength = 64, danger, scan }) {
   return modal((finish) => {
     const input = h("input", { type: "text", value, placeholder, maxLength });
     const submit = () => finish(input.value.trim());
@@ -1474,7 +1551,9 @@ function ask({ title, sub, label, value = "", ok = "Save", placeholder,
     return h("div", {},
       h("div", { class: "m-body" }, h("h2", {}, title),
         sub && h("p", { class: "sub" }, sub),
-        label && h("label", {}, label), input),
+        label && h("label", {}, label), input,
+        scan && h("button", { class: "choice", onclick: () => finish(SCAN) },
+          icon("cam"), "Scan its QR code with the camera")),
       foot(cancel(finish),
         h("button",
           { class: "btn" + (danger ? " red" : ""), onclick: submit }, ok)));
@@ -1555,9 +1634,10 @@ async function createFlow() {
 
 async function joinFlow() {
   if (!(await named())) return;
-  const code = await ask({ title: "Join a space",
+  let code = await ask({ title: "Join a space",
     sub: "Paste an invite someone shared with you.", label: "Invite",
-    placeholder: "irch:join:…", ok: "Join", maxLength: 8192 });
+    placeholder: "irch:join:…", ok: "Join", maxLength: 8192, scan: true });
+  if (code === SCAN) code = await scanQR();
   if (!code) return;
   const id = await call("join", { code }).catch(() => null);
   if (id) {
@@ -1567,11 +1647,12 @@ async function joinFlow() {
 }
 
 async function linkFlow() {
-  const code = await ask({ title: "Link this device",
+  let code = await ask({ title: "Link this device",
     sub: "On your other device, open My Account › Link a device and paste " +
       "its code here. This device becomes you, with all your spaces.",
     label: "Link code", placeholder: "irch:link:…", ok: "Link",
-    maxLength: 8192 });
+    maxLength: 8192, scan: true });
+  if (code === SCAN) code = await scanQR();
   if (!code) return;
   try {
     await invoke("link", { code });
@@ -1650,6 +1731,18 @@ function settings() {
       h("div", { class: "m-body" },
         h("h2", {}, "My Account"),
         h("label", {}, "Display name"), name,
+        h("label", {}, "Theme"),
+        h("div", { class: "chips" }, ...Object.entries(THEMES).map(([k, v]) =>
+          h("button", {
+            class: "chip" + (document.documentElement.dataset.theme === k
+              ? " on" : ""),
+            onclick: (e) => {
+              theme(k);
+              for (const c of e.target.parentNode.children) {
+                c.classList.toggle("on", c === e.target);
+              }
+            },
+          }, v))),
         h("label", {}, "User ID (your public key)"),
         h("div", { class: "row" },
           h("input", { class: "field mono", type: "text", value: S.me.id,
@@ -1762,7 +1855,7 @@ async function linkDevice() {
       "post it anywhere." });
 }
 
-function quickSwitch() {
+function quickSwitch(start = "") {
   const all = S.spaces.flatMap((s) => s.channels.map((ch) => ({ s, ch })));
   // "@…": everyone in a space with us, to message (a DM, or a new one).
   const dmWith = new Set(S.spaces.filter((s) => s.dm).map((s) => s.with));
@@ -1777,8 +1870,8 @@ function quickSwitch() {
     redraw();
   });
   modal((finish) => {
-    const input = h("input",
-      { type: "text", placeholder: "Where would you like to go?" });
+    const input = h("input", { type: "text", value: start,
+      placeholder: "Where would you like to go?" });
     const list = h("div", { class: "qs-list" });
     let sel = 0;
     let hits = [];
@@ -1807,8 +1900,9 @@ function quickSwitch() {
     });
     (redraw = draw)();
     return h("div", { class: "m-body" },
-      h("h2", {}, "Quick Switcher"),
-      h("p", { class: "sub" }, "Channels and DMs; @ for anyone to message."),
+      h("h2", {}, start ? "Message someone" : "Quick Switcher"),
+      h("p", { class: "sub" }, start ? "Type a name: everyone you share a " +
+        "space with." : "Channels and DMs; @ for anyone to message."),
       input, list);
   }).then(async (x) => {
     if (!x?.m) return x && select(x.s.id, x.ch.id);
@@ -1980,6 +2074,24 @@ async function renameRoom(s, t) {
     value: t.name }))?.trim();
   if (name) await call("publish", { space: s.id,
     op: { Topic: { thread: t.id, name } } }).catch(() => {});
+}
+
+/** Gone for everyone, replies and all (its first message stays where it
+ *  was): an admin's to do, or its starter's while the replies are theirs. */
+async function deleteRoom(s, t) {
+  const ok = await confirmBox({ title: `Delete '${t.name}'`,
+    sub: "It and every reply in it go, for everyone. The message it " +
+      "started from stays.", ok: "Delete" });
+  if (!ok) return;
+  const parent = s.channels.find((c) => c.threads.some((x) => x.id === t.id));
+  await call("publish", { space: s.id,
+    op: { Topic: { thread: t.id, name: "" } } }).catch(() => {});
+  S.spaces = await rpc("spaces");
+  const still = S.spaces.find((x) => x.id === s.id)?.channels
+    .some((c) => c.threads.some((x) => x.id === t.id));
+  if (still) return toast("Others replied: only an admin can delete it", true);
+  if (S.ch === t.id && parent) select(s.id, parent.id);
+  schedule("side");
 }
 
 async function leaveSpace() {

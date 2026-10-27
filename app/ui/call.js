@@ -10,6 +10,7 @@ const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
 const shut = (x) => { try { x?.close(); } catch {} };
 const rms = (s) => Math.sqrt(s.reduce((e, x) => e + x * x, 0) / s.length);
 const quiet = (p) => p?.catch?.(() => {});
+const h0 = (tag) => document.createElement(tag);
 
 export const call = {
   on: null, // { space, channel }
@@ -20,7 +21,13 @@ export const call = {
   level: 0, // how loud we are
   peers: new Map(), // id -> { canvas, video (last frame), level, ... }
   changed: () => {},
+  // Why video fails here (the page says so, once): silent, it never shows.
+  trouble: () => {},
 };
+
+// Software VP8 where it can be: some phones' hardware encoders take
+// frames and never give any back.
+const SOFT = { hardwareAcceleration: "prefer-software" };
 
 export const supported = () => typeof AudioEncoder === "function" &&
   typeof VideoDecoder === "function" && !!navigator.mediaDevices;
@@ -105,25 +112,54 @@ export async function video(kind) {
     await quiet(v.play());
     s.getVideoTracks()[0].onended = () => video(null);
     Object.assign(call, { self: v, [kind]: true });
-    let codec = 0, n = 0, w = 0, h = 0;
-    for (; codec < VIDEO.length; codec++) {
-      const c = { codec: VIDEO[codec], width: 640, height: 480 };
-      if ((await VideoEncoder.isConfigSupported(c)).supported) break;
+    let codec = 0, n = 0, w = 0, h = 0, hw = SOFT, sent = 0;
+    const ok = async (c) =>
+      (await VideoEncoder.isConfigSupported(c).catch(() => ({}))).supported;
+    pick: for (const x of [SOFT, {}]) {
+      for (codec = 0; codec < VIDEO.length; codec++) {
+        hw = x;
+        if (await ok({ codec: VIDEO[codec], width: 640, height: 480, ...x })) {
+          break pick;
+        }
+      }
     }
-    venc = new VideoEncoder({ error: () => {},
-      output: (c) => send(c.type === "key" ? 2 : 1, codec + 1, c) });
+    if (codec === VIDEO.length) {
+      call.trouble("this device cannot encode video (no VP8 or H.264)");
+    }
+    venc = new VideoEncoder({
+      error: (e) => call.trouble(`video encoder: ${e.message}`),
+      output: (c) => (sent++, send(c.type === "key" ? 2 : 1, codec + 1, c)),
+    });
+    // Frames from a canvas, where a video element gives none.
+    const canvas = h0("canvas");
+    const frame = (t) => {
+      try {
+        return new VideoFrame(v, { timestamp: t });
+      } catch {
+        [canvas.width, canvas.height] = [w, h];
+        canvas.getContext("2d").drawImage(v, 0, 0, w, h);
+        return new VideoFrame(canvas, { timestamp: t });
+      }
+    };
     timer = setInterval(() => {
       if (v.readyState < 2 || venc.encodeQueueSize > 2) return;
-      if (v.videoWidth !== w || v.videoHeight !== h) {
-        [w, h, n] = [v.videoWidth, v.videoHeight, 0];
-        venc.configure({ codec: VIDEO[codec], width: w, height: h,
-          bitrate: fps === 10 ? 1.5e6 : 6e5, framerate: fps,
-          latencyMode: "realtime", avc: { format: "annexb" } });
+      try {
+        if (v.videoWidth !== w || v.videoHeight !== h) {
+          [w, h, n] = [v.videoWidth, v.videoHeight, 0];
+          venc.configure({ codec: VIDEO[codec], width: w, height: h,
+            bitrate: fps === 10 ? 1.5e6 : 6e5, framerate: fps, ...hw,
+            latencyMode: "realtime", avc: { format: "annexb" } });
+        }
+        const f = frame(performance.now() * 1000);
+        venc.encode(f, { keyFrame: n++ % (2 * fps) === 0 });
+        f.close();
+      } catch (e) {
+        call.trouble(`video: ${e.message ?? e}`);
       }
-      const f = new VideoFrame(v, { timestamp: performance.now() * 1000 });
-      venc.encode(f, { keyFrame: n++ % (2 * fps) === 0 });
-      f.close();
     }, 1000 / fps);
+    // Nothing out in a few seconds: say so, rather than send nothing.
+    setTimeout(() => venc?.state === "configured" && !sent &&
+      call.trouble("this device's video encoder gives no frames"), 5000);
   }
   call.changed();
 }
@@ -156,7 +192,10 @@ function peer(id) {
   };
   const vdec = () => {
     Object.assign(p, { codec: 0, key: false });
-    p.vdec = new VideoDecoder({ error: vdec, output: (f) => {
+    p.vdec = new VideoDecoder({ error: (e) => {
+      call.trouble(`decoding video: ${e.message}`);
+      vdec();
+    }, output: (f) => {
       const c = p.canvas;
       if (c.width !== f.displayWidth) c.width = f.displayWidth;
       if (c.height !== f.displayHeight) c.height = f.displayHeight;

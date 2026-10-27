@@ -24,8 +24,8 @@ object Wake {
   /** Start or wake the node, catch up; what to notify, as JSON. */
   @JvmStatic external fun run(ctx: Context, dir: String, push: String?): String
 
-  /** Keep the node running; the next things to notify, as JSON. */
-  @JvmStatic external fun next(ctx: Context, dir: String): String
+  /** Until irch's doorbell rings (waiting, with the CPU let sleep). */
+  @JvmStatic external fun rung(ctx: Context, dir: String): String
 
   /** Hand Android's context back before the activity's runtime takes it. */
   @JvmStatic external fun release()
@@ -53,12 +53,28 @@ class IrchPush : PushService() {
     // the seconds this service has.
     runCatching { startForegroundService(i) }.onFailure {
       Thread {
-        runCatching {
-          val got = JSONArray(Wake.run(applicationContext, dataDir.absolutePath, push))
-          for (k in 0 until got.length()) alert(this, got.getJSONObject(k))
-        }
+        catchUp(this, push)
       }.start()
     }
+  }
+}
+
+/**
+ * Catch up, then notify, with the CPU held awake (at most a minute):
+ * asleep, Android would freeze irch mid-sync, and the notification with
+ * it, until something else woke the phone.
+ */
+fun catchUp(ctx: Context, push: String?) {
+  val pm = ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+  val lock = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "irch:catch-up")
+  lock.acquire(60_000)
+  try {
+    runCatching {
+      val got = JSONArray(Wake.run(ctx.applicationContext, ctx.dataDir.absolutePath, push))
+      for (k in 0 until got.length()) alert(ctx, got.getJSONObject(k))
+    }
+  } finally {
+    if (lock.isHeld) lock.release()
   }
 }
 
@@ -80,11 +96,7 @@ class IrchWake : Service() {
     }
     val push = intent?.getStringExtra("push")
     Thread {
-      runCatching {
-        val dir = dataDir.absolutePath
-        val got = JSONArray(Wake.run(applicationContext, dir, push))
-        for (k in 0 until got.length()) alert(this, got.getJSONObject(k))
-      }
+      catchUp(this, push)
       stopSelf(id)
     }.start()
     return START_NOT_STICKY
@@ -120,12 +132,9 @@ class IrchLive : Service() {
       startForeground(3, n)
     }
     if (running.compareAndSet(false, true)) Thread {
-      val dir = dataDir.absolutePath
       while (true) {
-        val got = runCatching { JSONArray(Wake.next(applicationContext, dir)) }
-          .getOrDefault(JSONArray())
-        for (k in 0 until got.length()) alert(this, got.getJSONObject(k))
-        if (got.length() == 0) Thread.sleep(5000) // could not start: again
+        runCatching { Wake.rung(applicationContext, dataDir.absolutePath) }
+        catchUp(this, null)
       }
     }.start()
     return START_STICKY
