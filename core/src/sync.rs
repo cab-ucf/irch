@@ -20,8 +20,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub const ALPN: &[u8] = b"irch/sync/1";
-const MAX_FRAME: usize = 64 << 20;
 pub type Bucket = (u32, u32, [u8; 16]);
+/// A session's whole time: a slow one resumes next time, a stalled one ends.
+pub const LIMIT: Duration = Duration::from_secs(300);
 
 #[derive(Serialize, Deserialize)]
 pub struct Hello {
@@ -47,7 +48,9 @@ pub async fn initiate(
     let devices = token.map(|_| sp.devices()).unwrap_or_default();
     let hello = Hello { space: sp.id, root: root(&mine), token, devices };
     write(&mut tx, &hello).await?;
-    let Some(theirs) = read::<Option<Vec<Bucket>>>(&mut rx).await? else {
+    // A bucket a day: a megabyte is a century.
+    let Some(theirs) = read::<Option<Vec<Bucket>>>(&mut rx, 1 << 20).await?
+    else {
         return Ok(0);
     };
     let mut days: BTreeMap<u32, (Option<Bucket>, Option<Bucket>)> =
@@ -57,7 +60,7 @@ pub async fn initiate(
     let diff = days.into_iter().filter(|(_, (a, b))| a != b).map(|(d, _)| d);
     let ids: BTreeMap<u32, Vec<Id>> = diff.map(|d| (d, sp.ids(d))).collect();
     write(&mut tx, &ids).await?;
-    let want: BTreeSet<Id> = read(&mut rx).await?;
+    let want: BTreeSet<Id> = read(&mut rx, 16 << 20).await?;
     let got = take(n, sp, &mut rx).await?;
     give(sp, &mut tx, &want.into_iter().collect::<Vec<_>>()).await?;
     tx.finish()?;
@@ -71,16 +74,20 @@ static SESSIONS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(32);
 
 pub async fn respond(n: &Arc<Node>, c: &Connection) -> Result<()> {
     let _turn = SESSIONS.try_acquire().map_err(|_| anyhow!("busy"))?;
-    session(n, c).await?;
+    tokio::time::timeout(LIMIT, session(n, c)).await??;
     let _ = tokio::time::timeout(Duration::from_secs(5), c.closed()).await;
     Ok(())
 }
 
 async fn session(n: &Arc<Node>, c: &Connection) -> Result<()> {
-    let (mut tx, mut rx) = c.accept_bi().await?;
-    // From anyone, before we know the space: small (2,000 devices).
-    let hello: Hello =
-        postcard::from_bytes(&unframe(&mut rx, 64 << 10).await?)?;
+    // From anyone, before we know the space: small (2,000 devices), and soon.
+    let hello = async {
+        let (tx, mut rx) = c.accept_bi().await?;
+        let b = unframe(&mut rx, 64 << 10).await?;
+        anyhow::Ok((tx, rx, postcard::from_bytes::<Hello>(&b)?))
+    };
+    let ten = Duration::from_secs(10);
+    let (mut tx, mut rx, hello) = tokio::time::timeout(ten, hello).await??;
     let sp = n
         .find(&hello, c.remote_id())
         .ok_or_else(|| anyhow!("unknown space"))?;
@@ -92,14 +99,18 @@ async fn session(n: &Arc<Node>, c: &Connection) -> Result<()> {
     write(&mut tx, &Some(mine)).await?;
     let keep = n.takes(&sp, &c.remote_id());
     let (mut want, mut have): (Vec<Id>, Vec<Id>) = (vec![], vec![]);
-    // 500,000 ids at most.
-    let days: BTreeMap<u32, BTreeSet<Id>> =
+    // 500,000 ids at most; days as u16 (to 2149), so however many a peer
+    // names, they are 65,536 at most.
+    let days: BTreeMap<u16, Vec<Id>> =
         postcard::from_bytes(&unframe(&mut rx, 16 << 20).await?)?;
-    for (day, theirs) in days {
-        let ours = sp.ids(day);
+    for (day, mut theirs) in days {
+        theirs.sort_unstable();
+        theirs.dedup();
+        let ours = sp.ids(day.into());
         let new = theirs.iter().filter(|i| ours.binary_search(i).is_err());
         want.extend(new.filter(|_| keep));
-        have.extend(ours.into_iter().filter(|i| !theirs.contains(i)));
+        let lack = |i: &Id| theirs.binary_search(i).is_err();
+        have.extend(ours.into_iter().filter(lack));
     }
     write(&mut tx, &want).await?;
     give(&sp, &mut tx, &have).await?;
@@ -143,8 +154,11 @@ async fn write<T: Serialize>(tx: &mut SendStream, v: &T) -> Result<()> {
     frame(tx, &postcard::to_allocvec(v)?).await
 }
 
-async fn read<T: DeserializeOwned>(rx: &mut RecvStream) -> Result<T> {
-    Ok(postcard::from_bytes(&unframe(rx, MAX_FRAME).await?)?)
+async fn read<T: DeserializeOwned>(
+    rx: &mut RecvStream,
+    max: usize,
+) -> Result<T> {
+    Ok(postcard::from_bytes(&unframe(rx, max).await?)?)
 }
 
 pub(crate) async fn frame(tx: &mut SendStream, b: &[u8]) -> Result<()> {

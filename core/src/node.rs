@@ -2125,7 +2125,8 @@ impl Node {
             c.close(0u32.into(), b"done");
             n
         };
-        let r = r.await;
+        let r = tokio::time::timeout(sync::LIMIT, r).await;
+        let r = r.unwrap_or_else(|e| Err(e.into()));
         lock(&sp.busy).remove(&id);
         match r {
             Ok(0) => {}
