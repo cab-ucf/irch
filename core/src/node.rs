@@ -175,6 +175,18 @@ fn named(n: &str) -> Result<&str> {
     Ok(n)
 }
 
+/// One irch to a folder: a second says so, rather than wait on the first.
+async fn hold(dir: &Path) -> Result<std::fs::File> {
+    let f = std::fs::File::create(dir.join("lock"))?;
+    for _ in 0..50 {
+        if f.try_lock().is_ok() {
+            return Ok(f);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    bail!("another irch is using {}", dir.display())
+}
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -444,6 +456,8 @@ pub struct Node {
     spaces: RwLock<HashMap<Id, Arc<Space>>>,
     local: Mutex<Local>,
     prefs: Mutex<Prefs>,
+    // Closed conversations, and when: hidden until something newer.
+    closed: Mutex<BTreeMap<Id, u64>>,
     // Endpoints we woke: when last, and whether one more is held back.
     wake: Mutex<HashMap<String, (Option<Instant>, bool)>>,
     rang: Mutex<HashSet<(Id, Id, Ch)>>,
@@ -455,6 +469,7 @@ pub struct Node {
     serve: Option<[u8; 16]>,
     big: Option<String>,
     files: FsStore,
+    held: Mutex<Option<std::fs::File>>,
     call: Mutex<Option<Call>>,
     media: call::Media,
 }
@@ -529,6 +544,15 @@ enum Ask {
     Put([u8; 16], Vec<u8>),
     // Fetch a sealed file from the asker and keep it (a password past 5 GB).
     Keep([u8; 16], Id, Option<String>),
+    // A member's small sealed file, for a space this storage node keeps.
+    Hold(Id, [u8; 16], Id),
+}
+
+/// A storage node's key for one space's small files: members have it.
+pub fn hold_token(token: &[u8; 16], space: &Id) -> [u8; 16] {
+    let mut h = blake3::Hasher::new_derive_key("irch hold 1");
+    h.update(token).update(&space.0);
+    h.finalize().as_bytes()[..16].try_into().expect("16 of 32")
 }
 
 fn secret(path: &Path, link: Option<Key>) -> Result<Key> {
@@ -562,7 +586,10 @@ fn gate(n: std::sync::Weak<Node>) -> iroh_blobs::provider::events::EventSender {
                 // serves them, and its own, to members and its storage.
                 let n = n.upgrade().zip(m.endpoint_id);
                 let ok = n.is_some_and(|(n, d)| {
-                    n.serve.is_some() || n.member_device(&d) || n.mine(&d)
+                    n.serve.is_some()
+                        || n.member_device(&d)
+                        || n.mine(&d)
+                        || n.hosting(&d)
                 });
                 let r = if ok { Ok(()) } else { Err(AbortReason::Permission) };
                 let _ = m.tx.send(r).await;
@@ -589,6 +616,7 @@ impl Node {
             &cfg.dir,
             std::os::unix::fs::PermissionsExt::from_mode(0o700),
         )?;
+        let held = hold(&cfg.dir).await?;
         let link: Option<(Key, Vec<EndpointAddr>)> =
             cfg.link.as_deref().map(|c| uncode("link", c)).transpose()?;
         let me =
@@ -601,6 +629,7 @@ impl Node {
             SecretKey::from_bytes(&secret(&cfg.dir.join("device"), None)?);
         let mut local: Local = store::load(&cfg.dir.join("local"));
         let prefs: Prefs = store::load(&cfg.dir.join("prefs"));
+        let closed = store::load(&cfg.dir.join("closed"));
         let lookup = MemoryLookup::new();
         local.peers.values().for_each(|a| lookup.add_endpoint_info(a.clone()));
         let bind = async |port: u16| {
@@ -649,6 +678,7 @@ impl Node {
             invisible: AtomicBool::new(local.invisible),
             local: Mutex::new(local),
             prefs: Mutex::new(prefs),
+            closed: Mutex::new(closed),
             wake: Mutex::default(),
             rang: Mutex::default(),
             push: OnceLock::new(),
@@ -658,6 +688,7 @@ impl Node {
             serve,
             big: cfg.big,
             files,
+            held: Mutex::new(Some(held)),
             call: Mutex::new(None),
             media: broadcast::channel(128).0,
         });
@@ -727,6 +758,30 @@ impl Node {
         if let Err(e) = store::save(&self.dir.join("local"), &*l) {
             warn!("saving local state: {e}");
         }
+    }
+
+    /// Out of sight, kept: back with its next message, or when opened.
+    pub fn hide(&self, id: &Id, on: bool) {
+        let last = self.last(id).unwrap_or_default();
+        let mut c = lock(&self.closed);
+        let _ = if on { c.insert(*id, last) } else { c.remove(id) };
+        if let Err(e) = store::save(&self.dir.join("closed"), &*c) {
+            warn!("saving closed: {e}");
+        }
+        drop(c);
+        self.emit(Event::Changed { space: *id });
+    }
+
+    pub fn hidden(&self, id: &Id) -> bool {
+        let t = lock(&self.closed).get(id).copied();
+        t.is_some_and(|t| self.last(id).unwrap_or_default() <= t)
+    }
+
+    fn last(&self, id: &Id) -> Option<u64> {
+        let last = |s: &State| {
+            s.channels().iter().filter_map(|(c, _)| s.latest(c)).max()
+        };
+        self.view(id, last).flatten()
     }
 
     fn save_prefs(&self) {
@@ -1108,6 +1163,9 @@ impl Node {
         l.hosted.remove(id);
         drop(l);
         self.persist();
+        if lock(&self.closed).contains_key(id) {
+            self.hide(id, false);
+        }
         self.emit(Event::Changed { space: *id });
     }
 
@@ -1445,6 +1503,7 @@ impl Node {
         let me = self.id();
         for sp in self.all() {
             if self.view(&sp.id, |s| s.peer(&me) == Some(*user)) == Some(true) {
+                self.hide(&sp.id, false);
                 return Ok(sp.id);
             }
         }
@@ -1732,19 +1791,34 @@ impl Node {
 
     async fn host(self: &Arc<Self>, sp: &Arc<Space>, addr: EndpointAddr) {
         self.lookup.add_endpoint_info(addr.clone());
-        let me = self.id();
-        let list = self.view(&sp.id, |s| {
-            s.role(&me) == Role::Admin
-                && !s.hosts().iter().any(|h| h.id == addr.id)
-        });
-        if list == Some(true) {
-            let _ =
-                self.post(sp, Op::Host { node: addr.clone(), on: true }).await;
-        }
+        self.list(sp, &addr).await;
         let id = addr.id;
         self.sync(sp, addr);
         if let Some(tx) = sp.tx() {
             let _ = tx.join_peers(vec![id]).await;
+        }
+    }
+
+    /// An admin names our storage node in the space, and how members have
+    /// it keep their small files.
+    async fn list(self: &Arc<Self>, sp: &Arc<Space>, addr: &EndpointAddr) {
+        let me = self.id();
+        let token = self.stores(&sp.id).into_iter().find(|s| s.0.id == addr.id);
+        let token = token.map(|s| hold_token(&s.1, &sp.id));
+        let (list, hold) = self
+            .view(&sp.id, |s| {
+                let admin = s.role(&me) == Role::Admin;
+                let listed = s.hosts().iter().any(|h| h.id == addr.id);
+                let held = token.is_none() || s.hold(&addr.id) == token;
+                (admin && !listed, admin && !held && sp.id != self.own)
+            })
+            .unwrap_or_default();
+        if list {
+            let _ =
+                self.post(sp, Op::Host { node: addr.clone(), on: true }).await;
+        }
+        if let Some(token) = token.filter(|_| hold) {
+            let _ = self.post(sp, Op::Hold { node: addr.id, token }).await;
         }
     }
 
@@ -1777,6 +1851,10 @@ impl Node {
         let tag = self.files.add_path_with_opts(opts).with_tag().await?;
         let hash = Id(*tag.hash.as_bytes());
         self.keep(space, &hash, password).await?;
+        if size <= PREVIEW as u64 {
+            let (n, space) = (self.clone(), *space);
+            tokio::spawn(async move { n.hold(&space, &hash).await });
+        }
         let name = name.chars().take(128).collect();
         Ok(File { name, size, hash, key: Id(key) })
     }
@@ -1822,6 +1900,27 @@ impl Node {
             }
         }
         Ok(())
+    }
+
+    /// The space's storage nodes (not this user's: `keep`) fetch a small
+    /// file from here, so it shows for everyone while we are away.
+    async fn hold(self: &Arc<Self>, space: &Id, hash: &Id) {
+        let mine: Vec<_> =
+            self.stores(space).into_iter().map(|s| s.0.id).collect();
+        let hosts = self.view(space, |s| s.holds()).unwrap_or_default();
+        for (addr, token) in
+            hosts.into_iter().filter(|h| !mine.contains(&h.0.id))
+        {
+            let ask = Ask::Hold(*space, token, *hash);
+            let ask = self.ask(addr, &ask);
+            match tokio::time::timeout(Duration::from_secs(30), ask).await {
+                Ok(Ok(no)) if !no.is_empty() => {
+                    warn!("storage node: {}", String::from_utf8_lossy(&no))
+                }
+                Ok(Err(e)) => warn!("storage node: {e:#}"),
+                _ => {}
+            }
+        }
     }
 
     /// One of this user's storage nodes.
@@ -1895,6 +1994,13 @@ impl Node {
         Ok(())
     }
 
+    /// A storage node keeping one of our spaces.
+    fn hosting(&self, d: &EndpointId) -> bool {
+        let has =
+            |id: &Id| self.view(id, |s| s.hosts().iter().any(|a| a.id == *d));
+        self.spaces().iter().any(|id| has(id) == Some(true))
+    }
+
     fn member_device(&self, d: &EndpointId) -> bool {
         let has =
             |id: &Id| self.view(id, |s| s.devices(usize::MAX).contains(d));
@@ -1919,7 +2025,10 @@ impl Node {
             Err(_) => match self.pull(space, &f.hash, len).await {
                 Ok(files) => {
                     let (n, h) = (self.clone(), (*space, f.hash));
-                    tokio::spawn(async move { n.keep(&h.0, &h.1, None).await });
+                    tokio::spawn(async move {
+                        let _ = n.keep(&h.0, &h.1, None).await;
+                        n.hold(&h.0, &h.1).await;
+                    });
                     files.get_bytes(hash).await?.to_vec()
                 }
                 Err(_) => self.legacy(space, f).await?,
@@ -2026,6 +2135,18 @@ impl Node {
         Ok(b)
     }
 
+    /// Blob `h`, fetched from `from` in the background, kept.
+    fn fetch(&self, h: &Id, from: EndpointId) {
+        let (files, ep) = (self.files.clone(), self.ep.clone());
+        let hash = iroh_blobs::Hash::from_bytes(h.0);
+        tokio::spawn(async move {
+            let got = files.downloader(&ep).download(hash, vec![from]);
+            if let Err(e) = got.await {
+                warn!("keeping a file: {e:#}");
+            }
+        });
+    }
+
     async fn give(&self, c: &Connection) -> Result<()> {
         let (mut tx, mut rx) = c.accept_bi().await?;
         // A file's worth is read only after the head (and token), by storage.
@@ -2034,6 +2155,7 @@ impl Node {
         let max = match (head[0], self.serve) {
             (1 | 2, Some(t)) if head[1..] == t => PREVIEW + 16,
             (1 | 2, _) => bail!("not a storage node of yours"),
+            (3, Some(_)) => 128,
             _ => 64,
         };
         let rest = rx.read_to_end(max).await?;
@@ -2060,20 +2182,28 @@ impl Node {
                     let no = "over 5 GB: storage nodes keep it only with their password";
                     tx.write_all(no.as_bytes()).await?;
                 } else {
-                    let (files, ep) = (self.files.clone(), self.ep.clone());
-                    let hash = iroh_blobs::Hash::from_bytes(h.0);
-                    tokio::spawn(async move {
-                        let got =
-                            files.downloader(&ep).download(hash, vec![from]);
-                        if let Err(e) = got.await {
-                            warn!("keeping a file: {e:#}");
-                        }
-                    });
+                    self.fetch(&h, from);
+                }
+            }
+            Ask::Hold(sp, t, h)
+                if self.serve.is_some_and(|s| hold_token(&s, &sp) == t)
+                    && self.get(&sp).is_ok() =>
+            {
+                let from = c.remote_id();
+                let size = self.verified(&[from], &h).await;
+                let size = size.context("not reachable, or not there")?;
+                if size > crate::crypto::sealed_len(PREVIEW as u64) {
+                    let no =
+                        "over 25 MB: the sender's own storage node keeps it";
+                    tx.write_all(no.as_bytes()).await?;
+                } else {
+                    self.fetch(&h, from);
                 }
             }
             Ask::Put(..) | Ask::Keep(..) => {
                 bail!("not a storage node of yours")
             }
+            Ask::Hold(..) => bail!("not a space this storage node keeps"),
         }
         tx.finish()?;
         let _ = tokio::time::timeout(Duration::from_secs(10), c.closed()).await;
@@ -2267,6 +2397,7 @@ impl Node {
         if let Some(r) = self.router.get() {
             let _ = r.shutdown().await;
         }
+        lock(&self.held).take();
     }
 }
 
@@ -2397,6 +2528,12 @@ async fn heartbeat(n: Weak<Node>) {
             }
             n.signal(&sp, Op::Here).await;
             n.emit(Event::Presence { space: sp.id });
+            // Pairings from before `Hold`, and admins since made.
+            if i % 10 == 1 {
+                for (addr, _) in n.stores(&sp.id) {
+                    n.list(&sp, &addr).await;
+                }
+            }
         }
     }
 }

@@ -98,6 +98,7 @@ pub struct State {
     epochs: Vec<Epoch>,
     bans: Vec<(Pos, Id)>,
     hosts: BTreeMap<EndpointId, Option<EndpointAddr>>,
+    holds: BTreeMap<EndpointId, [u8; 16]>,
     spaces: BTreeMap<Id, Option<Invite>>,
     storage: BTreeMap<EndpointId, Option<(EndpointAddr, [u8; 16])>>,
     stored: BTreeMap<(EndpointId, Id), bool>,
@@ -196,6 +197,7 @@ impl State {
         self.profiled = HashMap::new();
         (self.epochs, self.hosts, self.bans) =
             (vec![], BTreeMap::new(), vec![]);
+        self.holds = BTreeMap::new();
         (self.spaces, self.storage) = (BTreeMap::new(), BTreeMap::new());
         self.stored = BTreeMap::new();
         if self.dm.is_some() {
@@ -249,6 +251,9 @@ impl State {
                 // Admins' to list: invites send newcomers there first.
                 Op::Host { node, on } if admin => {
                     drop(self.hosts.insert(node.id, on.then(|| node.clone())))
+                }
+                Op::Hold { node, token } if admin => {
+                    self.holds.insert(*node, *token);
                 }
                 Op::Joined { invite } if own => {
                     self.spaces.insert(invite.id(), Some(invite.clone()));
@@ -472,6 +477,18 @@ impl State {
 
     pub fn hosts(&self) -> Vec<EndpointAddr> {
         self.hosts.values().flatten().cloned().collect()
+    }
+
+    /// Hosts, with what keeps a small file there.
+    pub fn holds(&self) -> Vec<(EndpointAddr, [u8; 16])> {
+        let hold = |(id, a): (&EndpointId, &Option<EndpointAddr>)| {
+            Some((a.clone()?, *self.holds.get(id)?))
+        };
+        self.hosts.iter().filter_map(hold).collect()
+    }
+
+    pub fn hold(&self, node: &EndpointId) -> Option<[u8; 16]> {
+        self.holds.get(node).copied()
     }
 
     pub fn spaces(&self) -> &BTreeMap<Id, Option<Invite>> {

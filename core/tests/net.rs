@@ -245,11 +245,17 @@ async fn direct_messages() {
     until("b got the DM", || texts(&b, &dm, &irch_core::state::DM) == ["psst"])
         .await;
     assert!(b.spaces().contains(&dm));
+    a.hide(&dm, true);
+    assert!(a.hidden(&dm) && a.spaces().contains(&dm), "closed, not gone");
     say(&b, &dm, irch_core::state::DM, "hey").await;
     until("a got the answer", || {
         texts(&a, &dm, &irch_core::state::DM).len() == 2
     })
     .await;
+    assert!(!a.hidden(&dm), "back with its next message");
+    a.hide(&dm, true);
+    a.dm(&id, &b.id()).await.unwrap();
+    assert!(!a.hidden(&dm), "back when opened");
 }
 
 /// A DM's very first message is news, though it came before b was in it.
@@ -683,4 +689,24 @@ async fn writing_rings_a_sleeping_phone() {
     a.dm(&id, &b_id).await.unwrap();
     let woke = tokio::time::timeout(Duration::from_secs(10), phone).await;
     assert!(woke.expect("a new DM rings").unwrap().is_ok());
+}
+
+/// A member's photo waits on the space's storage node, though it is not
+/// theirs: everyone sees it while its sender is away.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_photo_waits_on_the_spaces_storage_node() {
+    let s = start(&dir("s"), "s", None, true).await;
+    let (a, b, c) = (node("a").await, node("b").await, node("c").await);
+    let id = a.create("lab").await.unwrap();
+    pair(&a, &s, &[id]).await;
+    for n in [&b, &c] {
+        n.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    }
+    let held = || b.view(&id, |st| st.holds().len()) == Some(1);
+    until("b learns how s keeps small files", held).await;
+    let f = b.attach(&id, "cat.png", b"a photo").await.unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await; // s fetches it
+    b.shutdown().await;
+    drop(b);
+    assert_eq!(c.file(&id, &f).await.unwrap(), b"a photo", "from s");
 }

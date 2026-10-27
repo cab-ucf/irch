@@ -1,4 +1,4 @@
-# irch
+# <img src="app/ui/logo.svg" width="40" align="top"> irch
 
 Private, peer-to-peer community chat shaped like Discord, with no server:
 spaces, channels, threads, DMs, voice and video calls. A small Rust core on
@@ -35,22 +35,31 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
 - DMs, voice messages, files sealed in chunks and kept by storage nodes
   (to 5 GB; more with the node's `--big-password`), or shared from your
   device at any size; previews of images, audio, video, PDFs.
+- Photos, voice and short videos (to 25 MB) wait on the space's storage
+  nodes whoever sent them, so everyone sees them inline, sender away.
 - Voice and video calls with screen sharing; a DM call rings like a phone.
 - Notifications on desktops and phones, per space: all, @mentions or none.
 - Search on this device, Ctrl+K switcher, drafts per channel, vim keys
   (Esc, then `j`/`k`, `r`, `e`, `dd`, `?`), swipe gestures on phones.
+- The terminal client is modal like vim: counts, `gg`/`G`, `/` and `n`,
+  `:` commands, `l`/`h` into and out of threads, `J`/`K` channels, `?`.
+- A DM closes (✕) and comes back with its next message; deleting it is
+  separate (its menu, or `:leave`).
 - Several profiles per device, linked devices, invisible mode, themes
   (Neon, Midnight, Nord, UCF, Light).
 - *Add to notes*: a message or thread lands in a
   [loroh](https://github.com/cab-ucf/siroh) note as a task or quote, with
   an `irch://` link back.
+- `irch --api`: JSON calls on stdin, answers and events on stdout, for bots
+  and bridges; a [tydig](https://github.com/cab-ucf/tydig) project's
+  Discussion is a channel this way.
 
 ## How it works
 
 ```text
 op    = Profile | Rename | Channel | Order | Role | Post | Edit | React | Pin
-      | Topic | Rekey | Back | Host | Knock | Joined | Left | Storage | Store
-      | Push | Typing | Here | Call | Gone   (the last four: live, not kept)
+      | Topic | Rekey | Back | Host | Hold | Knock | Joined | Left | Storage
+      | Store | Push | Typing | Here | Call | Gone (the last four: live)
 env   = { epoch tag, time, XChaCha20-Poly1305(author ‖ device ‖ sig ‖ op) }
 space = a grow-only set of envs;   state = a deterministic fold of it
 ```
@@ -90,6 +99,8 @@ space = a grow-only set of envs;   state = a deterministic fold of it
 - Peers see each other's addresses, relays see endpoint ids and traffic,
   storage nodes see sizes, times and devices.
 - Calls are for a handful of people; macOS needs Safari 26's WebKit.
+- Any member, banned ones included, can have the space's storage nodes
+  keep sealed files up to 25 MB each; its owner stops by unhosting it.
 - A storage code is a password. Unaudited.
 
 ## Layout

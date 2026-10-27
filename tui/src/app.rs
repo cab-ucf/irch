@@ -8,58 +8,167 @@ use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const HELP: &str = "\
-/create NAME     a new space        /join CODE   join with an invite
-/invite          invite code        /leave       leave this space
-/channel NAME    new channel        /rmchannel   delete this channel
-/rename NAME     rename space       /nick NAME   your name everywhere
-/reply TEXT      reply to the last message by someone else
-/thread TEXT     reply in its thread (indented under the channel)
-/room NAME       a named thread here (in a thread: renames it)
-/search WORDS    messages in this space with every word
-/note [FILE]     it into your notes ($LOROH_VAULT or ~/notes; Inbox.md)
-/todo [FILE]     it as a task there (in a thread: the whole thread)
-/react EMOJI     react to it        /edit TEXT   edit your last message
-/delete          delete your last   /dm USER     a direct message
-/admin USER  /member USER  /ban USER  /unban USER  (admins)
-/rekey           new key, old invites stop working (admins)
-/link            become you on another device (keep it secret)
-/store CODE      pair with a storage node (local: this computer's)
-/store here      keep this space on your storage nodes
-/file PATH TEXT  send a file        /save        save the last file here
-/share PATH TEXT share from here, any size, while irch runs
-/invisible       no presence or typing    /quit
-Ctrl-N/P or Alt-Up/Down: channel   PgUp/PgDn: scroll   Esc: close";
+NORMAL                                  INSERT (i a I A o, or r t e)
+j k ↓ ↑   newer / older message (5k)    Enter    send
+G  gg     latest / oldest               Esc ^c   back, the draft kept
+^d ^u     ten messages  ^f ^b  twenty   ↑        (empty) edit your last
+J K gt gT next / previous channel       ^w ^u    delete word / to start
+H L       previous / next space         ^a ^e    start / end
+l Enter   open its thread   h  back     ^n ^p    channel, from anywhere
+r reply   t new thread   e edit   dd delete   y copy   p pin   + react
+/ n N     find here, next, previous     ^k       jump to a channel or DM
+x         close a DM (kept; back with its next message)
+:         a command   ?  this   esc q  close this   ZZ :q  quit
+
+:create NAME  :join CODE  :invite  :dm USER  :b NAME (go)  :nick NAME
+:leave        leave a space; in a DM, delete it from your devices
+:close        put a DM away, kept     :invisible  no presence or typing
+:channel NAME  :rmchannel  :rename NAME  :room NAME (a named thread)
+:reply TEXT  :thread TEXT  :react EMOJI  :edit TEXT  :delete
+:search WORDS  in this space          :note [FILE]  :todo [FILE]
+:file PATH TEXT  send a file   :share PATH TEXT  from here   :save
+:admin :member :ban :unban USER  :rekey  :link  :store CODE|local|here";
 
 type Typing = HashMap<(Id, Ch), HashMap<Id, Instant>>;
+type At = Option<(Id, Option<Ch>)>;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Normal,
+    Insert,
+    Cmd,
+    Find,
+    Jump,
+}
+
+/// What Enter does with the draft.
+#[derive(Clone, Copy, PartialEq)]
+enum Draft {
+    New,
+    Reply(Id),
+    Thread(Id),
+    Edit(Id),
+}
+
+enum Ask {
+    Delete(Id),
+    Leave(Id),
+}
+
+/// A line with a cursor, edited with readline's keys.
+#[derive(Default)]
+struct Field {
+    text: String,
+    at: usize,
+}
+
+impl Field {
+    fn byte(&self) -> usize {
+        self.text.char_indices().nth(self.at).map_or(self.text.len(), |c| c.0)
+    }
+
+    fn len(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    fn set(&mut self, s: &str) {
+        (self.text, self.at) = (s.into(), s.chars().count());
+    }
+
+    fn take(&mut self) -> String {
+        self.at = 0;
+        std::mem::take(&mut self.text)
+    }
+
+    /// False if `k` is not one of its keys.
+    fn key(&mut self, k: KeyEvent) -> bool {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let b = self.byte();
+        match k.code {
+            KeyCode::Char('a') if ctrl => self.at = 0,
+            KeyCode::Char('e') if ctrl => self.at = self.len(),
+            KeyCode::Home => self.at = 0,
+            KeyCode::End => self.at = self.len(),
+            KeyCode::Left => self.at = self.at.saturating_sub(1),
+            KeyCode::Right => self.at = (self.at + 1).min(self.len()),
+            KeyCode::Char('u') if ctrl => {
+                self.text.drain(..b);
+                self.at = 0;
+            }
+            KeyCode::Char('w') if ctrl => {
+                let head = self.text[..b].trim_end();
+                let cut = head.char_indices().rev().find(|c| c.1 == ' ');
+                let cut = cut.map_or(0, |c| c.0 + 1);
+                self.at -= self.text[cut..b].chars().count();
+                self.text.drain(cut..b);
+            }
+            KeyCode::Backspace if self.at > 0 => {
+                self.at -= 1;
+                self.text.remove(self.byte());
+            }
+            KeyCode::Delete if self.at < self.len() => {
+                self.text.remove(b);
+            }
+            KeyCode::Backspace | KeyCode::Delete => {}
+            KeyCode::Char(c) if !ctrl => {
+                self.text.insert(b, c);
+                self.at += 1;
+            }
+            _ => return false,
+        }
+        true
+    }
+}
 
 struct App {
     n: Arc<Node>,
-    at: Option<(Id, Option<Ch>)>,
-    input: String,
+    at: At,
+    mode: Mode,
+    back: Mode,
+    draft: Draft,
+    field: Field,
+    prompt: Field,
+    drafts: HashMap<(Id, Ch), String>,
+    sel: Option<Id>,
+    top: Cell<usize>,
+    count: usize,
+    pend: Option<char>,
+    ask: Option<Ask>,
+    found: String,
+    pick: usize,
     status: String,
     notice: Option<String>,
-    scroll: u16,
     typing: Typing,
     typed: Option<Instant>,
 }
 
 pub async fn run(n: Arc<Node>) -> Result<()> {
     let mut t = ratatui::init();
-    let status = "/help for commands".into();
-    let (input, notice, typing) = (String::new(), None, HashMap::new());
     let mut a = App {
         n,
         at: None,
-        input,
-        status,
-        notice,
-        scroll: 0,
-        typing,
+        mode: Mode::Insert,
+        back: Mode::Insert,
+        draft: Draft::New,
+        field: Field::default(),
+        prompt: Field::default(),
+        drafts: HashMap::new(),
+        sel: None,
+        top: Cell::new(0),
+        count: 0,
+        pend: None,
+        ask: None,
+        found: String::new(),
+        pick: 0,
+        status: "Esc for vim keys, ? or :help for all".into(),
+        notice: None,
+        typing: HashMap::new(),
         typed: None,
     };
     let r = a.run(&mut t).await;
@@ -108,42 +217,334 @@ impl App {
     async fn key(&mut self, k: KeyEvent) -> bool {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
+        if let Some(a) = self.ask.take() {
+            let yes = k.code == KeyCode::Char('y');
+            self.status = match (yes, a) {
+                (false, _) => "kept".into(),
+                (_, Ask::Delete(target)) => {
+                    let r = self.post(Op::Edit { target, text: None }).await;
+                    r.map_or_else(|e| format!("{e:#}"), |_| "deleted".into())
+                }
+                (_, Ask::Leave(s)) => {
+                    let r = self.n.leave(&s).await;
+                    r.map_or_else(|e| format!("{e:#}"), |_| "gone".into())
+                }
+            };
+            return false;
+        }
+        let other = self.mode != Mode::Jump;
         match k.code {
-            KeyCode::Char('c') if ctrl => return true,
-            KeyCode::Char('n') if ctrl => self.step(1),
-            KeyCode::Char('p') if ctrl => self.step(-1),
-            KeyCode::Down if ctrl || alt => self.step(1),
-            KeyCode::Up if ctrl || alt => self.step(-1),
-            KeyCode::Char('u') if ctrl => self.input.clear(),
-            KeyCode::PageUp => self.scroll = self.scroll.saturating_add(10),
-            KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(10),
-            KeyCode::Esc => (self.notice, self.scroll) = (None, 0),
-            KeyCode::Backspace => drop(self.input.pop()),
-            KeyCode::Char(c) if !ctrl => {
-                self.input.push(c);
-                self.typed().await;
+            KeyCode::Char('n') | KeyCode::Down if ctrl && other || alt => {
+                self.step(1, false);
             }
-            KeyCode::Enter => {
-                let line = std::mem::take(&mut self.input);
-                match self.submit(line.trim()).await {
+            KeyCode::Char('p') | KeyCode::Up if ctrl && other || alt => {
+                self.step(-1, false);
+            }
+            KeyCode::Char('k') if ctrl => self.ask_for(Mode::Jump, ""),
+            _ => {
+                let r = match self.mode {
+                    Mode::Normal => self.normal(k).await,
+                    Mode::Insert => self.insert(k).await,
+                    _ => self.prompted(k).await,
+                };
+                match r {
                     Ok(quit) => return quit,
                     Err(e) => self.status = format!("{e:#}"),
                 }
             }
-            _ => {}
         }
         false
+    }
+
+    async fn normal(&mut self, k: KeyEvent) -> Result<bool> {
+        use KeyCode::*;
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        if let Char(d @ '0'..='9') = k.code
+            && (d != '0' || self.count > 0)
+        {
+            self.count = self.count * 10 + d as usize - '0' as usize;
+            return Ok(false);
+        }
+        let n = std::mem::take(&mut self.count).max(1) as isize;
+        match (self.pend.take(), k.code) {
+            (_, Char('c')) if ctrl => return Ok(true),
+            (_, Char('d')) if ctrl => self.walk(10 * n),
+            (_, Char('u')) if ctrl => self.walk(-10 * n),
+            (_, Char('f') | Char('b')) if !ctrl => {}
+            (_, Char('f')) | (_, PageDown) => self.walk(20 * n),
+            (_, Char('b')) | (_, PageUp) => self.walk(-20 * n),
+            (_, _) if ctrl => {}
+            (Some('g'), Char('g')) => {
+                self.sel = self.msgs().first().map(|m| m.id)
+            }
+            (Some('g'), Char('t')) => self.step(n, false),
+            (Some('g'), Char('T')) => self.step(-n, false),
+            (Some('Z'), Char('Z' | 'Q')) => return Ok(true),
+            (Some('d'), Char('d')) => {
+                self.ask = Some(Ask::Delete(self.target(true)?));
+                self.status = "Delete this message, for everyone? y/n".into();
+            }
+            (_, Char(c @ ('g' | 'd' | 'Z'))) => self.pend = Some(c),
+            (_, Char('j') | Down) => self.walk(n),
+            (_, Char('k') | Up) => self.walk(-n),
+            (_, Char('G')) => self.sel = None,
+            (_, Char('J')) => self.step(n, false),
+            (_, Char('K')) => self.step(-n, false),
+            (_, Char('L')) => self.step(n, true),
+            (_, Char('H')) => self.step(-n, true),
+            (_, Char('l') | Enter) => self.open()?,
+            (_, Char('h') | Backspace) => self.back()?,
+            (_, Char('i' | 'a')) => self.mode = Mode::Insert,
+            (_, Char('I')) => (self.mode, self.field.at) = (Mode::Insert, 0),
+            (_, Char('A')) => {
+                (self.mode, self.field.at) = (Mode::Insert, self.field.len());
+            }
+            (_, Char('o')) => {
+                (self.mode, self.draft) = (Mode::Insert, Draft::New)
+            }
+            (_, Char('r')) => {
+                self.draft = Draft::Reply(self.target(false)?);
+                self.mode = Mode::Insert;
+            }
+            (_, Char('t')) => {
+                let (s, c) = self.here()?;
+                let thread = self.n.view(&s, |st| st.thread(&c).is_some());
+                ensure!(thread != Some(true), "threads hang off channels");
+                self.draft = Draft::Thread(self.target(false)?);
+                self.mode = Mode::Insert;
+            }
+            (_, Char('e')) => self.edit(self.target(true)?)?,
+            (_, Char('y')) => {
+                osc52(&self.chosen().context("j or k picks one")?.text);
+                self.status = "copied, if your terminal allows".into();
+            }
+            (_, Char('p')) => {
+                let m = self.chosen().context("j or k picks one")?;
+                self.post(Op::Pin { target: m.id, on: !m.pinned }).await?;
+            }
+            (_, Char('+')) => self.ask_for(Mode::Cmd, "react "),
+            (_, Char(':')) => self.ask_for(Mode::Cmd, ""),
+            (_, Char('/')) => self.ask_for(Mode::Find, ""),
+            (_, Char('n')) => self.find(-1)?,
+            (_, Char('N')) => self.find(1)?,
+            (_, Char('x')) => return self.submit("close").await,
+            (_, Char('?')) => self.notice = Some(HELP.into()),
+            (_, Char('q') | Esc) if self.notice.is_some() => self.notice = None,
+            (_, Char('q')) => self.status = "ZZ or :q quits".into(),
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    async fn insert(&mut self, k: KeyEvent) -> Result<bool> {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        match k.code {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Char('c') if ctrl => self.mode = Mode::Normal,
+            KeyCode::Up if self.field.text.is_empty() => {
+                self.edit(self.last(true)?)?
+            }
+            KeyCode::PageUp => self.walk(-20),
+            KeyCode::PageDown => self.walk(20),
+            KeyCode::Enter => {
+                let (line, draft) = (self.field.take(), self.draft);
+                self.draft = Draft::New;
+                let r = self.send(line.trim(), draft).await;
+                if r.is_err() {
+                    (self.draft, self.field) = (draft, Field::default());
+                    self.field.set(&line);
+                }
+                return r;
+            }
+            _ => {
+                if self.field.key(k) && matches!(k.code, KeyCode::Char(_)) {
+                    self.typed().await;
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    async fn prompted(&mut self, k: KeyEvent) -> Result<bool> {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let jump = self.mode == Mode::Jump;
+        match k.code {
+            KeyCode::Esc => self.mode = self.back,
+            KeyCode::Backspace if self.prompt.text.is_empty() => {
+                self.mode = self.back;
+            }
+            KeyCode::Down | KeyCode::Tab if jump => self.pick += 1,
+            KeyCode::Char('n') if jump && ctrl => self.pick += 1,
+            KeyCode::Up | KeyCode::BackTab if jump => {
+                self.pick = self.pick.saturating_sub(1);
+            }
+            KeyCode::Char('p') if jump && ctrl => {
+                self.pick = self.pick.saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                let (mode, q) = (self.mode, self.prompt.take());
+                self.mode =
+                    if mode == Mode::Cmd { Mode::Normal } else { self.back };
+                match mode {
+                    Mode::Cmd => return self.submit(&q).await,
+                    Mode::Find => {
+                        (self.found, self.sel) = (q, None);
+                        self.find(-1)?;
+                    }
+                    _ => {
+                        let m = self.matches(&q);
+                        let to = m.get(self.pick % m.len().max(1));
+                        self.go(Some(*to.context("nothing called that")?));
+                    }
+                }
+            }
+            _ => {
+                if self.prompt.key(k) {
+                    self.pick = 0;
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn ask_for(&mut self, mode: Mode, start: &str) {
+        if !matches!(self.mode, Mode::Cmd | Mode::Find | Mode::Jump) {
+            self.back = self.mode;
+        }
+        (self.mode, self.pick) = (mode, 0);
+        self.prompt.set(start);
+    }
+
+    async fn send(&mut self, line: &str, draft: Draft) -> Result<bool> {
+        if let Some(cmd) = line.strip_prefix('/') {
+            return self.submit(cmd).await;
+        }
+        if line.is_empty() {
+            return Ok(false);
+        }
+        let ((s, c), text, files) = (self.here()?, line.to_string(), vec![]);
+        self.post(match draft {
+            Draft::Edit(target) => Op::Edit { target, text: Some(text) },
+            Draft::Reply(id) => {
+                Op::Post { channel: c, text, reply: Some(id), files }
+            }
+            Draft::Thread(id) => {
+                Op::Post { channel: id.thread(), text, reply: None, files }
+            }
+            Draft::New => Op::Post { channel: c, text, reply: None, files },
+        })
+        .await?;
+        if let Draft::Thread(id) = draft {
+            self.go(Some((s, Some(id.thread()))));
+        }
+        (self.sel, self.typed) = (None, None);
+        Ok(false)
+    }
+
+    fn edit(&mut self, id: Id) -> Result<()> {
+        let m = self.msgs().into_iter().find(|m| m.id == id);
+        self.field.set(&m.context("not here")?.text);
+        (self.draft, self.mode) = (Draft::Edit(id), Mode::Insert);
+        Ok(())
     }
 
     async fn typed(&mut self) {
         let due = self.typed.is_none_or(|t| t.elapsed().as_secs() >= 4);
         if let Some((s, Some(c))) = self.at
             && due
-            && !self.input.starts_with('/')
+            && !self.field.text.starts_with('/')
         {
             self.typed = Some(Instant::now());
             self.n.typing(&s, c).await;
         }
+    }
+
+    /// Where we are; a draft stays with its channel.
+    fn go(&mut self, at: At) {
+        if at == self.at {
+            return;
+        }
+        if let Some((s, Some(c))) = self.at
+            && !self.field.text.is_empty()
+        {
+            self.drafts.insert((s, c), self.field.take());
+        }
+        (self.at, self.sel, self.draft) = (at, None, Draft::New);
+        let d = at.and_then(|(s, c)| self.drafts.remove(&(s, c?)));
+        self.field.set(&d.unwrap_or_default());
+    }
+
+    fn msgs(&self) -> Vec<Message> {
+        let Ok((s, c)) = self.here() else { return vec![] };
+        self.n.view(&s, |st| st.messages(&c, None, 300)).unwrap_or_default()
+    }
+
+    fn chosen(&self) -> Option<Message> {
+        self.msgs().into_iter().find(|m| Some(m.id) == self.sel)
+    }
+
+    /// The picked message, else the last (yours, or someone else's).
+    fn target(&self, mine: bool) -> Result<Id> {
+        match self.chosen() {
+            Some(m) if mine && m.author != self.n.id() => bail!("not yours"),
+            Some(m) => Ok(m.id),
+            None => self.last(mine),
+        }
+    }
+
+    /// Down (newer) or up `d` messages; past the newest, follow it.
+    fn walk(&mut self, d: isize) {
+        let ms = self.msgs();
+        let i = ms.iter().position(|m| Some(m.id) == self.sel);
+        let i = (i.unwrap_or(ms.len()) as isize + d).max(0) as usize;
+        self.sel = ms.get(i).map(|m| m.id);
+    }
+
+    fn open(&mut self) -> Result<()> {
+        let (s, m) =
+            (self.space()?, self.chosen().context("j or k picks one")?);
+        ensure!(m.thread > 0, "no thread on it: t starts one");
+        self.go(Some((s, Some(m.id.thread()))));
+        Ok(())
+    }
+
+    fn back(&mut self) -> Result<()> {
+        let (s, c) = self.here()?;
+        let t = self.n.view(&s, |st| st.thread(&c)).flatten();
+        let t = t.context("not in a thread")?;
+        self.go(Some((s, Some(t.parent))));
+        self.sel = Some(t.root);
+        Ok(())
+    }
+
+    /// The next match of the last search: older (-1) or newer (1).
+    fn find(&mut self, d: isize) -> Result<()> {
+        ensure!(!self.found.is_empty(), "/ searches here");
+        let (q, ms) = (self.found.to_lowercase(), self.msgs());
+        let i = ms.iter().position(|m| Some(m.id) == self.sel);
+        let i = i.unwrap_or(ms.len()) as isize;
+        let hit = |m: &&Message| m.text.to_lowercase().contains(&q);
+        let m = if d < 0 {
+            ms[..i as usize].iter().rev().find(hit)
+        } else {
+            ms.get(i as usize + 1..).unwrap_or_default().iter().find(hit)
+        };
+        self.sel = Some(m.with_context(|| format!("no more {q:?} here"))?.id);
+        Ok(())
+    }
+
+    fn matches(&self, q: &str) -> Vec<(Id, Option<Ch>)> {
+        let q = q.to_lowercase();
+        let rows = self.rows().into_iter().filter(|r| {
+            let name = self.label(r).to_lowercase();
+            q.split_whitespace().all(|w| name.contains(w))
+        });
+        rows.collect()
+    }
+
+    fn label(&self, (s, c): &(Id, Option<Ch>)) -> String {
+        let c = c.map(|c| self.channel_name(s, &c)).unwrap_or_default();
+        format!("{} {}", self.space_name(s), c.trim())
     }
 
     fn here(&self) -> Result<(Id, Ch)> {
@@ -182,28 +583,22 @@ impl App {
         self.n.publish(&self.space()?, op).await.map(drop)
     }
 
-    /// True to quit.
-    async fn submit(&mut self, line: &str) -> Result<bool> {
-        let Some(cmd) = line.strip_prefix('/') else {
-            if !line.is_empty() {
-                let (channel, text) = (self.here()?.1, line.into());
-                let files = vec![];
-                self.post(Op::Post { channel, text, reply: None, files })
-                    .await?;
-                (self.scroll, self.typed) = (0, None);
-            }
-            return Ok(false);
-        };
+    /// A command, without its `:` or `/`; true to quit.
+    async fn submit(&mut self, cmd: &str) -> Result<bool> {
         let (cmd, arg) = cmd.split_once(' ').unwrap_or((cmd, ""));
         let (n, arg) = (self.n.clone(), arg.trim().to_string());
         let need =
             || if arg.is_empty() { bail!("/{cmd} what?") } else { Ok(()) };
         match cmd {
-            "quit" | "q" => return Ok(true),
+            "quit" | "q" | "qa" | "wq" => return Ok(true),
             "help" | "h" => self.notice = Some(HELP.into()),
-            "create" => self.at = Some((n.create(&arg).await?, None)),
+            "create" => self.go(Some((n.create(&arg).await?, None))),
+            "b" => {
+                let to = self.matches(&arg).first().copied();
+                self.go(Some(to.context("nothing called that")?));
+            }
             "join" => {
-                self.at = Some((n.join(&arg).await?, None));
+                self.go(Some((n.join(&arg).await?, None)));
                 self.status = "joined: history arrives from any member".into();
             }
             "invite" => {
@@ -215,25 +610,47 @@ impl App {
                      privately.\n\n{code}"
                 ));
             }
-            "leave" => n.leave(&self.space()?).await?,
+            "leave" => {
+                let s = self.space()?;
+                self.status = match self.dm(&s) {
+                    true => {
+                        "Delete this conversation from your devices? \
+                             They keep theirs. y/n"
+                    }
+                    false => {
+                        "Leave this space? Its history goes from your \
+                              devices; coming back takes an invite. y/n"
+                    }
+                }
+                .into();
+                self.ask = Some(Ask::Leave(s));
+            }
+            "close" => {
+                let s = self.space()?;
+                ensure!(self.dm(&s), "only a DM closes; :leave leaves a space");
+                n.hide(&s, true);
+                self.go(None);
+                self.status =
+                    "closed: back with its next message, or :dm".into();
+            }
             "nick" => n.set_name(&arg).await?,
             "rename" => self.post(Op::Rename { name: arg }).await?,
             "channel" => {
                 need()?;
                 let id = Ch(rand());
                 self.post(Op::Channel { id, name: Some(arg) }).await?;
-                self.at = self.at.map(|(s, _)| (s, Some(id)));
+                self.go(self.at.map(|(s, _)| (s, Some(id))));
             }
             "thread" => {
                 need()?;
                 let (s, c) = self.here()?;
                 let room = |c| n.view(&s, |st| st.thread(&c)).flatten();
                 ensure!(room(c).is_none(), "threads hang off channels");
-                let channel = self.last(false)?.thread();
+                let channel = self.target(false)?.thread();
                 let (text, files) = (arg, vec![]);
                 self.post(Op::Post { channel, text, reply: None, files })
                     .await?;
-                (self.at, self.scroll) = (Some((s, Some(channel))), 0);
+                self.go(Some((s, Some(channel))));
             }
             "search" => {
                 need()?;
@@ -271,11 +688,11 @@ impl App {
                     }
                 };
                 self.post(Op::Topic { thread, name: arg }).await?;
-                (self.at, self.scroll) = (Some((s, Some(thread))), 0);
+                self.go(Some((s, Some(thread))));
             }
             "note" | "todo" => {
                 let (s, c) = self.here()?;
-                let id = self.last(false)?;
+                let id = self.target(false)?;
                 let thread = n.view(&s, |st| st.thread(&c).is_some());
                 let (thread, todo) = (thread == Some(true), cmd == "todo");
                 let md = |st: &irch_core::State| {
@@ -295,19 +712,20 @@ impl App {
                 self.post(Op::Channel { id, name: None }).await?;
             }
             "edit" | "delete" => {
-                let target = self.last(true)?;
+                let target = self.target(true)?;
                 let text = (cmd == "edit").then_some(arg);
                 self.post(Op::Edit { target, text }).await?;
             }
             "reply" => {
                 let (reply, channel) =
-                    (Some(self.last(false)?), self.here()?.1);
+                    (Some(self.target(false)?), self.here()?.1);
                 let files = vec![];
                 self.post(Op::Post { channel, text: arg, reply, files })
                     .await?;
             }
             "react" => {
-                let target = self.last(false)?;
+                need()?;
+                let target = self.target(false)?;
                 self.post(Op::React { target, emoji: arg, on: true }).await?;
             }
             "file" => {
@@ -345,7 +763,7 @@ impl App {
             }
             "dm" => {
                 let user = self.user(&arg)?;
-                self.at = Some((n.dm(&self.space()?, &user).await?, None));
+                self.go(Some((n.dm(&self.space()?, &user).await?, None)));
             }
             "link" => {
                 self.notice = Some(format!(
@@ -398,6 +816,9 @@ impl App {
         let mut v = vec![];
         let week = irch_core::now().saturating_sub(7 * 86_400_000);
         for s in self.n.spaces() {
+            if self.n.hidden(&s) && self.at.map(|a| a.0) != Some(s) {
+                continue; // a closed DM
+            }
             let rooms = self.n.view(&s, |st| (st.channels(), st.threads()));
             let (chans, threads) = rooms.unwrap_or_default();
             if chans.is_empty() {
@@ -412,20 +833,32 @@ impl App {
         v
     }
 
-    fn step(&mut self, d: isize) {
-        let rows = self.rows();
-        let i = rows.iter().position(|r| Some(*r) == self.at).unwrap_or(0);
-        let i = (i as isize + d).rem_euclid(rows.len().max(1) as isize);
-        (self.at, self.scroll) = (rows.get(i as usize).copied(), 0);
+    /// To the next channel, or space.
+    fn step(&mut self, d: isize, space: bool) {
+        let mut rows = self.rows();
+        if space {
+            rows.dedup_by_key(|r| r.0);
+        }
+        let here = |r: &(Id, Option<Ch>)| match space {
+            true => Some(r.0) == self.at.map(|a| a.0),
+            false => Some(*r) == self.at,
+        };
+        let i = rows.iter().position(here).unwrap_or(0) as isize;
+        let i = (i + d).rem_euclid(rows.len().max(1) as isize);
+        self.go(rows.get(i as usize).copied());
     }
 
     fn fix(&mut self) {
         let rows = self.rows();
-        let space = self.at.map(|a| a.0);
         if !rows.iter().any(|r| Some(*r) == self.at) {
+            let space = self.at.map(|a| a.0);
             let same = rows.iter().find(|r| Some(r.0) == space);
-            self.at = same.or(rows.first()).copied();
+            self.go(same.or(rows.first()).copied());
         }
+    }
+
+    fn dm(&self, s: &Id) -> bool {
+        self.n.view(s, |st| st.dm.is_some()) == Some(true)
     }
 
     fn draw(&self, f: &mut Frame) {
@@ -447,16 +880,66 @@ impl App {
             Ok((s, c)) => format!(" {} ", self.channel_name(&s, &c)),
             Err(_) => " /help ".into(),
         };
-        let b = panel(title);
-        f.render_widget(Paragraph::new(self.input.as_str()).block(b), input);
-        let x = input.x + 1 + self.input.chars().count() as u16;
-        f.set_cursor_position((x.min(input.right() - 2), input.y + 1));
-        f.render_widget(
-            Paragraph::new(self.status.as_str()).dark_gray(),
-            status,
-        );
+        let who = |id: Id| {
+            let m = self.msgs().into_iter().find(|m| m.id == id);
+            m.map(|m| m.name).unwrap_or_default()
+        };
+        let title = match self.draft {
+            Draft::New => title,
+            Draft::Reply(id) => format!(" ↳ reply to {} ", who(id)),
+            Draft::Thread(id) => format!(" ↳ a thread on {}'s ", who(id)),
+            Draft::Edit(_) => " editing (Esc keeps it) ".into(),
+        };
+        // The cursor in view: the line scrolls under it.
+        let w = input.width.saturating_sub(3) as usize;
+        let skip = self.field.at.saturating_sub(w);
+        let text: String = self.field.text.chars().skip(skip).collect();
+        f.render_widget(Paragraph::new(text).block(panel(title)), input);
+        let (mode, color) = match self.mode {
+            Mode::Insert => (" INSERT ", Color::Cyan),
+            _ => (" NORMAL ", Color::Magenta),
+        };
+        let prompt = match self.mode {
+            Mode::Cmd => Some(":"),
+            Mode::Find => Some("/"),
+            Mode::Jump => Some("jump to: "),
+            _ => None,
+        };
+        let line = match prompt {
+            Some(p) => Line::from(format!("{p}{}", self.prompt.text)),
+            None => Line::from(vec![
+                Span::styled(mode, Style::new().fg(Color::Black).bg(color)),
+                Span::raw(format!(" {}", self.status)).dark_gray(),
+            ]),
+        };
+        f.render_widget(Paragraph::new(line), status);
+        match prompt {
+            Some(p) => {
+                let x = (p.chars().count() + self.prompt.at) as u16;
+                f.set_cursor_position((status.x + x, status.y));
+            }
+            None if self.mode == Mode::Insert => {
+                let x = input.x + 1 + (self.field.at - skip) as u16;
+                f.set_cursor_position((x.min(input.right() - 2), input.y + 1));
+            }
+            None => {}
+        }
+        if self.mode == Mode::Jump {
+            let m = self.matches(&self.prompt.text);
+            let pick = self.pick % m.len().max(1);
+            let lines: Vec<Line> = (m.iter().enumerate().take(12))
+                .map(|(i, r)| {
+                    let l = Line::from(format!(" {}", self.label(r)));
+                    if i == pick { l.black().on_magenta() } else { l }
+                })
+                .collect();
+            let area = center(f.area(), 48, lines.len() as u16 + 2);
+            f.render_widget(Clear, area);
+            let p = Paragraph::new(lines).block(panel(" ↑↓ Enter "));
+            f.render_widget(p, area);
+        }
         if let Some(text) = &self.notice {
-            let area = center(f.area(), 74, 18);
+            let area = center(f.area(), 76, text.lines().count() as u16 + 2);
             let b = panel(" esc to close ");
             let p = Paragraph::new(text.as_str()).wrap(Wrap { trim: false });
             f.render_widget(Clear, area);
@@ -529,18 +1012,48 @@ impl App {
             let p = Paragraph::new(hi).wrap(Wrap { trim: false });
             return f.render_widget(p.block(panel("")), area);
         };
-        let msgs = self.n.view(&s, |st| st.messages(&c, None, 300));
-        let lines: Vec<Line> = msgs
-            .unwrap_or_default()
-            .iter()
-            .flat_map(|m| self.lines(m))
-            .collect();
-        let p = Paragraph::new(lines).wrap(Wrap { trim: false });
         let (w, h) =
             (area.width.saturating_sub(2), area.height.saturating_sub(2));
-        let top = (p.line_count(w) as u16).saturating_sub(h + self.scroll);
+        let (mut lines, mut row, mut span) = (vec![], 0, None);
+        // In a thread, what it hangs off first.
+        let root = |st: &irch_core::State| st.message(&st.thread(&c)?.root);
+        if let Some((_, m)) = self.n.view(&s, root).flatten() {
+            let ls = self.lines(&Message { thread: 0, ..m }).into_iter();
+            lines =
+                ls.map(|l| Line::from(format!(" {l}")).dark_gray()).collect();
+            lines.push(Line::from("─".repeat(w as usize)).dark_gray());
+            let p = Paragraph::new(lines.clone()).wrap(Wrap { trim: false });
+            row = p.line_count(w);
+        }
+        for m in self.msgs() {
+            let picked = Some(m.id) == self.sel;
+            let bar = Span::raw(if picked { "▌" } else { " " }).magenta();
+            let ls: Vec<Line> = (self.lines(&m).into_iter())
+                .map(|mut l| {
+                    l.spans.insert(0, bar.clone());
+                    l
+                })
+                .collect();
+            let rows = Paragraph::new(ls.clone()).wrap(Wrap { trim: false });
+            let rows = rows.line_count(w);
+            if picked {
+                span = Some((row, row + rows));
+            }
+            row += rows;
+            lines.extend(ls);
+        }
+        let p = Paragraph::new(lines).wrap(Wrap { trim: false });
+        let (total, h) = (p.line_count(w), h as usize);
+        let top = match span {
+            None => total.saturating_sub(h),
+            Some((a, b)) => {
+                let t = self.top.get().max(b.saturating_sub(h)).min(a);
+                t.min(total.saturating_sub(h))
+            }
+        };
+        self.top.set(top);
         let b = panel(format!(" {} ", self.space_name(&s)));
-        f.render_widget(p.scroll((top, 0)).block(b), area);
+        f.render_widget(p.scroll((top as u16, 0)).block(b), area);
     }
 
     fn lines(&self, m: &Message) -> Vec<Line<'static>> {
