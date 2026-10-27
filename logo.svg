@@ -3,9 +3,11 @@
     <stop stop-color="#b44dff"/><stop offset="1" stop-color="#ff2bd6"/>
   </linearGradient>
   <g fill="url(#n)">
-    <path d="M208 120q0-64 96-96q0 64-96 96z"/>
+    <path d="M196 148l16-52C228 32 316 16 368 52c-32 60-96 84-128 68z"/>
     <path d="M200 152h112l16 336H184z"/>
   </g>
+  <path d="M232 96q56-32 112-40" fill="none" stroke="#000" stroke-width="10"
+    stroke-linecap="round"/>
   <path d="M176 216q40-24 80 0q-40 24-80 0zm160 72q-48-26-96 0q48 26 96 0z
     M176 352q32-22 64 0q-32 22-64 0zm160 64q-44-24-88 0q44 24 88 0z"/>
 </svg>
