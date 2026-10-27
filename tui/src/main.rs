@@ -1,3 +1,4 @@
+mod api;
 mod app;
 mod service;
 
@@ -36,6 +37,9 @@ struct Cli {
     /// No interface: an always-on device of yours
     #[arg(long)]
     headless: bool,
+    /// No interface: JSON calls on stdin, answers and events on stdout
+    #[arg(long)]
+    api: bool,
     /// Keep a storage node running here, from now on (as you)
     #[arg(long)]
     install: bool,
@@ -109,7 +113,7 @@ async fn main() -> Result<()> {
     let dir = c
         .dir
         .unwrap_or_else(|| dirs::data_dir().unwrap_or_default().join(home));
-    let ui = !(c.serve || c.headless);
+    let (api, ui) = (c.api, !(c.serve || c.headless || c.api));
     let log = tracing_subscriber::fmt().with_ansi(false).with_env_filter(
         tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| "warn,n0_mainline=off".into()),
@@ -143,6 +147,8 @@ async fn main() -> Result<()> {
     let mut fresh = false;
     if ui {
         app::run(n.clone()).await?;
+    } else if api {
+        api::run(n.clone()).await?;
     } else {
         tokio::select! {
             r = tokio::signal::ctrl_c() => r?,

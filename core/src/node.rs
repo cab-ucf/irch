@@ -175,6 +175,18 @@ fn named(n: &str) -> Result<&str> {
     Ok(n)
 }
 
+/// One irch to a folder: a second says so, rather than wait on the first.
+async fn hold(dir: &Path) -> Result<std::fs::File> {
+    let f = std::fs::File::create(dir.join("lock"))?;
+    for _ in 0..50 {
+        if f.try_lock().is_ok() {
+            return Ok(f);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    bail!("another irch is using {}", dir.display())
+}
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -450,6 +462,7 @@ pub struct Node {
     serve: Option<[u8; 16]>,
     big: Option<String>,
     files: FsStore,
+    held: Mutex<Option<std::fs::File>>,
     call: Mutex<Option<Call>>,
     media: call::Media,
 }
@@ -584,6 +597,7 @@ impl Node {
             &cfg.dir,
             std::os::unix::fs::PermissionsExt::from_mode(0o700),
         )?;
+        let held = hold(&cfg.dir).await?;
         let link: Option<(Key, Vec<EndpointAddr>)> =
             cfg.link.as_deref().map(|c| uncode("link", c)).transpose()?;
         let me =
@@ -653,6 +667,7 @@ impl Node {
             serve,
             big: cfg.big,
             files,
+            held: Mutex::new(Some(held)),
             call: Mutex::new(None),
             media: broadcast::channel(128).0,
         });
@@ -2265,6 +2280,7 @@ impl Node {
         if let Some(r) = self.router.get() {
             let _ = r.shutdown().await;
         }
+        lock(&self.held).take();
     }
 }
 
