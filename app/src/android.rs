@@ -240,8 +240,6 @@ async fn wake(
     dir: PathBuf,
     push: Option<String>,
 ) -> anyhow::Result<Vec<Notice>> {
-    // Its owner's own servers, if any, are what others ring.
-    let push = push.filter(|_| irch_core::wake::load(&dir).is_none());
     let n = node(dir).await?;
     if let Some(p) = push {
         n.set_push((!p.is_empty()).then_some(p)).await;
@@ -277,55 +275,24 @@ async fn node(dir: PathBuf) -> anyhow::Result<std::sync::Arc<Node>> {
     Ok(n)
 }
 
-/// The next notices. With wake servers and out of sight: no node at all,
-/// one quiet connection to one of them, and on a wake, a catch-up. Else
-/// (none, or none answering): the node stays connected, a heavier way.
+/// The next notices. Out of sight, no node at all: only the doorbell
+/// (wake.rs), which its spaces are told of; rung, a catch-up.
 async fn next(dir: PathBuf) -> anyhow::Result<Vec<Notice>> {
+    let net = crate::config(dir.clone(), None, None)?.net;
+    let url = irch_core::wake::doorbell(&dir, &net).await?;
+    node(dir.clone()).await?.set_push(Some(url)).await;
     loop {
-        if let Some((key, saved)) = irch_core::wake::load(&dir) {
-            if crate::FG.load(SeqCst) {
-                // In sight: the app shows what arrives.
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            }
-            crate::LIVE.store(false, SeqCst);
-            crate::nap().await;
-            if irch_core::wake::wait(&key, &saved).await.is_ok() {
-                let got = wake(dir.clone(), None).await?;
-                if !got.is_empty() {
-                    return Ok(got);
-                }
-                continue;
-            }
+        if crate::FG.load(SeqCst) {
+            // In sight: the app shows what arrives.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
         }
-        crate::LIVE.store(true, SeqCst);
-        // A while connected, then the wake servers again.
-        let half_hour = Duration::from_secs(30 * 60);
-        if let Ok(got) = tokio::time::timeout(half_hour, live(&dir)).await {
-            return got;
-        }
-    }
-}
-
-/// Connected: the next notices, as soon as there are any (the app, in
-/// sight, may take them first: then this waits on).
-async fn live(dir: &std::path::Path) -> anyhow::Result<Vec<Notice>> {
-    use irch_core::Event::{Call, Changed};
-    use tokio::sync::broadcast::error::RecvError::Closed;
-    loop {
-        let n = node(dir.to_path_buf()).await?;
-        let (mut rx, w) = (n.subscribe(), std::sync::Arc::downgrade(&n));
-        drop(n);
-        loop {
-            let news = match rx.recv().await {
-                Err(Closed) => break, // stopped: a new one
-                e => matches!(e, Ok(Changed { .. } | Call { .. }) | Err(_)),
-            };
-            let Some(n) = w.upgrade() else { break };
-            let got = news.then(|| crate::alerts(&n, crate::FG.load(SeqCst)));
-            if let Some(got) = got.filter(|g| !g.is_empty()) {
-                return Ok(got);
-            }
+        crate::LIVE.store(false, SeqCst);
+        crate::nap().await;
+        irch_core::wake::rung(&dir, &net).await?;
+        let got = wake(dir.clone(), None).await?;
+        if !got.is_empty() {
+            return Ok(got);
         }
     }
 }

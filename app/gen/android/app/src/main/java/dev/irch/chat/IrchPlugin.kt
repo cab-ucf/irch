@@ -68,10 +68,9 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
       ActivityCompat.requestPermissions(activity, arrayOf(POST_NOTIFICATIONS), 1)
     }
     // A push app wakes irch for almost no battery; without one, a service
-    // keeps it running, or messages and calls would wait for it.
+    // keeps irch's doorbell, which whoever writes rings over iroh.
     UnifiedPush.tryUseCurrentOrDefaultDistributor(activity) { ok ->
-      if (ok) UnifiedPush.register(activity)
-      if (!ok || wakeServers(activity)) live(activity)
+      if (ok) UnifiedPush.register(activity) else live(activity)
     }
   }
 

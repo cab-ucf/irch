@@ -528,44 +528,30 @@ async fn writing_wakes_a_sleeping_device() {
     assert!(b.notices().is_empty(), "mentions only");
 }
 
-/// b's phone sleeps holding one quiet connection to b's storage node; a
-/// writes, a asks b's servers to wake it, the one holding it does, at
-/// once. Nothing of Google's, nothing but irch.
+/// b's phone sleeps: its node stopped, only its doorbell left, which a
+/// rings when it writes. No server, no router, nothing but iroh.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_storage_node_wakes_a_sleeping_phone() {
-    let (db, ds) = (dir("b"), dir("ws"));
+async fn writing_rings_a_sleeping_phone() {
+    use irch_core::wake;
+    let db = dir("b");
     let a = node("a").await;
     let b = start(&db, "b", None, false).await;
-    let s = start(&ds, "s", None, true).await;
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let at = format!("127.0.0.1:{port}");
-    s.serve_wakes(port, vec![at.clone()]).await.unwrap();
     let id = a.create("lab").await.unwrap();
     let ch = general(&a, &id);
     b.join(&a.invite(&id).await.unwrap()).await.unwrap();
-    pair(&b, &s, &[]).await;
+    let url = wake::doorbell(&db, &Net::Direct).await.unwrap();
+    b.set_push(Some(url.clone())).await;
+    let told =
+        |n: &Node| n.view(&id, |s| s.pushes().iter().any(|p| p.1 == url));
+    until("a knows b's doorbell", || told(&a) == Some(true)).await;
+    b.shutdown().await;
+    drop(b);
 
-    let targets = b.wake_setup().await;
-    assert_eq!(targets.len(), 1);
-    assert_eq!(targets[0].at, [at]);
-    let wakes = |n: &Node| {
-        n.view(&id, |st| {
-            st.pushes().iter().any(|p| p.1.starts_with("irch:wake:"))
-        }) == Some(true)
-    };
-    until("a knows to wake b through s", || wakes(&a)).await;
-
-    // Asleep: only the cached servers, no node needed.
-    let (key, t) = irch_core::wake::load(&db).unwrap();
-    let phone =
-        tokio::spawn(async move { irch_core::wake::wait(&key, &t).await });
+    let d = db.clone();
+    let phone = tokio::spawn(async move { wake::rung(&d, &Net::Direct).await });
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(!phone.is_finished(), "it waits quietly");
+    assert!(!phone.is_finished(), "it sleeps");
     say(&a, &id, ch, "lunch?").await;
     let woke = tokio::time::timeout(Duration::from_secs(10), phone).await;
-    assert!(woke.expect("woken within seconds").unwrap().is_ok());
+    assert!(woke.expect("rung within seconds").unwrap().is_ok());
 }

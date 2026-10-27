@@ -457,8 +457,6 @@ pub struct Node {
     clock: AtomicU64,
     invisible: AtomicBool,
     serve: Option<[u8; 16]>,
-    // A storage node: the phones holding a wake connection here.
-    phones: crate::wake::Hub,
     // Files offered from here, and those fetched (served on to members).
     files: Option<FsStore>,
     call: Mutex<Option<Call>>,
@@ -487,13 +485,23 @@ fn public(ip: &std::net::IpAddr) -> bool {
     }
 }
 
-/// Public addresses first.
-fn wake_order(
-    mut ips: Vec<std::net::IpAddr>,
-) -> impl Iterator<Item = std::net::IpAddr> {
-    ips.sort_by_key(|ip| !public(ip));
-    ips.dedup();
-    ips.into_iter()
+/// An endpoint as `net` says: which relays, and how peers are found.
+pub(crate) fn endpoint(net: &Net) -> iroh::endpoint::Builder {
+    match net {
+        Net::Default => Endpoint::builder(presets::N0).relay_mode(
+            RelayMode::custom(RELAYS.map(|r| r.parse().expect("relay url"))),
+        ),
+        Net::Relay(urls) => Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::custom(urls.clone())),
+        Net::Lan => Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .address_lookup(
+                iroh_mdns_address_lookup::MdnsAddressLookup::builder(),
+            ),
+        Net::Direct => {
+            Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled)
+        }
+    }
 }
 
 /// Serves sync and blobs; the ALPN says which.
@@ -506,10 +514,6 @@ impl ProtocolHandler for Proto {
         let n = self.0.upgrade().ok_or_else(gone)?;
         let r = match c.alpn() {
             sync::ALPN => sync::respond(&n, &c).await,
-            crate::wake::ALPN => match n.serve {
-                Some(t) => crate::wake::answer(&n.phones, t, c).await,
-                None => Ok(()),
-            },
             call::ALPN => {
                 n.answer(c).await;
                 Ok(())
@@ -601,20 +605,8 @@ impl Node {
         local.peers.values().for_each(|a| lookup.add_endpoint_info(a.clone()));
         let bind = async |port: u16| {
             let b = match &cfg.net {
-                Net::Default => dht(Endpoint::builder(presets::N0).relay_mode(
-                    RelayMode::custom(
-                        RELAYS.map(|r| r.parse().expect("relay url")),
-                    ),
-                )),
-                Net::Relay(urls) => dht(Endpoint::builder(presets::Minimal)
-                    .relay_mode(RelayMode::custom(urls.clone()))),
-                Net::Lan => Endpoint::builder(presets::Minimal)
-                    .relay_mode(RelayMode::Disabled)
-                    .address_lookup(
-                        iroh_mdns_address_lookup::MdnsAddressLookup::builder(),
-                    ),
-                Net::Direct => Endpoint::builder(presets::Minimal)
-                    .relay_mode(RelayMode::Disabled),
+                Net::Default | Net::Relay(_) => dht(endpoint(&cfg.net)),
+                _ => endpoint(&cfg.net),
             };
             let v6 = BindOpts::default().set_is_required(false);
             let b = b.secret_key(dev.clone()).address_lookup(lookup.clone());
@@ -667,7 +659,6 @@ impl Node {
             events: broadcast::channel(1024).0,
             clock: AtomicU64::new(0),
             serve,
-            phones: Default::default(),
             files,
             call: Mutex::new(None),
             media: broadcast::channel(128).0,
@@ -681,7 +672,6 @@ impl Node {
         let router = router
             .accept(iroh_gossip::ALPN, n.gossip.clone())
             .accept(sync::ALPN, Proto(Arc::downgrade(&n)))
-            .accept(crate::wake::ALPN, Proto(Arc::downgrade(&n)))
             .accept(BLOB, Proto(Arc::downgrade(&n)))
             .accept(call::ALPN, Proto(Arc::downgrade(&n)))
             .spawn();
@@ -838,102 +828,6 @@ impl Node {
     /// Whether others can wake this device (it has a push endpoint).
     pub fn pushed(&self) -> bool {
         lock(&self.prefs).push.is_some()
-    }
-
-    /// A storage node: take phones' wake connections on TCP `port`; they
-    /// reach it at `at`, else where its router forwards that port (asked
-    /// by UPnP, NAT-PMP or PCP), else at each address it has.
-    pub async fn serve_wakes(
-        self: &Arc<Self>,
-        port: u16,
-        at: Vec<String>,
-    ) -> Result<()> {
-        let token = self.serve.context("only storage nodes take phones")?;
-        // Both stacks: [::] alone is IPv6-only on some systems.
-        let mut ls = vec![];
-        for ip in ["::", "0.0.0.0"] {
-            let a = std::net::SocketAddr::new(ip.parse()?, port);
-            ls.extend(tokio::net::TcpListener::bind(a).await.ok());
-        }
-        ensure!(!ls.is_empty(), "port {port} is taken");
-        let ips = self.addr().await.ip_addrs().map(|a| a.ip()).collect();
-        let mine: Vec<_> =
-            wake_order(ips).map(|ip| (ip, port).into()).collect();
-        let show = |a: &[std::net::SocketAddr]| {
-            a.iter().map(|a| a.to_string()).collect::<Vec<_>>()
-        };
-        self.phones.at(if at.is_empty() { show(&mine) } else { at.clone() });
-        #[cfg(not(target_os = "android"))]
-        if at.is_empty() {
-            let map = portmapper::Client::new(portmapper::Config {
-                protocol: portmapper::Protocol::Tcp,
-                ..Default::default()
-            });
-            map.update_local_port(port.try_into()?);
-            map.procure_mapping();
-            let n = Arc::downgrade(self);
-            let mut out = map.watch_external_address();
-            tokio::spawn(async move {
-                let _map = map; // kept while the node is
-                while out.changed().await.is_ok() {
-                    let Some(n) = n.upgrade() else { return };
-                    let ext = (*out.borrow_and_update()).map(Into::into);
-                    let ext = ext.filter(|a: &std::net::SocketAddr| {
-                        wake_order(vec![a.ip()]).all(|ip| public(&ip))
-                    });
-                    n.phones.at(show(
-                        &ext.into_iter()
-                            .chain(mine.clone())
-                            .collect::<Vec<_>>(),
-                    ));
-                }
-            });
-        }
-        // Handshakes at once, bounded: past that, newcomers are dropped.
-        let gate = Arc::new(tokio::sync::Semaphore::new(crate::wake::GATE));
-        for l in ls {
-            let (n, gate) = (Arc::downgrade(self), gate.clone());
-            tokio::spawn(async move {
-                while let Ok((s, _)) = l.accept().await {
-                    let Some(n) = n.upgrade() else { return };
-                    let Ok(g) = gate.clone().try_acquire_owned() else {
-                        continue;
-                    };
-                    tokio::spawn(async move {
-                        let key = n.ep.secret_key().clone();
-                        let r = n.phones.phone(s, &key, &token, g).await;
-                        if let Err(e) = r {
-                            debug!("wake connection: {e:#}");
-                        }
-                    });
-                }
-            });
-        }
-        Ok(())
-    }
-
-    /// A phone: which of its owner's servers take wake connections, kept
-    /// for its background service, and its spaces told to wake it there.
-    /// None reachable now: as it was.
-    pub async fn wake_setup(self: &Arc<Self>) -> Vec<crate::wake::Target> {
-        let paired = self.view(&self.own, |s| s.storage()).unwrap_or_default();
-        let (mut targets, mut servers) = (vec![], vec![]);
-        for (addr, token) in paired {
-            let at = crate::wake::find(&self.ep, addr.clone(), &token).await;
-            if let Some(at) = at.ok().filter(|a| !a.is_empty()) {
-                targets.push(crate::wake::Target { at, id: addr.id, token });
-                servers.push(addr);
-            }
-        }
-        if !targets.is_empty() {
-            let old = crate::wake::load(&self.dir).map(|w| w.1.secret);
-            let secret = old.unwrap_or_else(rand);
-            let w = crate::wake::Saved { secret, targets: targets.clone() };
-            let _ = crate::wake::save(&self.dir, &w);
-            let url = crate::wake::url(self.ep.id(), secret, &servers);
-            self.set_push(Some(url)).await;
-        }
-        targets
     }
 
     /// Where others wake this device when they write (UnifiedPush), or

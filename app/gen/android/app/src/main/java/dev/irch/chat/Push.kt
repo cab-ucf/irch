@@ -96,17 +96,8 @@ class IrchWake : Service() {
 
 const val SYNCING = "syncing"
 
-/** Its owner's own servers wake it (src/android.rs): irch saved them. */
-fun wakeServers(ctx: Context) = java.io.File(home(ctx), "wake.json").exists()
-
-/** The profile in use: its folder (irch_core::profile). */
-fun home(ctx: Context): java.io.File {
-  val n = runCatching { java.io.File(ctx.dataDir, "profile").readText() }
-  val name = n.getOrDefault("").trim()
-  return if (name.isEmpty()) ctx.dataDir else java.io.File(ctx.dataDir, "profiles/$name")
-}
-
-/** No push app: irch stays connected, so messages and calls arrive. */
+/** No push app: irch keeps its doorbell (src/android.rs), which those
+ *  who write ring: messages and calls arrive, for little battery. */
 fun live(ctx: Context) {
   runCatching { ctx.startForegroundService(Intent(ctx, IrchLive::class.java)) }
 }
@@ -152,7 +143,7 @@ class Boot : android.content.BroadcastReceiver() {
     if (i.action != Intent.ACTION_BOOT_COMPLETED) return
     val pushed = org.unifiedpush.android.connector.UnifiedPush
       .getAckDistributor(ctx) != null
-    if (!pushed || wakeServers(ctx)) live(ctx)
+    if (!pushed) live(ctx)
   }
 }
 

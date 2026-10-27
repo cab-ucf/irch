@@ -244,30 +244,23 @@ message. On phones, swipe right for channels and left for members; Back
 closes the topmost thing (a thread returns to its channel), then sends
 irch to the background.
 
-Phones sleep: holding iroh connections open would wake the radio every
-few seconds. Instead, whoever writes wakes the others. Best, with no
-Google and nothing else to install: a phone paired with its owner's
-storage node (`irch --serve`, on any always-on computer, as many as you
-like) holds one TCP connection to one of them, which sends a byte every
-4½ minutes (the phone's kernel answers it; irch sleeps) and "wake" the
-moment anyone writes: the writer asks that phone's nodes over iroh until
-one has it. A node offers this on TCP 7745 (`--wake-port`; NixOS opens
-it): phones must reach it there, so behind a router forward that port
-and say where (`--wake-addr host:7745`, `services.irch.wakeAddress`).
-The node is checked by its key, the phone by its pairing. Else, a
-UnifiedPush app ([ntfy](https://ntfy.sh): from F-Droid, or from Google
-Play on ntfy.sh, which rides Google's own connection at no battery cost)
-tells its spaces, sealed like any op, where to reach it; the writer's
-device sends that address a ping with nothing in it (at most every 30
-s), and the phone wakes for a few seconds, fetches from the writer over
-iroh, and notifies. Push servers learn only that a ping went to an
-address. Starting a call wakes the others the same way, and anyone in it
-says so at once to a device that comes back. With no push app, irch
-stays connected instead (a quiet "Connected for messages and calls"
-notification, from boot on): every message and call arrives, at a cost
-in battery that ntfy avoids. With one, out of sight for a minute (and in
-no call), the node stops altogether; phones skip the Mainline DHT
-(relays and n0's DNS find peers for them).
+Phones sleep: an iroh connection held open sends a keepalive every few
+seconds, so out of sight (and in no call) a phone's node stops
+altogether, and whoever writes wakes it. With no push app, nothing to
+install, no server and no router: irch keeps a doorbell, an iroh
+endpoint of its own with no connection open (a quiet "Connected for
+messages and calls" notification, from boot on); iroh's link to its
+relay, a few bytes every 15 s, is all it sends. Its spaces are told,
+sealed like any op, where it is and a secret; a writer's device rings it
+over iroh (at most every 2 s), and it wakes for a few seconds, fetches
+over iroh, and notifies. With a UnifiedPush app
+([ntfy](https://ntfy.sh): from F-Droid, or from Google Play on ntfy.sh,
+which rides Google's own connection at no battery cost) irch keeps no
+doorbell: the writer's device sends that app's address a ping with
+nothing in it (at most every 30 s); push servers learn only that a ping
+went to an address. Starting a call wakes the others the same way, and
+anyone in it says so at once to a device that comes back. Phones skip
+the Mainline DHT (relays and n0's DNS find peers for them).
 
 Notes: the bookmark on a message adds it (or its whole thread) to your
 notes as a task, with an optional due date, or as a quote: plain Markdown

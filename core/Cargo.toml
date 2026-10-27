@@ -33,9 +33,7 @@ x-wing = { version = "0.1", features = ["getrandom"] }
 [target.'cfg(not(target_os = "android"))'.dependencies]
 iroh-mainline-address-lookup = "0.6"
 # Desktops trust what the system trusts: a network that inspects TLS too.
-# Routers asked to forward a port: iroh's, and phones' wake connections.
-iroh = { version = "1.4", default-features = false, features = ["platform-verifier", "portmapper"] }
-portmapper = "0.19"
+iroh = { version = "1.4", default-features = false, features = ["platform-verifier"] }
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
