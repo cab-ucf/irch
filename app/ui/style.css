@@ -181,6 +181,18 @@ svg.icon {
   font: 700 18px var(--mono);
   letter-spacing: 0.04em;
 }
+#server-header .brand::before {
+  content: "";
+  display: inline-block;
+  width: 26px;
+  height: 26px;
+  margin-right: 8px;
+  vertical-align: -7px;
+  background: url(logo.svg) center / contain no-repeat;
+}
+:root[data-theme="ucf"] #server-header .brand::before {
+  background-image: url(ucf.svg);
+}
 #server-header button { display: grid; color: var(--muted); }
 #server-header button:hover { color: var(--pink); }
 .space {

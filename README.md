@@ -1,4 +1,4 @@
-# <img src="logo.svg" width="40" align="top"> irch
+# <img src="app/ui/logo.svg" width="40" align="top"> irch
 
 Private, peer-to-peer community chat shaped like Discord, with no server:
 spaces, channels, threads, DMs, voice and video calls. A small Rust core on
