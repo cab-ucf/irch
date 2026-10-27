@@ -97,11 +97,12 @@ pub fn profile(root: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// What signing out takes away.
-pub const MINE: [&str; 10] = [
+pub const MINE: [&str; 11] = [
     "seed",
     "device",
     "local",
     "prefs",
+    "closed",
     "spaces",
     "files",
     "blobs",
