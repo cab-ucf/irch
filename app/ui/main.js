@@ -178,9 +178,8 @@ function swatch(k) {
   const t = document.createElement("template");
   t.innerHTML = k === "ucf"
     ? `<svg class="swatch" viewBox="0 0 24 24"><rect width="24" height="24"
-      rx="6" fill="${bg}"/><path d="M3 18h18" stroke="${b}" stroke-width="2"/>
-      <text x="12" y="14" fill="${a}" font-size="8.5" font-weight="900"
-      text-anchor="middle" font-family="system-ui,sans-serif">UCF</text></svg>`
+      rx="6" fill="${bg}"/><image href="ucf.svg" x="5" y="2" width="14"
+      height="20"/></svg>`
     : `<svg class="swatch" viewBox="0 0 24 24"><rect width="24" height="24"
       rx="6" fill="${bg}"/><circle cx="9" cy="12" r="5" fill="${a}"/>
       <circle cx="15" cy="12" r="5" fill="${b}" opacity=".85"/></svg>`;
