@@ -26,6 +26,7 @@ const randomId = (n) =>
     .map((b) => b.toString(16).padStart(2, "0")).join("");
 const mobile = () => matchMedia("(max-width: 760px)").matches;
 const android = /Android/.test(navigator.userAgent);
+const ios = /iPhone|iPad/.test(navigator.userAgent);
 
 function h(tag, props, ...kids) {
   const e = document.createElement(tag);
@@ -1167,13 +1168,14 @@ const fileChip = (f) => h("div", { class: "file-chip" }, icon("file"),
   h("div", { class: "meta", title: "Preview", onclick: () => preview(f) },
     h("b", {}, f.name), h("small", {}, size(f.size),
       offered(f) ? " · from its sender's device, while online" : "")),
-  h("button", { title: android ? "Share" : "Save to Downloads",
+  h("button", { title: android ? "Share" : ios ? "Save to Files"
+    : "Save to Downloads",
     onclick: () => saveFile(f) }, icon("down")));
 
 async function saveFile(f) {
   const at = await invoke("save", { space: S.sid, file: f })
     .catch((e) => toast(String(e), true));
-  if (at && !android) toast(`Saved to ${at}`);
+  if (at && !android) toast(ios ? "Saved: Files › irch" : `Saved to ${at}`);
 }
 
 const MEDIA = { mp3: "audio/mpeg", ogg: "audio/ogg", oga: "audio/ogg",
@@ -1568,7 +1570,7 @@ function storageFlow(s) {
     };
     const here = local && !paired && h("button", { class: "btn",
       onclick: pair }, "Keep it on this computer's storage node");
-    const start = !local && !android && h("button", { class: "btn",
+    const start = !local && !android && !ios && h("button", { class: "btn",
       onclick: async (e) => {
         e.target.disabled = true;
         e.target.textContent = "Starting a storage node here…";
@@ -2544,7 +2546,7 @@ function wire() {
   $("attach-btn").onclick = (e) => menu(e.currentTarget, [
     ["Upload: storage nodes keep it (to 5 GB)", "clip", () => choose(false)],
     ["Share from this device (any size)", "disk",
-      () => (android ? choose(true) : offerPaths())],
+      () => (android || ios ? choose(true) : offerPaths())],
   ]);
   $("picker").onchange = (e) => {
     addFiles([...e.target.files], S.keep);

@@ -103,3 +103,29 @@ jobs:
           path: evidence
           retention-days: 14
           if-no-files-found: ignore
+
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: cargo install tauri-cli --version 2.12.4 --locked
+      - name: The Xcode project, with irch's icons
+        working-directory: app
+        run: |
+          brew install xcodegen
+          cargo tauri ios init --ci
+          cargo tauri icon icons/icon.png
+      - name: An unsigned IPA, which AltStore or SideStore signs
+        working-directory: app
+        run: cargo tauri ios build --ci --no-sign --target aarch64
+      - run: mv app/gen/apple/build/arm64/irch.ipa irch.ipa
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: irch-ios
+          path: irch.ipa
+          retention-days: 14
