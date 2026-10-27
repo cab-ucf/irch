@@ -479,7 +479,7 @@ svg.icon {
 .msg {
   position: relative;
   display: grid;
-  grid-template-columns: 3.4em minmax(0, 7em) minmax(0, 1fr);
+  grid-template-columns: 4.6em minmax(0, 7em) minmax(0, 1fr);
   column-gap: 10px;
   padding: 1px 48px 1px 8px;
   margin-top: 6px;

@@ -253,7 +253,8 @@ const inThread = () => !!S.ch && S.thread?.id === S.ch;
 // A thread is a channel of its own.
 const chan = () => inThread() ? S.thread
   : cur()?.channels.find((c) => c.id === S.ch);
-const dms = () => S.spaces.filter((s) => s.dm);
+// A closed DM is out of the list until its next message, or opened.
+const dms = () => S.spaces.filter((s) => s.dm && (!s.closed || s.id === S.sid));
 const memberOf = (id) => S.members.find((m) => m.id === id);
 const nameOf = (id) => memberOf(id)?.name ?? short(id);
 const isMe = (id) => id === S.me.id;
@@ -376,6 +377,7 @@ function nearBottom() {
 function select(sid, ch) {
   S.sid = sid;
   const s = cur();
+  if (s?.closed) quiet(call("hide", { space: sid, on: false }));
   if (sid && !s?.dm) store.set("sid", sid);
   const valid = (k) =>
     k && (s?.channels.some((x) => x.id === k) || k === S.thread?.id);
@@ -468,6 +470,11 @@ function dmList() {
     class: `channel dm${d.id === S.sid ? " active" : ""}` +
       (unread(d) && d.id !== S.sid ? " unread" : ""),
     onclick: () => select(d.id),
+    oncontextmenu: (e) => {
+      e.preventDefault();
+      select(d.id);
+      dmMenu(e.currentTarget);
+    },
   }, avatar(d.with ?? d.id, d.name, "xs"), h("span", { class: "name" }, d.name),
   d.channels.some((c) => c.call.length) && icon("speaker"),
   badge(d.id !== S.sid && mentions(d)),
@@ -475,11 +482,11 @@ function dmList() {
     e.stopPropagation();
     callIn(d.id);
   } }, icon("ring")),
-  h("button", { class: "gear", title: "Close conversation", onclick: (e) => {
-    e.stopPropagation();
-    select(d.id);
-    leaveSpace();
-  } }, icon("x"))));
+  h("button", { class: "gear", title: "Close (kept; back with a new message)",
+    onclick: (e) => {
+      e.stopPropagation();
+      closeDm(d);
+    } }, icon("x"))));
 }
 
 function channelList(s) {
@@ -1480,6 +1487,29 @@ function menu(anchor, items, align) {
     items.map((it) => it === "-" ? h("hr") : it && item(it))), align);
 }
 
+function closeDm(d) {
+  quiet(call("hide", { space: d.id, on: true }));
+  if (S.sid === d.id) S.sid = null;
+  d.closed = true;
+  schedule("side");
+}
+
+const levels = (s) => [["All", "All messages"], ["Mentions", "Only @mentions"],
+  ["Off", "Nothing"]].map(([level, text]) => [
+  (s.level === level ? "● " : "○ ") + "Notify: " + text, "chat",
+  () => quiet(call("set_level", { space: s.id, level })
+    .then(() => schedule("side")))]);
+
+function dmMenu(anchor) {
+  const s = cur();
+  menu(anchor, [
+    ["Call", "ring", () => callIn(s.id)],
+    ["Close", "x", () => closeDm(s)],
+    "-", ...levels(s), "-",
+    ["Delete Conversation", "trash", leaveSpace, "danger"],
+  ]);
+}
+
 function spaceMenu(anchor) {
   const s = cur();
   menu(anchor, [
@@ -1488,13 +1518,7 @@ function spaceMenu(anchor) {
     s.admin && ["Rename Space", "pencil", renameSpace],
     s.admin && ["Reset Invite Links", "key", resetInvites],
     ["Storage Nodes", "disk", () => storageFlow(s)],
-    "-",
-    ...[["All", "All messages"], ["Mentions", "Only @mentions"],
-      ["Off", "Nothing"]].map(([level, text]) => [
-      (s.level === level ? "● " : "○ ") + "Notify: " + text, "chat",
-      () => quiet(call("set_level", { space: s.id, level })
-        .then(() => schedule("side")))]),
-    "-",
+    "-", ...levels(s), "-",
     ["Leave Space", "logout", leaveSpace, "danger"],
   ]);
 }
@@ -2229,9 +2253,10 @@ async function deleteRoom(s, t) {
 
 async function leaveSpace() {
   const s = cur();
-  const ok = await confirmBox(s.dm ? { title: `Close conversation`,
-    sub: `Your messages with ${s.name} are deleted from your devices.`,
-    ok: "Close" } : { title: `Leave '${s.name}'`,
+  const ok = await confirmBox(s.dm ? { title: "Delete conversation",
+    sub: `Your messages with ${s.name} are deleted from your devices; ` +
+      "they keep theirs. To just put it away, close it (✕).",
+    ok: "Delete" } : { title: `Leave '${s.name}'`,
     sub: `Leave ${s.name}? Its history is deleted from your devices, and ` +
       "you need a new invite to come back.", ok: "Leave Space" });
   if (!ok) return;
@@ -2330,6 +2355,7 @@ const SLASH = {
   },
   invite: () => invitePeople(),
   leave: () => leaveSpace(),
+  close: () => cur()?.dm ? closeDm(cur()) : toast("Only a DM closes", true),
   notes: () => S.msgs.at(-1) && toNotes(S.msgs.at(-1)),
   help: () => keysHelp(),
   search: () => searchFlow(),
@@ -2350,7 +2376,7 @@ const KEYS = [
   ["n", "add to notes"], ["i, a, Enter", "back to typing"],
   ["Ctrl+K", "jump to a channel or DM; @ for anyone to message"],
   ["Ctrl+F", "search"], ["Alt+↑/↓", "previous / next channel"],
-  ["/nick, /join, /dm, /me, /shrug, /thread, /invite, /leave, /notes",
+  ["/nick, /join, /dm, /me, /shrug, /thread, /invite, /close, /leave, /notes",
     "in the composer"],
 ];
 
