@@ -54,7 +54,11 @@ pub fn mathml(src: &str, display: bool) -> Result<String, String> {
         return Err("not plain Typst math".into());
     }
     let pad = if display { " " } else { "" };
-    let html = html(format!("${pad}{src}{pad}$"))?;
+    let text = format!("${pad}{src}{pad}$");
+    // Deep math outruns a pool thread's 2 MiB before Typst's own limits.
+    let run = std::thread::Builder::new().stack_size(16 << 20);
+    let html = run.spawn(move || html(text)).map_err(|e| e.to_string())?;
+    let html = html.join().map_err(|_| "typst failed".to_string())??;
     let (a, b) = (html.find("<math"), html.rfind("</math>"));
     match (a, b) {
         (Some(a), Some(b)) => Ok(html[a..b + 7].into()),
@@ -92,6 +96,11 @@ mod tests {
             mathml(r#"std.range(std.int("100000000000"))"#, false).is_err()
         );
         assert!(mathml(r#""a".repeat(99999999)"#, false).is_err());
+        // Too deep: an error on any thread, never a stack overflow.
+        let deep = format!("{}x{}", "frac(".repeat(200), ", 1)".repeat(200));
+        let pool = std::thread::Builder::new().stack_size(2 << 20);
+        let r = pool.spawn(move || mathml(&deep, false)).unwrap().join();
+        assert!(r.unwrap().is_err());
     }
 
     #[test]
