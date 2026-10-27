@@ -330,6 +330,7 @@ async function loadMessages() {
   if (last) S.typing.get(`${S.sid}|${S.ch}`)?.delete(last.author);
   renderMessages();
   renderTyping();
+  if (S.normal && !sel()) pick(S.msgs.at(-1));
   if (S.jump && msgs.some((m) => m.id === S.jump)) jumpTo(S.jump);
   S.jump = null;
   if (document.hasFocus() && nearBottom()) markRead();
@@ -415,7 +416,9 @@ function select(sid, ch) {
   renderHeader();
   renderTyping();
   schedule("members", "msgs");
-  if (!mobile()) setTimeout(() => $("input").focus({ preventScroll: true }));
+  if (!mobile() && !S.normal) {
+    setTimeout(() => $("input").focus({ preventScroll: true }));
+  }
 }
 
 const draft = () => `draft.${S.sid}.${S.ch}`;
@@ -662,7 +665,8 @@ function renderHeader() {
     : "Connected with no one now";
   net.onclick = () => toast(net.title);
   const input = $("input");
-  input.placeholder = parent ? `Reply in ${ch.name}`
+  input.placeholder = S.normal ? "-- NORMAL --  j/k pick, ? keys, i types"
+    : parent ? `Reply in ${ch.name}`
     : s?.dm ? `Message @${s.name}`
     : ch ? `Message #${ch.name}` : "";
   input.disabled = !ch || s.locked;
@@ -1927,6 +1931,8 @@ function settings() {
             onclick: () => copy(S.me.id, "ID copied") }, "Copy")),
         sw("Invisible", "Others see you offline; typing stays private.",
           S.me.invisible, (on) => setInvisible(on)),
+        sw("Vim keys", "Esc in the composer picks messages: j/k, r, e, dd; " +
+          "? lists them.", vimKeys(), (on) => store.set("vim", on ? "1" : "0")),
         android && notifyCheck(),
         h("label", {}, "Storage node"), storage,
         h("p", { class: "note" }, "Paste the code `irch --serve` prints " +
@@ -2415,11 +2421,14 @@ const say = (text) => {
 // ---------- vim ----------
 
 const KEYS = [
-  ["Esc", "out of the composer: pick messages (normal mode)"],
+  ["Esc", "out of the composer: pick messages (vim keys, in Settings)"],
   ["j / k", "next / previous message"], ["gg / G", "first / last"],
+  ["l, Enter / h", "into its thread / back out"],
+  ["J / K", "next / previous channel"],
   ["r", "reply"], ["t", "reply in its thread"], ["e", "edit (yours)"],
-  ["dd", "delete"], ["y", "copy its text"], ["+", "react"],
-  ["n", "add to notes"], ["i, a, Enter", "back to typing"],
+  ["dd", "delete"], ["y", "copy its text"], ["p", "pin"], ["+", "react"],
+  ["n", "add to notes"], ["x", "close this DM"], ["/", "search"],
+  [":", "a /command"], ["i, a, o", "back to typing"],
   ["Ctrl+K", "jump to a channel or DM; @ for anyone to message"],
   ["Ctrl+F", "search"], ["Alt+↑/↓", "previous / next channel"],
   ["/nick, /join, /dm, /me, /shrug, /thread, /invite, /close, /leave, /notes",
@@ -2460,7 +2469,15 @@ function vim(e) {
     y: () => m && copy(m.text, "Copied"),
     "+": () => m && picker(row(), (em) => react(m, em, true)),
     n: () => m && toNotes(m),
-    i: () => typeMode(), a: () => typeMode(), Enter: () => typeMode(),
+    p: () => m && publish({ Pin: { target: m.id, on: !m.pinned } }),
+    l: () => m?.thread && !inThread() && openThread(m.id),
+    Enter: () => m?.thread && !inThread() ? openThread(m.id) : typeMode(),
+    h: () => inThread() && select(S.sid, S.thread.parent),
+    J: () => stepChannel(1), K: () => stepChannel(-1),
+    x: () => cur()?.dm && closeDm(cur()),
+    "/": () => searchFlow(),
+    ":": () => (typeMode(), !$("input").value && insert($("input"), "/")),
+    i: () => typeMode(), a: () => typeMode(), o: () => typeMode(),
     "?": () => keysHelp(),
   }[k];
   if (!act) return false;
@@ -2468,9 +2485,17 @@ function vim(e) {
   return true;
 }
 
+// Vim keys, unless turned off: Esc in the composer, then j/k and the rest.
+const vimKeys = () => store.get("vim") !== "0";
+
+function normal(on) {
+  S.normal = on;
+  pick(on ? S.msgs.at(-1) : null);
+  renderHeader();
+}
+
 function typeMode() {
-  pick(null);
-  S.normal = false;
+  normal(false);
   $("input").focus({ preventScroll: true });
 }
 
@@ -2600,6 +2625,7 @@ function wire() {
 
   const input = $("input");
   mentionPicker(input);
+  input.addEventListener("focus", () => S.normal && normal(false));
   input.addEventListener("input", () => {
     autosize(input);
     store.set(draft(), input.value);
@@ -2646,14 +2672,10 @@ function wire() {
     } else if (e.key === "Escape" && !$("modal").open) {
       if (closePop) closePop();
       else if (S.reply) cancelReply();
-      else if (S.normal) {
-        S.normal = false;
-        pick(null);
-      }
-      else if (e.target === input && S.msgs.length) {
+      else if (S.normal) normal(false);
+      else if (e.target === input && S.msgs.length && vimKeys()) {
         input.blur();
-        S.normal = true;
-        pick(S.msgs.at(-1));
+        normal(true);
       } else if (inThread()) select(S.sid, S.thread.parent);
       else {
         sc.scrollTop = sc.scrollHeight;
