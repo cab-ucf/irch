@@ -1232,6 +1232,24 @@ img.qr {
   margin-top: 4px;
 }
 .attachments .image { max-width: min(400px, 100%); }
+.attachments .video { max-width: min(400px, 100%); margin-bottom: 4px; }
+.video .play {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 240px;
+  height: 135px;
+  justify-content: center;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  color: var(--muted);
+}
+.video .play svg { width: 32px; height: 32px; color: var(--brand); }
+.video.loading .play { opacity: .5; }
+.video video { display: block; max-width: 100%; max-height: 320px;
+  border-radius: var(--radius); }
 .attachments .image.loading {
   width: 240px;
   height: 160px;

@@ -89,6 +89,7 @@ const ICONS = {
   camOff: "M3 7h12v10H3zM15 10.5 21 7v10l-6-3.5M3 3l18 18",
   screen: "M3 4h18v12H3zM8 20h8M12 16v4",
   speaker: "M4 9h4l5-4v14l-5-4H4zM16 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12",
+  play: "M8 5v14l11-7z",
   thread: "M5 4v9a4 4 0 0 0 4 4h10M15 13l4 4-4 4",
   note: "M6 3h12v18l-6-4-6 4zM9 8h6M9 11h4",
   pin: "M12 16v5M9 3h6l-1 6 4 4v2H6v-2l4-4z",
@@ -1118,18 +1119,46 @@ function attachments(files) {
         .then((b64) => a.src = `data:${type};base64,${b64}`, () => {});
       return h("div", { class: "voice" }, a, fileChip(f));
     }
+    if (type?.startsWith("video") && f.size <= PREVIEW) return video(f, type);
     if (!mime(f.name)) return fileChip(f);
     const img = h("img", { class: "attachment", alt: f.name, title: f.name });
     const box = h("div", { class: "image loading" }, img);
-    image(f).then((src) => {
+    // A storage node may still be fetching it: try again a few times.
+    const load = (n) => image(f).then((src) => {
       const stick = nearBottom();
       img.onload = () => stick && ($("scroller").scrollTop = 1e9);
       img.src = src;
       box.classList.remove("loading");
       img.onclick = () => lightbox(src, f);
-    }, () => box.replaceWith(fileChip(f)));
+    }, () => n < 3 && box.isConnected
+      ? setTimeout(() => load(n + 1), 10000 * (n + 1))
+      : box.replaceWith(fileChip(f)));
+    load(0);
     return box;
   }));
+}
+
+const PREVIEW = 25 << 20; // what opens in memory (core's PREVIEW)
+
+// Played where it is, fetched on the first tap.
+function video(f, type) {
+  const play = h("button", { class: "play", title: `Play ${f.name}` },
+    icon("play"), h("small", {}, `${f.name} · ${size(f.size)}`));
+  const box = h("div", { class: "video" }, play);
+  play.onclick = () => {
+    box.classList.add("loading");
+    rpc("file", { space: S.sid, file: f }).then((b64) => {
+      const b = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const src = URL.createObjectURL(new Blob([b], { type }));
+      box.replaceChildren(h("video", { src, controls: true, autoplay: true,
+        playsinline: true }));
+      box.classList.remove("loading");
+    }, (e) => {
+      box.classList.remove("loading");
+      toast(String(e?.message ?? e), true);
+    });
+  };
+  return h("div", {}, box, fileChip(f));
 }
 
 // An offered file's key is all zeros: its sender's device serves it.
