@@ -125,6 +125,8 @@ pub struct Notice {
     pub body: String,
     /// A call in a DM: ring, like a phone.
     pub ring: bool,
+    /// Its calls rang, and ended: stop ringing (phones, woken).
+    pub hush: bool,
 }
 
 pub struct Space {
@@ -791,7 +793,14 @@ impl Node {
                 let body =
                     if m.text.is_empty() { "(file)".into() } else { m.text };
                 let (space, room) = (id, *ch);
-                out.push(Notice { space, room, title, body, ring: false });
+                out.push(Notice {
+                    space,
+                    room,
+                    title,
+                    body,
+                    ring: false,
+                    hush: false,
+                });
             }
             // Calls by others: a DM's rings, a channel's says it started;
             // each once while it lasts, but not the one we are in.
@@ -821,7 +830,14 @@ impl Node {
                     ),
                 };
                 let (space, room) = (id, ch);
-                out.push(Notice { space, room, title, body, ring: dm });
+                out.push(Notice {
+                    space,
+                    room,
+                    title,
+                    body,
+                    ring: dm,
+                    hush: false,
+                });
             }
             let p = &mut lock(&self.prefs).told;
             p.insert(id, mark.max(newest.unwrap_or(0)));
@@ -1549,7 +1565,11 @@ impl Node {
             let sp = self.get(&c.space);
             sp.iter().for_each(|sp| self.emit(Event::Call { space: sp.id }));
             if let Ok(sp) = sp {
-                self.signal(&sp, Op::Call { channel: None }).await;
+                let raw = self.signal(&sp, Op::Call { channel: None }).await;
+                // A DM's phones, ringing: hung up, they stop.
+                if self.view(&sp.id, |s| s.dm.is_some()) == Some(true) {
+                    self.wake(&sp.id, raw);
+                }
             }
         }
         let Some((id, ch)) = to else { return Ok(()) };
@@ -2160,10 +2180,15 @@ impl Node {
                 }
             }
             Op::Call { channel } => {
+                // As old as it was said, not as it came: one passed on late
+                // (a ring retried) is not a call still ringing.
+                let age = Duration::from_millis(now().saturating_sub(s.ts));
+                let at = Instant::now().checked_sub(age);
                 let mut c = lock(&sp.calls);
                 let was = match channel {
                     Some(ch) => {
-                        c.insert(s.author, (ch, s.device, Instant::now()))
+                        let at = at.unwrap_or_else(Instant::now);
+                        c.insert(s.author, (ch, s.device, at))
                     }
                     None => c.remove(&s.author),
                 };

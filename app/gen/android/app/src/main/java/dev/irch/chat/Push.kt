@@ -140,6 +140,15 @@ class IrchLive : Service() {
       startForeground(3, n)
     }
     if (running.compareAndSet(false, true)) {
+      // Relays drop a client that does not answer their ping (every ~18
+      // s) within 5 s; asleep, a phone often cannot, and its doorbell
+      // falls silent until Android next wakes it, minutes later. So the
+      // CPU stays awake (idle) while the doorbell waits: the radio wakes
+      // for those pings regardless. Android honors it while irch runs
+      // unrestricted, which irch asks for.
+      val pm = getSystemService(android.os.PowerManager::class.java)
+      awake = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "irch:doorbell")
+        .apply { setReferenceCounted(false) }
       // Native code cannot see the network change; the doorbell must.
       val cm = getSystemService(android.net.ConnectivityManager::class.java)
       cm.registerDefaultNetworkCallback(object :
@@ -149,6 +158,7 @@ class IrchLive : Service() {
       })
       Thread {
         while (true) {
+          awake?.acquire(40 * 60_000L) // the doorbell waits at most 30 min
           runCatching { Wake.rung(applicationContext, dataDir.absolutePath) }
           catchUp(this, null)
         }
@@ -157,8 +167,14 @@ class IrchLive : Service() {
     return START_STICKY
   }
 
+  override fun onDestroy() {
+    awake?.release()
+    super.onDestroy()
+  }
+
   companion object {
     val running = java.util.concurrent.atomic.AtomicBoolean(false)
+    var awake: android.os.PowerManager.WakeLock? = null
   }
 }
 

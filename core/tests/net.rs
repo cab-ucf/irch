@@ -328,6 +328,11 @@ async fn a_ring_tells_a_sleeping_phone_what_rang() {
     a.call(Some((dm, DM))).await.unwrap();
     let call = tokio::time::timeout(ten, phone).await.unwrap().unwrap();
     let call = call.unwrap().expect("the ring is the call");
+    let phone = rang(db.clone());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    a.call(None).await.unwrap();
+    let ended = tokio::time::timeout(ten, phone).await.unwrap().unwrap();
+    let ended = ended.unwrap().expect("hanging up rings too");
 
     // Up again, b tells of both at once: a call is said only every 15 s,
     // so it can only have come with the ring.
@@ -338,6 +343,8 @@ async fn a_ring_tells_a_sleeping_phone_what_rang() {
     b.deliver(call);
     let n = b.notices();
     assert!(n.iter().any(|n| n.ring), "the call rings: {n:?}");
+    b.deliver(ended);
+    assert!(b.calls(&dm).is_empty(), "and stops when hung up");
     until("the message, told", || {
         texts(&b, &dm, &DM).contains(&"lunch?".to_string())
     })
