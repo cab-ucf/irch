@@ -70,6 +70,24 @@ async fn updated(exe: &std::path::Path) {
     }
 }
 
+/// Ctrl-C, or a service manager's stop (SIGTERM): either leaves cleanly.
+async fn stopped() {
+    #[cfg(unix)]
+    let term = async {
+        let k = tokio::signal::unix::SignalKind::terminate();
+        match tokio::signal::unix::signal(k) {
+            Ok(mut s) => drop(s.recv().await),
+            Err(_) => std::future::pending().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        () = term => {}
+    }
+}
+
 fn restart(exe: &std::path::Path) -> Result<()> {
     let args = std::env::args_os().skip(1);
     let mut cmd = std::process::Command::new(exe);
@@ -147,12 +165,11 @@ async fn main() -> Result<()> {
     let mut fresh = false;
     if ui {
         app::run(n.clone()).await?;
-    } else if api {
-        api::run(n.clone()).await?;
     } else {
         tokio::select! {
-            r = tokio::signal::ctrl_c() => r?,
-            () = updated(&exe) => fresh = true,
+            r = api::run(n.clone()), if api => r?,
+            () = stopped() => {}
+            () = updated(&exe), if !api => fresh = true,
         }
     }
     n.shutdown().await;
