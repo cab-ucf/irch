@@ -1,5 +1,5 @@
 //! An order-free fold of a space's ops. Control re-folds in `(ts, id)`
-//! order; authors pick their times, so only current admins' keys count.
+//! order; authors pick their times, so only current admins' rekeys count.
 
 use crate::op::{File, Invite, Op, Role, Signed};
 use crate::{Ch, Id};
@@ -302,10 +302,6 @@ impl State {
 
     pub fn push(&self, a: &Id, d: &EndpointId) -> Option<&str> {
         self.pushes.get(&(*a, *d))?.1.as_deref()
-    }
-
-    pub fn pushes(&self) -> Vec<(EndpointId, String)> {
-        self.pushes_of(None)
     }
 
     pub fn pushes_of(&self, who: Option<&Id>) -> Vec<(EndpointId, String)> {

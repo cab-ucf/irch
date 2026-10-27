@@ -4,7 +4,7 @@
 use crate::call::{self, Call};
 use crate::crypto::{Key, Me, kem_open, kem_seal, rand};
 use crate::op::{self, Env, File, Invite, Op, Role, Signed, code, tag, uncode};
-use crate::state::{Message, State};
+use crate::state::State;
 use crate::store::{self, Log};
 use crate::sync::{self, Bucket, Hello};
 use crate::{Ch, Id, now};
@@ -1028,16 +1028,6 @@ impl Node {
     pub fn unread(&self, id: &Id, ch: &Ch) -> (usize, usize) {
         let (since, me) = (self.since(id, ch), self.id());
         self.view(id, |s| s.unread(ch, since, &me)).unwrap_or_default()
-    }
-
-    pub fn mentions(&self, id: &Id, after: u64) -> Vec<(Ch, Message)> {
-        let me = self.id();
-        let chans = self.view(id, |s| s.rooms()).unwrap_or_default();
-        let hit = |ch: Ch| {
-            let since = self.since(id, &ch).max(after);
-            Some((ch, self.view(id, |s| s.last_mention(&ch, since, &me))??))
-        };
-        chans.into_iter().filter_map(|(ch, _)| hit(ch)).collect()
     }
 
     /// Strictly increasing wall-clock ms.

@@ -60,7 +60,7 @@ space = a grow-only set of envs;   state = a deterministic fold of it
 - **Bans change the key**, boxed to each remaining member with X-Wing
   (ML-KEM-768 + X25519); a `Back` op keeps history readable for members.
 - **Authority is a fold** in `(time, id)` order, so every replica agrees in
-  any delivery order; only current admins' keys count.
+  any delivery order; only current admins' rekeys count.
 - **One seed is you** on every device; a private space records what you
   joined, so linked devices follow each other.
 - **Storage nodes keep ciphertext, never keys**, so messages wait while
@@ -84,6 +84,8 @@ space = a grow-only set of envs;   state = a deterministic fold of it
 ## Limits
 
 - No forward secrecy inside an epoch; keys rotate on bans and on request.
+- Authors date their own ops (a day ahead at most): a demoted admin's
+  backdated bans and renames stand until undone.
 - Signatures are Ed25519; stored data is post-quantum, transport is not.
 - Peers see each other's addresses, relays see endpoint ids and traffic,
   storage nodes see sizes, times and devices.

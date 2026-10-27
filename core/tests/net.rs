@@ -106,7 +106,6 @@ async fn join_sync_and_live() {
     let m = a.view(&id, |s| s.messages(&ch, None, 9)).unwrap();
     assert_eq!(m[1].quote.as_ref().unwrap().text, "hello");
     assert_eq!(a.unread(&id, &ch), (1, 1));
-    assert_eq!(a.mentions(&id, 0).len(), 1);
     a.mark_read(&id, &ch);
     assert_eq!(a.unread(&id, &ch), (0, 0));
 
@@ -308,7 +307,8 @@ async fn a_ring_tells_a_sleeping_phone_what_rang() {
     let url = wake::doorbell(&db, &Net::Direct).await.unwrap();
     b.set_push(Some(url.clone())).await;
     let told = |s: &Id| {
-        a.view(s, |st| st.pushes().iter().any(|p| p.1 == url)) == Some(true)
+        a.view(s, |st| st.pushes_of(None).iter().any(|p| p.1 == url))
+            == Some(true)
     };
     until("a knows b's doorbell", || told(&id) && told(&dm)).await;
     b.notices(); // asked once: what comes next is news
@@ -611,7 +611,7 @@ async fn writing_wakes_a_sleeping_device() {
     let ch = general(&a, &id);
     b.join(&a.invite(&id).await.unwrap()).await.unwrap();
     b.set_push(Some(url.clone())).await;
-    let told = |n: &Node| n.view(&id, |s| s.pushes().len()) == Some(1);
+    let told = |n: &Node| n.view(&id, |s| s.pushes_of(None).len()) == Some(1);
     until("a knows where to wake b", || told(&a)).await;
     assert!(b.notices().is_empty(), "history stays quiet");
     let named = |n: &Node| n.view(&id, |s| s.profile(&a.id()).is_some());
@@ -649,8 +649,9 @@ async fn writing_rings_a_sleeping_phone() {
     b.join(&a.invite(&id).await.unwrap()).await.unwrap();
     let url = wake::doorbell(&db, &Net::Direct).await.unwrap();
     b.set_push(Some(url.clone())).await;
-    let told =
-        |n: &Node| n.view(&id, |s| s.pushes().iter().any(|p| p.1 == url));
+    let told = |n: &Node| {
+        n.view(&id, |s| s.pushes_of(None).iter().any(|p| p.1 == url))
+    };
     until("a knows b's doorbell", || told(&a) == Some(true)).await;
     let b_id = b.id();
     b.shutdown().await;
