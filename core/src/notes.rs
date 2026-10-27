@@ -29,7 +29,7 @@ pub fn markdown(
     let at = format!("[{who}]({})", link(space, &ch, &m.id));
     let first = |t: &str| {
         let l = t.lines().find(|l| !l.trim().is_empty());
-        tame(l.unwrap_or("(attachment)"))
+        tame(l.unwrap_or("(attachment)").trim())
     };
     let due = due.filter(|d| d.chars().all(|c| "0123456789-T:".contains(c)));
     if todo {
@@ -71,7 +71,8 @@ fn plain(s: &str) -> String {
 /// `due:` or `at:` word (a time loroh would act on).
 fn tame(s: &str) -> String {
     let line = |l: &str| {
-        let l = l.trim();
+        let t = l.trim_start();
+        let (ind, l) = (&l[..l.len() - t.len()], t.trim_end());
         let rest = l.trim_start_matches(|c: char| c.is_ascii_digit());
         let n = l.len() - rest.len();
         let mark = match rest.chars().next() {
@@ -95,7 +96,8 @@ fn tame(s: &str) -> String {
                 false => w.into(),
             }
         };
-        l.split_inclusive(char::is_whitespace).map(word).collect::<String>()
+        let l = l.split_inclusive(char::is_whitespace).map(word);
+        format!("{ind}{}", l.collect::<String>())
     };
     let s = s.replace("![", "\\![").replace("```", "\\`\\`\\`");
     let s = s.replace("~~~", "\\~~~");
@@ -218,9 +220,9 @@ fn messages_and_threads_become_markdown() {
         "\\![x](https://t/p.png)\n\\`\\`\\`dataviewjs"
     );
     // No task, event or time of its own for loroh.
-    let t = "- [ ] pay due:2030-01-01\n> 1. go **at**:2030-01-01\n*ok* 3.";
+    let t = "- [ ] pay due:2030-01-01\n  > 1. go **at**:2030-01-01\n*ok* 3.";
     let ok =
-        "\\- [ ] pay due :2030-01-01\n\\> 1. go **at** :2030-01-01\n*ok* 3.";
+        "\\- [ ] pay due :2030-01-01\n  \\> 1. go **at** :2030-01-01\n*ok* 3.";
     assert_eq!(tame(t), ok);
     // A link planted where the note's temporary file was: never written.
     #[cfg(unix)]

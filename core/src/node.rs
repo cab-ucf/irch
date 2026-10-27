@@ -347,10 +347,13 @@ impl Book {
         v
     }
 
-    /// A key from an invite, if an admin set its epoch.
+    /// A key from an invite: one an admin set, or any while rekeys have
+    /// left us out (its own `Rekey` may be sealed under a key we lack).
     fn learn(&mut self, sp: &Id, me: &Me, k: Key) -> bool {
         let set = self.st.epochs().iter().any(|e| e.tag == tag(&k));
-        let new = set && self.keys.insert(tag(&k), k).is_none();
+        let out =
+            self.st.epoch().is_some_and(|e| !self.keys.contains_key(&e.tag));
+        let new = (set || out) && self.keys.insert(tag(&k), k).is_none();
         if new {
             let w = self.unpark(&tag(&k));
             self.fold(sp, me, w);
