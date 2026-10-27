@@ -347,8 +347,10 @@ impl Book {
         v
     }
 
+    /// A key from an invite, if an admin set its epoch.
     fn learn(&mut self, sp: &Id, me: &Me, k: Key) -> bool {
-        let new = self.keys.insert(tag(&k), k).is_none();
+        let set = self.st.epochs().iter().any(|e| e.tag == tag(&k));
+        let new = set && self.keys.insert(tag(&k), k).is_none();
         if new {
             let w = self.unpark(&tag(&k));
             self.fold(sp, me, w);
@@ -2197,8 +2199,12 @@ impl Node {
                 .keys
                 .get(&e.epoch)
                 .and_then(|k| op::open(&sp.id, k, &e, true));
-            // Presence, typing and calls only from who holds the key now.
-            s.filter(|s| !b.st.stale(&s.epoch, &(s.ts, s.id), &s.author))
+            // Presence, typing and calls only from who holds the key now,
+            // unbanned (a ban's rekey may wait for an admin).
+            s.filter(|s| {
+                b.st.role(&s.author) != Role::Banned
+                    && !b.st.stale(&s.epoch, &(s.ts, s.id), &s.author)
+            })
         };
         let Some(s) = s else { return };
         if s.ts.abs_diff(now()) > 120_000 {
@@ -2487,6 +2493,8 @@ mod tests {
         assert!(
             b.keys.contains_key(&tag(&kb)) && !b.keys.contains_key(&tag(&kx))
         );
+        // Nor from an invite pasted in: only an epoch an admin set.
+        assert!(!b.learn(&sp, &o, kx) && !b.keys.contains_key(&tag(&kx)));
         let texts: Vec<_> =
             b.st.messages(&ch, None, 9).into_iter().map(|m| m.text).collect();
         assert_eq!(texts, ["o, under a key handed on"]);
