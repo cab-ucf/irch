@@ -794,13 +794,13 @@ impl Node {
                 out.push(Notice { space, room, title, body, ring: false });
             }
             // Calls by others: a DM's rings, a channel's says it started;
-            // each once while it lasts, none while we are in one.
+            // each once while it lasts, but not the one we are in.
             let calls = self.get(&id).map(|sp| self.callers(&sp, None));
             for (_, ch, u) in calls.unwrap_or_default() {
                 let fresh = u != me && lock(&self.rang).insert((id, u, ch));
                 live.insert((id, u, ch));
                 let tell = level != Level::Off && (dm || level == Level::All);
-                if !fresh || !tell || self.in_call().is_some() {
+                if !fresh || !tell || self.in_call() == Some((id, ch)) {
                     continue;
                 }
                 // Named here, or in any space we share (a new DM may not
@@ -863,8 +863,13 @@ impl Node {
     /// nothing in it; they fetch from us), each at most every 30 s, a
     /// held-back one when that is up.
     fn wake(self: &Arc<Self>, id: &Id) {
+        self.wake_who(id, None);
+    }
+
+    /// Wake `who`'s sleeping devices (everyone's, with `None`) in `id`.
+    fn wake_who(self: &Arc<Self>, id: &Id, who: Option<&Id>) {
         let dev = self.ep.id();
-        let urls = self.view(id, |s| s.pushes()).unwrap_or_default();
+        let urls = self.view(id, |s| s.pushes_of(who)).unwrap_or_default();
         for (_, url) in
             urls.into_iter().filter(|u| u.0 != dev && pushable(&u.1))
         {
@@ -952,6 +957,25 @@ impl Node {
 
     pub fn peers(&self, id: &Id) -> usize {
         self.get(id).map_or(0, |s| lock(&s.nbrs).len())
+    }
+
+    /// The devices we are connected with in a space, and whose each is: a
+    /// member's, a storage node, or not known yet.
+    pub fn neighbors(&self, id: &Id) -> Vec<(EndpointId, String)> {
+        let Ok(sp) = self.get(id) else { return vec![] };
+        let near: Vec<_> = lock(&sp.nbrs).iter().copied().collect();
+        let mine = self.view(&self.own, |s| s.storage()).unwrap_or_default();
+        let b = lock(&sp.book);
+        let host = |d: &EndpointId| {
+            b.st.hosts().iter().any(|h| h.id == *d)
+                || mine.iter().any(|(a, _)| a.id == *d)
+        };
+        let who = |d: &EndpointId| match b.st.owner_of(d) {
+            Some(u) => b.st.display_name(&u),
+            None if host(d) => "a storage node".into(),
+            None => "a device not known yet".into(),
+        };
+        near.into_iter().map(|d| (d, who(&d))).collect()
     }
 
     /// Members heard from in the last few minutes, and us unless invisible.
@@ -1166,10 +1190,13 @@ impl Node {
                 self.view(&sp.id, |s| s.peer(&me) == Some(inv.owner))
                     == Some(true)
             };
-            if known == Some(false)
-                && !self.all().iter().any(with)
-                && let Err(e) = self.enter(inv).await
-            {
+            if known != Some(false) || self.all().iter().any(with) {
+                continue;
+            }
+            // All news: its first message came before we were in it.
+            lock(&self.local).joined.insert(inv.id(), 0);
+            lock(&self.prefs).told.insert(inv.id(), 0);
+            if let Err(e) = self.enter(inv).await {
                 warn!("accepting a DM: {e}");
             }
         }
@@ -1269,9 +1296,11 @@ impl Node {
                 (empty || fits(t, MAX_TEXT)) && files.len() <= 10
             }
             Op::Edit { text: Some(t), .. } => fits(t, MAX_TEXT),
-            Op::Rename { name: n }
-            | Op::Channel { name: Some(n), .. }
-            | Op::Topic { name: n, .. } => fits(n, MAX_NAME),
+            Op::Rename { name: n } | Op::Channel { name: Some(n), .. } => {
+                fits(n, MAX_NAME)
+            }
+            // Named nothing: deleted.
+            Op::Topic { name: n, .. } => n.is_empty() || fits(n, MAX_NAME),
             Op::React { emoji, .. } => fits(emoji, 32),
             Op::Role { role, .. } => *role != Role::Banned,
             Op::Edit { .. } | Op::Channel { .. } => true,
@@ -1439,6 +1468,8 @@ impl Node {
         let (epoch, id) = (tag(&inv.key), self.enter(inv).await?);
         self.post(&self.get(&id)?, Op::Rekey { epoch, boxes: vec![] }).await?;
         self.post(&self.get(via)?, Op::Knock { sealed }).await?;
+        // Their sleeping phones: woken to take it, and what follows.
+        self.wake_who(via, Some(user));
         Ok(id)
     }
 
@@ -1568,10 +1599,17 @@ impl Node {
             };
             let Some((id, ch)) = cur else { return };
             let Ok(sp) = self.get(&id) else { return };
+            let want = self.callers(&sp, Some(ch));
             if i % 15 == 0 {
                 self.signal(&sp, Op::Call { channel: Some(ch) }).await;
+                // A DM ringing, unanswered: its phones woken again, as
+                // long as a call rings (one woken late hears it then).
+                let dm = self.view(&id, |s| s.dm.is_some()) == Some(true);
+                let alone = want.iter().all(|w| w.2 == self.id());
+                if dm && alone && i <= 45 {
+                    self.wake(&id);
+                }
             }
-            let want = self.callers(&sp, Some(ch));
             let dial: HashSet<_> = {
                 let mut c = lock(&self.call);
                 let Some(c) = c.as_mut().filter(|c| c.run == run) else {
@@ -2164,8 +2202,6 @@ async fn pump(n: Arc<Node>, sp: Weak<Space>, boot: Vec<EndpointId>) {
     }
 }
 
-/// Presence every minute; re-dial spaces we are alone in; reconcile with
-/// a neighbor every few minutes; a late tick means we slept: resume.
 /// For push endpoints and updates: TLS as iroh sets it up, roots compiled
 /// in.
 pub fn http() -> reqwest::Client {
@@ -2220,6 +2256,8 @@ impl reqwest::dns::Resolve for Public {
     }
 }
 
+/// Presence every minute; re-dial spaces we are alone in; reconcile with
+/// a neighbor every few minutes; a late tick means we slept: resume.
 async fn heartbeat(n: Weak<Node>) {
     let mut t = tokio::time::interval(BEAT);
     t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

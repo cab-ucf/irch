@@ -26,11 +26,6 @@ static FG: std::sync::atomic::AtomicBool =
 /// The room on screen: its messages need no notification while in sight.
 static VIEW: std::sync::Mutex<Option<(Id, Ch)>> = std::sync::Mutex::new(None);
 
-/// Android, with no push app to wake it: a service keeps it running.
-#[cfg(target_os = "android")]
-static LIVE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 /// Android: in sight, the node runs; out of it for a minute, it stops
 /// (no keepalives: they wake the radio every few seconds). Pushes wake it.
 #[cfg(target_os = "android")]
@@ -60,8 +55,7 @@ async fn seen(app: &AppHandle, fg: bool) {
 #[cfg(target_os = "android")]
 async fn nap() {
     use std::sync::atomic::Ordering::SeqCst;
-    let awake = FG.load(SeqCst) || LIVE.load(SeqCst);
-    let n = running().filter(|n| n.in_call().is_none() && !awake);
+    let n = running().filter(|n| n.in_call().is_none() && !FG.load(SeqCst));
     if let Some(n) = n {
         *NODE.lock().unwrap_or_else(|e| e.into_inner()) = None;
         n.shutdown().await;
@@ -545,6 +539,12 @@ fn opened(app: AppHandle) -> Option<String> {
     urls.first().map(|u| u.to_string())
 }
 
+/// What the page saw go wrong (a call's video, say), into irch's log.
+#[tauri::command]
+fn log(msg: String) {
+    tracing::warn!("page: {}", msg.chars().take(500).collect::<String>());
+}
+
 /// A QR code, as SVG, for codes shown to a camera.
 #[tauri::command]
 fn qr(text: String) -> Result<String, String> {
@@ -565,7 +565,8 @@ async fn math(src: String, display: bool) -> Result<String, String> {
 async fn share(app: AppHandle, text: String) -> Result<(), String> {
     #[cfg(target_os = "android")]
     if let Some(b) = app.try_state::<android::Bridge>() {
-        return Ok(b.share(&text).await);
+        b.share(&text).await;
+        return Ok(());
     }
     let _ = (app, text);
     Err("no share sheet here".into())
@@ -623,7 +624,26 @@ pub fn run() {
                 use webkit2gtk::{SettingsExt, WebViewExt};
                 if let Some(s) = w.inner().settings() {
                     s.set_enable_media_stream(true);
+                    // Debug builds, tested: a camera to call with, and
+                    // the page's console.
+                    if cfg!(debug_assertions)
+                        && std::env::var_os("IRCH_TEST_JS").is_some()
+                    {
+                        s.set_enable_mock_capture_devices(true);
+                        s.set_enable_write_console_messages_to_stdout(true);
+                    }
                 }
+            });
+        }
+        // Debug builds: a script driving the page, for tests.
+        #[cfg(debug_assertions)]
+        if let (Some(f), Some(w)) =
+            (std::env::var_os("IRCH_TEST_JS"), app.get_webview_window("main"))
+        {
+            let js = std::fs::read_to_string(f)?;
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(6)).await;
+                let _ = w.eval(&js);
             });
         }
         use tauri_plugin_deep_link::DeepLinkExt;
@@ -663,6 +683,7 @@ pub fn run() {
         serve_here,
         notify_check,
         pick,
+        log,
         profiles,
         use_profile,
         sign_out
@@ -798,10 +819,15 @@ async fn notify(app: &AppHandle, x: &Notice) {
 }
 
 /// A desktop's banner, while no irch window is in front (the page sounds
-/// it either way).
+/// it either way); a call, irch itself.
 #[cfg(not(target_os = "android"))]
 async fn notify(app: &AppHandle, x: &Notice) {
     use tauri_plugin_notification::NotificationExt;
+    // A call: irch comes to the front, from the tray if need be, ringing
+    // (its page asks to answer), as a phone's would.
+    if x.ring {
+        show(app);
+    }
     if !front(app) {
         let b = app.notification().builder().title(&x.title).body(&x.body);
         let _ = b.show();

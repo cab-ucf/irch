@@ -186,18 +186,25 @@ pub extern "system" fn Java_dev_irch_chat_Wake_run<'l>(
     reply(env, ctx, wake)
 }
 
-/// `Wake.next`: no push app to wake irch, so a service keeps it running
-/// and asks, again and again, for what to notify about next.
+/// `Wake.rung`: no push app to wake irch, so a service waits on its
+/// doorbell, again and again; rung, it catches up (`Wake.run`) holding
+/// the CPU awake, which this, waiting, never does.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_irch_chat_Wake_next<'l>(
+pub extern "system" fn Java_dev_irch_chat_Wake_rung<'l>(
     mut env: JNIEnv<'l>,
     _: JClass<'l>,
     ctx: JObject<'l>,
     dir: JString<'l>,
 ) -> jstring {
-    crate::LIVE.store(true, SeqCst);
     let dir = text(&mut env, &dir).unwrap_or_default();
-    reply(env, ctx, next(irch_core::profile(std::path::Path::new(&dir))))
+    let dir = irch_core::profile(std::path::Path::new(&dir));
+    reply(env, ctx, async {
+        if let Err(e) = rung(dir).await {
+            tracing::warn!("doorbell: {e:#}");
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+        Ok(vec![])
+    })
 }
 
 fn text(env: &mut JNIEnv, s: &JString) -> Option<String> {
@@ -275,24 +282,21 @@ async fn node(dir: PathBuf) -> anyhow::Result<std::sync::Arc<Node>> {
     Ok(n)
 }
 
-/// The next notices. Out of sight, no node at all: only the doorbell
-/// (wake.rs), which its spaces are told of; rung, a catch-up.
-async fn next(dir: PathBuf) -> anyhow::Result<Vec<Notice>> {
+/// Until the doorbell rings (wake.rs): out of sight, no node at all, and
+/// the doorbell told to our spaces once.
+async fn rung(dir: PathBuf) -> anyhow::Result<()> {
+    static TOLD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
     let net = crate::config(dir.clone(), None, None)?.net;
     let url = irch_core::wake::doorbell(&dir, &net).await?;
-    node(dir.clone()).await?.set_push(Some(url)).await;
-    loop {
-        if crate::FG.load(SeqCst) {
-            // In sight: the app shows what arrives.
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            continue;
-        }
-        crate::LIVE.store(false, SeqCst);
-        crate::nap().await;
-        irch_core::wake::rung(&dir, &net).await?;
-        let got = wake(dir.clone(), None).await?;
-        if !got.is_empty() {
-            return Ok(got);
-        }
+    let told = TOLD.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if told.as_ref() != Some(&url) {
+        node(dir.clone()).await?.set_push(Some(url.clone())).await;
+        *TOLD.lock().unwrap_or_else(|e| e.into_inner()) = Some(url);
     }
+    while crate::FG.load(SeqCst) {
+        // In sight: the app shows what arrives.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+    crate::nap().await;
+    irch_core::wake::rung(&dir, &net).await
 }

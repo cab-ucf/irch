@@ -15,6 +15,8 @@
     <!-- Calls ring like calls: full screen when locked, with a buzz. -->
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Held while catching up after a wake, then let go (Push.kt). -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- In-app updates: the system installer, our signing key only. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- Calls: asked for when one is joined, or a camera turned on. -->

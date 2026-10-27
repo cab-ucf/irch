@@ -3527,7 +3527,7 @@ checksum = "791930b43c0d5973160d90a8f3894509f2b273430f5c5c73b668636d0287c5c0"
 
 [[package]]
 name = "irch"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3545,7 +3545,7 @@ dependencies = [
 
 [[package]]
 name = "irch-app"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "anyhow",
  "data-encoding",
@@ -3574,7 +3574,7 @@ dependencies = [
 
 [[package]]
 name = "irch-core"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3601,7 +3601,7 @@ dependencies = [
 
 [[package]]
 name = "irch-math"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "typst",
  "typst-html",

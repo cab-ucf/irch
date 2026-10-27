@@ -313,11 +313,18 @@ impl State {
 
     /// Every device to wake when someone writes: members', not banned.
     pub fn pushes(&self) -> Vec<(EndpointId, String)> {
+        self.pushes_of(None)
+    }
+
+    /// `who`'s devices to wake (everyone's, with `None`).
+    pub fn pushes_of(&self, who: Option<&Id>) -> Vec<(EndpointId, String)> {
         let ok = |((a, _), (at, _)): &(&(Id, EndpointId), &(Pos, _))| {
             self.role(a) != Role::Banned && !self.stale_at(at, a)
         };
         // A few per member, their newest: devices are theirs to claim.
-        let mut p: Vec<_> = self.pushes.iter().filter(ok).collect();
+        let p = self.pushes.iter().filter(ok);
+        let mut p: Vec<_> =
+            p.filter(|((a, _), _)| who.is_none_or(|w| a == w)).collect();
         p.sort_unstable_by_key(|x| std::cmp::Reverse(x.1.0));
         let mut n: HashMap<Id, usize> = HashMap::new();
         p.retain(|((a, _), _)| {
@@ -373,9 +380,10 @@ impl State {
         let (parent, (since, _)) = *self.index.get(&root)?;
         self.channels.contains_key(&parent).then_some(())?;
         let posts = self.posts.get(ch).into_iter().flatten();
-        let seen = posts.filter(|(k, p)| self.resolve(&k.1, p).is_some());
+        let seen: Vec<_> =
+            posts.filter(|(k, p)| self.resolve(&k.1, p).is_some()).collect();
         let (count, last) =
-            seen.fold((0, since), |(n, _), (k, _)| (n + 1, k.0));
+            seen.iter().fold((0, since), |(n, _), (k, _)| (n + 1, k.0));
         let by = self.post(&root)?.author;
         let named = self.topics.get(ch).into_iter().flat_map(|t| t.iter());
         let may = |(at, (a, _)): &(&Pos, &(Id, String))| {
@@ -384,7 +392,17 @@ impl State {
                 && role != Role::Banned
                 && (*a == by || role == Role::Admin)
         };
-        let topic = named.rev().find(may).map(|t| t.1.1.clone());
+        let topic = named.rev().find(may).map(|t| t.1);
+        // Named nothing: deleted, by an admin, or by its starter while
+        // every reply left is theirs.
+        if let Some((a, n)) = topic
+            && n.is_empty()
+            && (self.role(a) == Role::Admin
+                || seen.iter().all(|(_, p)| p.author == by))
+        {
+            return None;
+        }
+        let topic = topic.map(|t| t.1.clone()).filter(|n| !n.is_empty());
         let text = self.post(&root).and_then(|p| self.resolve(&root, p));
         let line = text
             .as_ref()
@@ -479,6 +497,15 @@ impl State {
     }
 
     /// Devices heard from, most recent first; no banned member's.
+    /// Whose device `d` is, by its latest op.
+    pub fn owner_of(&self, d: &EndpointId) -> Option<Id> {
+        let mine = self
+            .devices
+            .iter()
+            .filter(|((x, a), _)| x == d && self.role(a) != Role::Banned);
+        mine.max_by_key(|(_, t)| **t).map(|((_, a), _)| *a)
+    }
+
     pub fn devices(&self, n: usize) -> Vec<EndpointId> {
         let ok =
             |((_, a), _): &(&(EndpointId, Id), _)| self.role(a) != Role::Banned;
@@ -517,9 +544,12 @@ impl State {
         let q = q.to_lowercase();
         let words: Vec<_> = q.split_whitespace().collect();
         let here = |c: &Ch| {
-            room.is_none_or(|r| {
-                c == r || self.thread(c).is_some_and(|t| t.parent == *r)
-            })
+            let thread = self.thread(c);
+            let there = self.channels.contains_key(c) || thread.is_some();
+            there
+                && room.is_none_or(|r| {
+                    c == r || thread.is_some_and(|t| t.parent == *r)
+                })
         };
         let posts = self.posts.iter().filter(|(c, _)| here(c));
         let mut hits: Vec<_> = posts
@@ -836,6 +866,31 @@ mod tests {
         st.extend([op(5, o, topic("ours"))]);
         assert_eq!(name(&st).as_deref(), Some("ours"));
         assert_eq!(st.threads()[0].by, a);
+        // Named nothing: deleted. Its starter's word while the replies
+        // are all theirs; an admin's whatever they are; renamed, back.
+        let t = Id([2; 32]).thread();
+        let say = |n, who, text: &str| {
+            op(
+                n,
+                who,
+                Op::Post {
+                    channel: t,
+                    text: text.into(),
+                    reply: None,
+                    files: vec![],
+                },
+            )
+        };
+        st.extend([say(6, a, "mine"), op(7, a, topic(""))]);
+        assert!(
+            st.threads().is_empty() && st.search("mine", None, 9).is_empty()
+        );
+        st.extend([say(8, b, "and mine"), op(9, a, topic(""))]);
+        assert_eq!(st.threads().len(), 1, "b's reply stands");
+        st.extend([op(10, o, topic(""))]);
+        assert!(st.threads().is_empty() && st.rooms().iter().all(|r| r.0 != t));
+        st.extend([op(11, o, topic("back"))]);
+        assert_eq!(name(&st).as_deref(), Some("back"));
     }
 
     #[test]

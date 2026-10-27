@@ -297,6 +297,10 @@ fn space(n: &Node, id: &Id) -> Option<Value> {
     Some(json!({
         "id": id, "name": name, "dm": dm, "with": with, "owner": owner,
         "admin": admin, "peers": peers, "locked": locked, "channels": channels,
+        "near": n.neighbors(id).into_iter()
+            .map(|(d, who)| (d.fmt_short().to_string(), who))
+            .map(|(device, who)| json!({ "device": device, "who": who }))
+            .collect::<Vec<_>>(),
         "level": n.level(id),
         "storage": n.stored(id).into_iter()
             .map(|(node, on)| json!({ "node": node, "on": on }))

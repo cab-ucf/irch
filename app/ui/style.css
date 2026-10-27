@@ -28,12 +28,56 @@
   --mention-bg: rgba(255, 43, 214, 0.1);
   --link: #ff6ad5;
   --border: rgba(180, 77, 255, 0.18);
+  --scroll: #2a1846;
+  --grey: #241638;
+  --grey-hover: #33204f;
   --radius: 8px;
   --font: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", Ubuntu,
     sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono",
     monospace;
   color-scheme: dark;
+}
+/* Other themes (My Account): the same names, other colors. */
+:root[data-theme="midnight"] {
+  --bg-1: #232428; --bg-2: #2b2d31; --bg-3: #313338; --bg-4: #383a40;
+  --bg-float: #111214; --field: #1e1f22;
+  --line: rgba(255, 255, 255, 0.06); --border: rgba(255, 255, 255, 0.08);
+  --hover: rgba(255, 255, 255, 0.06); --active: rgba(255, 255, 255, 0.1);
+  --msg-hover: rgba(0, 0, 0, 0.08);
+  --text: #dbdee1; --text-strong: #f2f3f5; --muted: #b5bac1; --dim: #80848e;
+  --brand: #5865f2; --brand-hover: #7983f5; --pink: #eb459e;
+  --cyan: #00a8fc; --soft: #c9cdfb; --neon: var(--brand); --glow: none;
+  --green: #23a55a; --red: #f23f43; --yellow: #f0b232;
+  --mention-bg: rgba(240, 178, 50, 0.1); --link: #00a8fc;
+  --scroll: #1a1b1e; --grey: #4e5058; --grey-hover: #6d6f78;
+}
+:root[data-theme="nord"] {
+  --bg-1: #2b303b; --bg-2: #2e3440; --bg-3: #3b4252; --bg-4: #434c5e;
+  --bg-float: #242933; --field: #2e3440;
+  --line: rgba(216, 222, 233, 0.08); --border: rgba(216, 222, 233, 0.1);
+  --hover: rgba(136, 192, 208, 0.1); --active: rgba(136, 192, 208, 0.18);
+  --msg-hover: rgba(136, 192, 208, 0.05);
+  --text: #e5e9f0; --text-strong: #eceff4; --muted: #d8dee9; --dim: #8f99ab;
+  --brand: #5e81ac; --brand-hover: #81a1c1; --pink: #b48ead;
+  --cyan: #88c0d0; --soft: #e5e9f0; --neon: var(--brand); --glow: none;
+  --green: #a3be8c; --red: #bf616a; --yellow: #ebcb8b;
+  --mention-bg: rgba(235, 203, 139, 0.1); --link: #88c0d0;
+  --scroll: #4c566a; --grey: #4c566a; --grey-hover: #5e6a82;
+}
+:root[data-theme="light"] {
+  --bg-1: #ebedef; --bg-2: #f2f3f5; --bg-3: #fff; --bg-4: #ebedef;
+  --bg-float: #fff; --field: #e3e5e8;
+  --line: rgba(0, 0, 0, 0.08); --border: rgba(0, 0, 0, 0.1);
+  --hover: rgba(0, 0, 0, 0.05); --active: rgba(0, 0, 0, 0.09);
+  --msg-hover: rgba(0, 0, 0, 0.03);
+  --text: #2e3338; --text-strong: #060607; --muted: #4e5058; --dim: #6d7079;
+  --brand: #5865f2; --brand-hover: #4752c4; --pink: #c2187f;
+  --cyan: #0077b6; --soft: #4752c4; --neon: var(--brand); --glow: none;
+  --green: #1a8a4a; --red: #d83c3e; --yellow: #a86b00;
+  --mention-bg: rgba(250, 168, 26, 0.12); --link: #006ce7;
+  --scroll: #c4c9ce; --grey: #d4d7dc; --grey-hover: #c4c9ce;
+  color-scheme: light;
 }
 ::selection { background: rgba(255, 43, 214, 0.35); color: #fff; }
 :focus-visible { outline: 1px solid var(--pink); outline-offset: 1px; }
@@ -71,7 +115,7 @@ svg.icon {
 }
 .hidden { display: none !important; }
 ::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-thumb { background: #2a1846; border-radius: 4px; }
+::-webkit-scrollbar-thumb { background: var(--scroll); border-radius: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
 
 #app {
@@ -449,7 +493,7 @@ table.keys kbd {
   box-shadow: inset 2px 0 0 var(--pink);
 }
 .msg.target {
-  background: rgba(180, 77, 255, 0.12);
+  background: var(--hover);
   box-shadow: inset 2px 0 0 var(--brand);
 }
 .msg .author {
@@ -531,7 +575,7 @@ table.keys kbd {
 .content .link { color: var(--link); cursor: pointer; }
 .content .link:hover { text-decoration: underline; }
 .content .mention {
-  background: rgba(180, 77, 255, 0.3);
+  background: var(--active);
   color: var(--soft);
   border-radius: 3px;
   padding: 0 2px;
@@ -617,7 +661,7 @@ table.keys kbd {
 .reaction b { font-size: 13px; color: var(--muted); font-weight: 600; }
 .reaction:hover { border-color: var(--dim); }
 .reaction.mine {
-  background: rgba(255, 43, 214, 0.15);
+  background: var(--mention-bg);
   border-color: var(--pink);
 }
 .reaction.mine b { color: var(--soft); }
@@ -796,8 +840,8 @@ table.keys kbd {
   color: #fff;
 }
 .btn:hover { box-shadow: var(--glow); }
-.btn.grey { background: #241638; }
-.btn.grey:hover { background: #33204f; box-shadow: none; }
+.btn.grey { background: var(--grey); color: var(--text-strong); }
+.btn.grey:hover { background: var(--grey-hover); box-shadow: none; }
 .btn.red { background: var(--red); }
 .btn.link { background: none; color: var(--text); }
 .btn.link:hover { text-decoration: underline; }
@@ -981,7 +1025,7 @@ dialog .m-foot .spacer { flex: 1; }
   width: 40px;
   height: 24px;
   border-radius: 12px;
-  background: #3a2b55;
+  background: var(--grey);
   transition: background 0.15s;
 }
 .switch i::after {
@@ -1316,3 +1360,12 @@ dialog:has(.preview) { width: min(900px, calc(100vw - 32px)); }
 #welcome h1 { font-size: 20px; margin: 0 0 2px; }
 .check { margin: 4px 0; color: var(--red); font-size: 14px; }
 .check.ok { color: var(--green); }
+
+/* The camera, reading a QR code. */
+video.scan {
+  width: 100%;
+  max-height: 50vh;
+  border-radius: var(--radius);
+  background: #000;
+  object-fit: cover;
+}
