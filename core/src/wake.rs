@@ -70,7 +70,8 @@ pub async fn doorbell(dir: &Path, net: &Net) -> Result<String> {
 }
 
 /// Until rung with the secret; with news, unless an older irch rang bare.
-/// Ringers are heard at once: one that stalls holds up nobody.
+/// Ringers are heard at once: one that stalls holds up nobody, and past
+/// 32 at once the rest are refused.
 pub async fn rung(dir: &Path, net: &Net) -> Result<Option<News>> {
     let (ep, secret) = bell(dir, net).await?;
     let mut rings = tokio::task::JoinSet::new();
@@ -78,10 +79,17 @@ pub async fn rung(dir: &Path, net: &Net) -> Result<Option<News>> {
         tokio::select! {
             inc = ep.accept() => {
                 let Some(inc) = inc else { bail!("doorbell closed") };
-                rings.spawn(timeout(SLOW, answer(inc, secret)));
+                if rings.len() >= 32 {
+                    inc.refuse();
+                } else {
+                    rings.spawn(timeout(SLOW, answer(inc, secret)));
+                }
             }
-            Some(Ok(Ok(Ok(Some(news))))) = rings.join_next() => {
-                return Ok(news);
+            // Matched inside: a wrong ring must not stall the next one.
+            Some(r) = rings.join_next() => {
+                if let Ok(Ok(Ok(Some(news)))) = r {
+                    return Ok(news);
+                }
             }
         }
     }
