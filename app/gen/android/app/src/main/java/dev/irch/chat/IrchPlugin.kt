@@ -57,23 +57,19 @@ class FileArgs {
   var path = ""
 }
 
-/** What the Rust side (src/android.rs) needs from Android. */
 @TauriPlugin
 class IrchPlugin(private val activity: Activity) : Plugin(activity) {
-  /** Ask for notifications once, and be woken through UnifiedPush. */
   override fun load(webView: WebView) {
     if (!notificationsAllowed(activity) && Build.VERSION.SDK_INT >= 33) {
       ActivityCompat.requestPermissions(activity, arrayOf(POST_NOTIFICATIONS), 1)
     }
-    // A push app wakes irch for almost no battery; without one, a service
-    // keeps irch's doorbell, which whoever writes rings over iroh.
+    // A push app costs almost no battery; else a service keeps a doorbell.
     UnifiedPush.tryUseCurrentOrDefaultDistributor(activity) { ok ->
       if (ok) UnifiedPush.register(activity) else live(activity)
     }
   }
 
-  /** Doze lets an optimized app neither keep its connection nor start
-   *  from a push: what reaches a phone in a pocket depends on this. */
+  /** Optimized, Doze stops irch staying connected or waking on push. */
   private fun unrestrict() = runCatching {
     val uri = android.net.Uri.parse("package:" + activity.packageName)
     activity.startActivity(Intent(
@@ -81,7 +77,6 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     ))
   }
 
-  /** What decides whether this phone is told: as My Account shows it. */
   @Command
   fun alerts(invoke: Invoke) {
     val push = UnifiedPush.getAckDistributor(activity)
@@ -98,8 +93,6 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
       .put("push", label))
   }
 
-  /** Ask for what is missing: notifications, running unrestricted, then
-   *  calls on a locked screen. */
   @Command
   fun allowAlerts(invoke: Invoke) {
     if (!notificationsAllowed(activity)) {
@@ -117,7 +110,6 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     invoke.resolve()
   }
 
-  /** Once there is someone to hear from (the page asks, once). */
   @Command
   fun askBackground(invoke: Invoke) {
     if (!unrestricted(activity)) unrestrict()
@@ -130,10 +122,7 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     invoke.resolve()
   }
 
-  /**
-   * Native code cannot observe network changes on Android; iroh needs them.
-   * Nor whether irch is in sight: out of it, the node sleeps (battery).
-   */
+  /** Native code sees neither network changes nor whether irch is in sight. */
   @Command
   fun watchNetwork(invoke: Invoke) {
     val channel = invoke.parseArgs(WatchArgs::class.java).channel
@@ -157,7 +146,6 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     invoke.resolve()
   }
 
-  /** The Rust side left out what is on screen; the rest is told. */
   @Command
   fun alert(invoke: Invoke) {
     val a = invoke.parseArgs(AlertArgs::class.java)
@@ -167,7 +155,6 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     invoke.resolve()
   }
 
-  /** A call answered or declined in the page: the ringing stops. */
   @Command
   fun hush(invoke: Invoke) {
     hush(activity)
@@ -183,7 +170,6 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     invoke.resolve()
   }
 
-  /** A page in the browser: a newer irch's APK, say. */
   @Command
   fun browse(invoke: Invoke) {
     val url = invoke.parseArgs(UrlArgs::class.java).url
@@ -192,7 +178,6 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     invoke.resolve()
   }
 
-  /** Hand a saved attachment to another app: Files, Photos, a messenger. */
   @Command
   fun shareFile(invoke: Invoke) {
     val file = java.io.File(invoke.parseArgs(FileArgs::class.java).path)

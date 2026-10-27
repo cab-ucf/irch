@@ -1,5 +1,5 @@
-//! Everything is BLAKE3 derivations, XChaCha20-Poly1305 and, to reach one
-//! member, X-Wing (ML-KEM-768 + X25519): post-quantum where it is stored.
+//! BLAKE3 derivations, XChaCha20-Poly1305 and, to reach one member, X-Wing
+//! (ML-KEM-768 + X25519): post-quantum where it is stored.
 
 use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305,
@@ -61,7 +61,6 @@ pub fn kem_open(
     open(&dk.decapsulate(&ct).into(), aad, rest)
 }
 
-/// A person, on every device: all keys derive from one 32-byte seed.
 pub struct Me {
     pub seed: Key,
     pub user: SecretKey,

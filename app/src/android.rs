@@ -1,6 +1,4 @@
-//! Android, through `IrchPlugin.kt` in `gen/android`: network changes
-//! (which iroh cannot see from native code there), notifications, the share
-//! sheet; and through `Push.kt`, push wakes when no activity is running.
+//! Android: `IrchPlugin.kt` sees network changes iroh cannot; `Push.kt` wakes.
 
 use anyhow::Context;
 use irch_core::wake::{self, News};
@@ -39,9 +37,7 @@ struct Text<'a> {
     text: &'a str,
 }
 
-/// The latest release's APK, from the browser: Android installs it over
-/// this one only if irch's key signed it. irch itself never fetches or
-/// installs apps (Play Protect takes an app that does for malware).
+/// Via the browser: Play Protect takes apps that install apps for malware.
 pub async fn upgrade(app: &tauri::AppHandle) -> anyhow::Result<String> {
     let url = format!("{}/download/irch.apk", crate::LATEST);
     let bridge = app.try_state::<Bridge>().context("no bridge")?;
@@ -49,9 +45,6 @@ pub async fn upgrade(app: &tauri::AppHandle) -> anyhow::Result<String> {
     Ok("Your browser downloads irch: open it to install".into())
 }
 
-/// What decides whether this phone is told, after `ask`: "fix" (Android
-/// asks for what is missing), "background" (to run unrestricted), "test"
-/// (a notification, now), or nothing.
 pub async fn notify_check(
     app: &tauri::AppHandle,
     ask: &str,
@@ -81,8 +74,6 @@ struct FilePath<'a> {
 }
 
 impl Bridge {
-    /// Every network change: re-probe, re-dial, catch up. And irch in
-    /// sight or out of it: the node wakes, or soon sleeps. Once.
     pub async fn watch_network(&self, app: tauri::AppHandle) {
         static ONCE: AtomicBool = AtomicBool::new(false);
         if ONCE.swap(true, SeqCst) {
@@ -130,18 +121,13 @@ impl Bridge {
     }
 }
 
-// We gave ndk-context Android's context (no activity had); the activity's
-// runtime (tao) sets it once per process and asserts nobody did before.
+// tao sets ndk-context once per process, asserting nobody did before.
 static OURS: AtomicBool = AtomicBool::new(false);
 static TAO: AtomicBool = AtomicBool::new(false);
 
-/// What rang, not yet taken in.
 static NEWS: std::sync::Mutex<Vec<News>> = std::sync::Mutex::new(vec![]);
 
-/// `Wake.run`: a push or a ring came. Start the node if irch was not
-/// running (or wake it), take in what rang, and return what to notify
-/// about, as JSON: at once, or (`full`) after catching up. While the app
-/// runs, it notifies itself and this returns `[]`.
+/// Notices as JSON: at once, or (`full`) after catching up.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_irch_chat_Wake_run<'l>(
     mut env: JNIEnv<'l>,
@@ -158,8 +144,7 @@ pub extern "system" fn Java_dev_irch_chat_Wake_run<'l>(
     reply(env, ctx, wake)
 }
 
-/// `Wake.moved`: another network. The doorbell (and the node, if up)
-/// find their relay again now, not when a ping fails.
+/// Another network: find relays now, not when a ping fails.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_irch_chat_Wake_moved(_: JNIEnv, _: JClass) {
     tauri::async_runtime::block_on(async {
@@ -170,9 +155,7 @@ pub extern "system" fn Java_dev_irch_chat_Wake_moved(_: JNIEnv, _: JClass) {
     });
 }
 
-/// `Wake.rung`: no push app to wake irch, so a service waits on its
-/// doorbell, again and again; rung, it catches up (`Wake.run`) holding
-/// the CPU awake, which this, waiting, never does.
+/// No push app: a service waits on the doorbell, never holding the CPU.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_irch_chat_Wake_rung<'l>(
     mut env: JNIEnv<'l>,
@@ -195,7 +178,6 @@ fn text(env: &mut JNIEnv, s: &JString) -> Option<String> {
     (!s.is_null()).then(|| env.get_string(s).ok().map(Into::into))?
 }
 
-/// Run `f` with Android's context set, and hand back its notices as JSON.
 fn reply(
     env: JNIEnv,
     ctx: JObject,
@@ -218,7 +200,7 @@ fn reply(
     env.new_string(json).map_or(std::ptr::null_mut(), |s| s.into_raw())
 }
 
-/// `Wake.release`: the activity is about to start; it brings its own.
+/// The activity is starting, and tao brings its own context.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_irch_chat_Wake_release(_: JNIEnv, _: JClass) {
     TAO.store(true, SeqCst);
@@ -244,7 +226,7 @@ async fn wake(
         return Ok(vec![]); // in sight: the app shows it
     }
     if !full {
-        // What rang, told now; a DM whose call ended stops ringing.
+        // A DM whose call ended stops ringing.
         let mut v = crate::alerts(&n, false);
         let dm = |s: &Id| n.view(s, |s| s.dm.is_some()) == Some(true);
         let ended =
@@ -260,7 +242,6 @@ async fn wake(
         return Ok(v);
     }
     n.resume().await;
-    // Catch up until a few quiet seconds, at most half a minute.
     let (mut rx, end) =
         (n.subscribe(), Instant::now() + Duration::from_secs(30));
     while Instant::now() < end
@@ -270,11 +251,10 @@ async fn wake(
         )
     {}
     let notices = crate::alerts(&n, false);
-    crate::nap().await; // and back to sleep, unless irch came into sight
+    crate::nap().await;
     Ok(notices)
 }
 
-/// The running node, or one started here (no activity, so no app).
 async fn node(dir: PathBuf) -> anyhow::Result<std::sync::Arc<Node>> {
     static ONE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _one = ONE.lock().await;
@@ -287,9 +267,7 @@ async fn node(dir: PathBuf) -> anyhow::Result<std::sync::Arc<Node>> {
     Ok(n)
 }
 
-/// Until the doorbell rings (wake.rs), or half an hour passes (in case a
-/// ring was missed: catch up anyway): out of sight, no node at all, and
-/// the doorbell told to our spaces once.
+/// Until the doorbell rings, or half an hour in case a ring was missed.
 async fn rung(dir: PathBuf) -> anyhow::Result<()> {
     static TOLD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
     let net = crate::config(dir.clone(), None, None)?.net;
@@ -299,10 +277,7 @@ async fn rung(dir: PathBuf) -> anyhow::Result<()> {
         node(dir.clone()).await?.set_push(Some(url.clone())).await;
         *TOLD.lock().unwrap_or_else(|e| e.into_inner()) = Some(url);
     }
-    // In sight, or out of it for under a minute, or in a call: the node
-    // runs, and shows or tells of what arrives itself. Then it naps (a
-    // call ended out of sight, say, or a node up only to tell where the
-    // doorbell is), and the doorbell waits.
+    // A running node tells of news itself; the doorbell waits for its nap.
     let mut away = 0;
     while crate::FG.load(SeqCst) || crate::running().is_some() {
         tokio::time::sleep(Duration::from_secs(5)).await;

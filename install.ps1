@@ -1,9 +1,6 @@
-# irch on Windows, in one line; it keeps itself up to date.
-#   irm https://github.com/cab-ucf/irch/releases/latest/download/install.ps1 | iex
-# An always-on storage node for you instead (a task, at login):
-#   & ([scriptblock]::Create((irm …/install.ps1))) -Server
-# Fetched by PowerShell, nothing is marked as from the internet: no
-# SmartScreen.
+# Self-updating irch: irm $R/install.ps1 | iex
+# -Server: an always-on storage node instead (a task, at login).
+# Fetched by PowerShell, it is not marked as from the web: no SmartScreen.
 param([switch]$Server)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'

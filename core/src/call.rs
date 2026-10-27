@@ -1,8 +1,5 @@
-//! Calls: everyone in a channel's call streams to everyone else in it,
-//! straight over iroh, with no server between. The page captures, encodes
-//! and decodes (WebCodecs); here frames only travel. Audio goes as QUIC
-//! datagrams, video as one stream per group of pictures: a newer group
-//! goes first and supersedes the older, as in Media over QUIC.
+//! Calls: a full mesh over iroh; the page does WebCodecs. Audio goes as
+//! datagrams, video as a stream per group, newest first (Media over QUIC).
 
 use crate::sync::{frame, unframe};
 use crate::{Ch, Id};
@@ -15,14 +12,12 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use tokio::sync::{broadcast, mpsc};
 
 pub const ALPN: &[u8] = b"irch/av/1";
-// A frame: a screen's keyframe fits; 128 of them held for a slow page
-// stay within 128 MiB.
+// A screen's keyframe fits; 128 held for a slow page stay within 128 MiB.
 const MAX_FRAME: usize = 1 << 20;
-// A frame's first byte: audio, video, or a video keyframe (a new group).
+// A frame's first byte: audio, video, or a keyframe opening a group.
 const AUDIO: u8 = 0;
 const KEY: u8 = 2;
 
-/// Frames heard, with whose they are.
 pub type Media = broadcast::Sender<(Id, Vec<u8>)>;
 
 pub struct Call {
@@ -35,7 +30,7 @@ pub struct Call {
 struct Peer {
     conn: Connection,
     video: mpsc::Sender<Vec<u8>>,
-    // A frame was dropped: hold video back until the next keyframe.
+    // A frame was dropped: hold video until the next keyframe.
     skip: bool,
     _io: [AbortOnDropHandle<()>; 2],
 }
@@ -55,8 +50,7 @@ impl Call {
         self.peers.contains_key(d)
     }
 
-    /// Keep whom `keep` names, while connected: a closed connection (a
-    /// dial that came too early, a network gone) is dialed again.
+    /// Drops closed connections too, so they are dialed again.
     pub fn retain(&mut self, keep: impl Fn(&EndpointId) -> bool) {
         self.peers.retain(|d, p| keep(d) && p.conn.close_reason().is_none());
     }
@@ -70,7 +64,6 @@ impl Call {
         self.peers.insert(p.conn.remote_id(), p);
     }
 
-    /// Our frame, to everyone in the call.
     pub fn send(&mut self, f: &[u8]) {
         for p in self.peers.values_mut() {
             match f.first() {
@@ -85,9 +78,8 @@ impl Call {
     }
 }
 
-/// Who is at the far end. Each end's first stream says who it is, signed
-/// along with its device's id (which QUIC vouches for): frames count as a
-/// member's only if they say so from that device, whoever else names it.
+/// Who is at the far end: each user signs their device id, which QUIC
+/// vouches for, so frames are a member's only from their device.
 pub async fn hello(
     c: &Connection,
     me: &SecretKey,
@@ -105,8 +97,7 @@ pub async fn hello(
     Some(Id(*user))
 }
 
-/// Our video to one peer: each keyframe opens a stream that outranks the
-/// last one, which finishes in the background or not at all.
+/// Each keyframe opens a stream outranking the last, left to finish or not.
 async fn show(conn: Connection, mut rx: mpsc::Receiver<Vec<u8>>) {
     let (mut s, mut group) = (None::<SendStream>, 0);
     while let Some(f) = rx.recv().await {
@@ -126,8 +117,7 @@ async fn show(conn: Connection, mut rx: mpsc::Receiver<Vec<u8>>) {
     }
 }
 
-/// A peer's audio and video, to the page; frames of a group that a newer
-/// one has overtaken are dropped, never shown out of order.
+/// Frames of a group a newer one overtook are dropped, never shown late.
 async fn hear(conn: Connection, user: Id, out: Media) {
     let newest = Arc::new(AtomicU64::new(0));
     loop {

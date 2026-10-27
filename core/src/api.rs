@@ -9,8 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-/// `Attach` takes a file as base64 and returns what goes in `Post.files`;
-/// `File` returns an attachment's bytes as base64.
+/// `Attach` and `File` carry bytes as base64.
 #[derive(Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Call {
@@ -32,6 +31,10 @@ pub enum Call {
         limit: usize,
     },
     Thread {
+        space: Id,
+        channel: Ch,
+    },
+    Pins {
         space: Id,
         channel: Ch,
     },
@@ -85,9 +88,8 @@ pub enum Call {
         node: iroh::EndpointId,
         on: bool,
     },
-    /// Pair with this computer's storage node (nixos.nix).
     StoreLocal,
-    /// A file served from this device, left where it is.
+    /// Served from this device, left where it is.
     Offer {
         path: String,
         name: Option<String>,
@@ -109,8 +111,7 @@ pub enum Call {
         due: Option<String>,
         file: Option<String>,
     },
-    /// Messages with every word of `query`: in `room` of `space`, in
-    /// `space`, or (neither) everywhere.
+    /// In `room`, else `space`, else everywhere.
     Search {
         query: String,
         space: Option<Id>,
@@ -157,7 +158,6 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
                 |s: &crate::State| s.messages(&channel, before, limit.min(500));
             json!(n.view(&space, page).unwrap_or_default())
         }
-        // The thread, and the message it hangs off.
         Call::Search { query, space, room } => {
             let ids = space.map_or_else(|| n.spaces(), |s| vec![s]);
             let mut v: Vec<_> = ids
@@ -181,6 +181,9 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
             }))
             .flatten()
         ),
+        Call::Pins { space, channel } => {
+            json!(n.view(&space, |s| s.pins(&channel)).unwrap_or_default())
+        }
         Call::MarkRead { space, channel } => {
             json!(n.mark_read(&space, &channel))
         }
@@ -220,9 +223,8 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
         }
         Call::Hangup => json!(n.call(None).await?),
         Call::SetLevel { space, level } => json!(n.set_level(&space, level)),
-        // Notes in the notes folder, or null where there is none (Android).
+        // Null where there is no notes folder (Android).
         Call::Notes => json!(n.notes()),
-        // The Markdown, added to `file` if given.
         Call::Note { space, message, thread, todo, due, file } => {
             let md = |s: &crate::State| {
                 notes::markdown(
@@ -243,7 +245,6 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
     })
 }
 
-/// Sidebar row: a space, its channels, unread and mention counts.
 fn space(n: &Node, id: &Id) -> Option<Value> {
     let me = n.id();
     let v = n.view(id, |s| {
@@ -270,7 +271,6 @@ fn space(n: &Node, id: &Id) -> Option<Value> {
     })?;
     let (name, dm, owner, admin, chans, with, threads) = v;
     let mut calls = n.calls(id);
-    // Threads active this week, or that mention us.
     let thread = |t: &crate::Thread| {
         let (unread, mentions) = n.unread(id, &t.id);
         let fresh = t.last + 7 * 86_400_000 > crate::now();

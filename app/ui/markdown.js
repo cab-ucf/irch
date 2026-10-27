@@ -1,7 +1,4 @@
-// Markdown as tokens: markdown-it (CommonMark, tables, ~~strike~~; raw HTML
-// off), plus ||spoilers|| and $math$ / $$display math$$. Pure: no DOM and no
-// HTML strings, so the page builds elements from tokens and user content
-// only ever becomes text nodes (or MathML that Temml builds as nodes).
+// Tokens, never HTML strings: user content only ever becomes text nodes.
 
 const md = globalThis.markdownit({ html: false, linkify: true, breaks: true })
   .disable("image");

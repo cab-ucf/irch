@@ -1,8 +1,5 @@
-//! A space's state: a deterministic fold over its set of ops, so every
-//! replica holding the same set agrees, whatever the delivery order.
-//! Control ops (names, channels, roles, epochs) are re-folded in `(ts, id)`
-//! order, so authority is judged at each op's place in that order. Authors
-//! pick their own times, so the key that counts is set by an admin *now*.
+//! An order-free fold of a space's ops. Control re-folds in `(ts, id)`
+//! order; authors pick their times, so only current admins' keys count.
 
 use crate::op::{File, Invite, Op, Role, Signed};
 use crate::{Ch, Id};
@@ -11,7 +8,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem::take;
 
-/// Position of an op: author clock, then id. Also the paging cursor.
+/// Author clock, then id; also the paging cursor.
 pub type Pos = (u64, Id);
 pub const DM: Ch = Ch([0; 8]);
 
@@ -34,17 +31,15 @@ pub struct Message {
     pub quote: Option<Quote>,
     pub reactions: Vec<(String, Vec<Id>)>,
     pub files: Vec<File>,
-    /// Replies in its thread.
+    pub pinned: bool,
     pub thread: usize,
 }
 
-/// Replies to one message, in a channel of their own.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct Thread {
     pub id: Ch,
     pub root: Id,
     pub parent: Ch,
-    // Who started it (who, with admins, may name it).
     pub by: Id,
     pub name: String,
     pub count: usize,
@@ -58,8 +53,6 @@ pub struct Quote {
     pub text: String,
 }
 
-/// A valid epoch: its tag, who received its key, where and by whom it
-/// was set.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Epoch {
     pub tag: [u8; 8],
@@ -68,7 +61,6 @@ pub struct Epoch {
     pub by: Id,
 }
 
-/// Latest reaction write per (user, emoji): last writer wins.
 type Reacts = HashMap<(Id, String), (Pos, bool)>;
 
 struct Post {
@@ -86,21 +78,20 @@ pub struct State {
     control: BTreeMap<Pos, (Id, Op)>,
     posts: HashMap<Ch, BTreeMap<Pos, Post>>,
     index: HashMap<Id, (Ch, Pos)>,
-    // The epochs each op was sealed under (the same op, re-sealed by
-    // someone else, may come under several).
+    // Re-sealed by others, one op may come under several epochs.
     sealed: HashMap<Id, Vec<[u8; 8]>>,
-    // Each device's push endpoint, by who says so: newest wins.
     pushes: HashMap<(Id, EndpointId), (Pos, Option<String>)>,
-    // Every post's would-be thread, back to the post.
     roots: HashMap<Ch, Id>,
     edits: HashMap<Id, BTreeMap<Pos, (Id, Option<String>)>>,
     topics: HashMap<Ch, BTreeMap<Pos, (Id, String)>>,
     reacts: HashMap<Id, Reacts>,
+    pins: HashMap<Id, (Pos, Id, bool)>,
     authors: HashMap<Id, u64>,
     devices: HashMap<(EndpointId, Id), u64>,
     // Derived from `control` by `refold`:
     name: Option<String>,
     channels: BTreeMap<Ch, String>,
+    order: Vec<Ch>,
     profiles: HashMap<Id, (String, Vec<u8>)>,
     profiled: HashMap<Id, Pos>,
     roles: HashMap<Id, Role>,
@@ -120,7 +111,6 @@ impl State {
         s
     }
 
-    /// Fold ops in, re-folding control ops once. True if anything changed.
     pub fn extend(&mut self, ops: impl IntoIterator<Item = Signed>) -> bool {
         let (mut new, mut control) = (false, false);
         for s in ops {
@@ -172,6 +162,13 @@ impl State {
                     ),
                 }
             }
+            Op::Pin { target, on } => match self.pins.get(&target) {
+                Some((p, ..)) if *p >= at => (false, false),
+                _ => {
+                    let v = (at, s.author, on);
+                    (self.pins.insert(target, v) != Some(v), false)
+                }
+            },
             Op::Push { url } => match self.pushes.get(&(s.author, s.device)) {
                 Some((p, _)) if *p >= at => (false, false),
                 _ => {
@@ -194,6 +191,7 @@ impl State {
 
     fn refold(&mut self) {
         (self.name, self.channels) = (None, BTreeMap::new());
+        self.order = vec![];
         (self.profiles, self.roles) = (HashMap::new(), HashMap::new());
         self.profiled = HashMap::new();
         (self.epochs, self.hosts, self.bans) =
@@ -226,6 +224,9 @@ impl State {
                         None => drop(self.channels.remove(id)),
                     }
                 }
+                Op::Order { channels } if admin => {
+                    self.order = channels.clone()
+                }
                 Op::Role { user, role: r } if admin && *user != self.owner => {
                     let admins =
                         *r == Role::Admin || self.role(user) == Role::Admin;
@@ -245,8 +246,7 @@ impl State {
                         by: *a,
                     });
                 }
-                // Storage nodes are the admins' to list: an invite sends
-                // newcomers to them first.
+                // Admins' to list: invites send newcomers there first.
                 Op::Host { node, on } if admin => {
                     drop(self.hosts.insert(node.id, on.then(|| node.clone())))
                 }
@@ -267,9 +267,7 @@ impl State {
             }
         }
         self.control = control;
-        // New keys go only to who holds the current one: a key told under
-        // an epoch some later one left them out of (however it is dated)
-        // gets none.
+        // Told under a key a later epoch left them out of: none, however dated.
         let cut = self.profiled.iter().filter(|(a, at)| {
             let tags = self.sealed.get(&at.1).map_or(&[][..], |t| t);
             tags.iter().all(|t| self.left_out(t, a))
@@ -280,17 +278,14 @@ impl State {
         }
     }
 
-    /// Some epoch set after `epoch` was not given to `a`.
     fn left_out(&self, epoch: &[u8; 8], a: &Id) -> bool {
         let es = &self.epochs;
         let from = es.iter().find(|e| e.tag == *epoch).map(|e| e.at);
         es.iter().any(|e| Some(e.at) > from && !e.to.contains(a))
     }
 
-    /// Sealed under `epoch` at `at` by `a`, after a newer epoch was set
-    /// without `a`: an old invite's key, a banned member's under a new
-    /// name. Hidden everywhere (a member who wrote offline under the key
-    /// before was given the new one, and stays).
+    /// Sealed after a newer epoch left `a` out: an old invite, a banned member
+    /// renamed. One given the new key, writing offline, stays.
     pub fn stale(&self, epoch: &[u8; 8], at: &Pos, a: &Id) -> bool {
         let es = &self.epochs;
         let Some(from) = es.iter().find(|e| e.tag == *epoch) else {
@@ -300,28 +295,24 @@ impl State {
         es.iter().filter(since).any(|e| !e.to.contains(a))
     }
 
-    /// Stale under every epoch it came sealed under.
     fn stale_at(&self, at: &Pos, a: &Id) -> bool {
         let tags = self.sealed.get(&at.1);
         tags.is_some_and(|t| t.iter().all(|t| self.stale(t, at, a)))
     }
 
-    /// Where `a` said to wake device `d`.
     pub fn push(&self, a: &Id, d: &EndpointId) -> Option<&str> {
         self.pushes.get(&(*a, *d))?.1.as_deref()
     }
 
-    /// Every device to wake when someone writes: members', not banned.
     pub fn pushes(&self) -> Vec<(EndpointId, String)> {
         self.pushes_of(None)
     }
 
-    /// `who`'s devices to wake (everyone's, with `None`).
     pub fn pushes_of(&self, who: Option<&Id>) -> Vec<(EndpointId, String)> {
         let ok = |((a, _), (at, _)): &(&(Id, EndpointId), &(Pos, _))| {
             self.role(a) != Role::Banned && !self.stale_at(at, a)
         };
-        // A few per member, their newest: devices are theirs to claim.
+        // A few per member: anyone may claim any device.
         let p = self.pushes.iter().filter(ok);
         let mut p: Vec<_> =
             p.filter(|((a, _), _)| who.is_none_or(|w| a == w)).collect();
@@ -337,7 +328,6 @@ impl State {
             .collect()
     }
 
-    /// Who a direct-message space is with, seen by `me`.
     pub fn peer(&self, me: &Id) -> Option<Id> {
         self.dm.map(|d| if *me == self.owner { d } else { self.owner })
     }
@@ -368,13 +358,26 @@ impl State {
     }
 
     pub fn channels(&self) -> Vec<(Ch, String)> {
+        let at = |c: &Ch| self.order.iter().position(|o| o == c);
         let mut v: Vec<_> =
             self.channels.iter().map(|(i, n)| (*i, n.clone())).collect();
-        v.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+        // An admin's order; channels it leaves out after, by name.
+        v.sort_by_key(|(c, n)| (at(c).unwrap_or(usize::MAX), n.clone(), *c));
         v
     }
 
-    /// The thread `ch` is: on a message in a channel, never in a thread.
+    pub fn pins(&self, ch: &Ch) -> Vec<Message> {
+        let mut v: Vec<_> = (self.pins.iter())
+            .filter_map(|(id, (at, ..))| {
+                let (c, m) = self.message(id)?;
+                (c == *ch && m.pinned).then_some((*at, m))
+            })
+            .collect();
+        v.sort_by_key(|p| std::cmp::Reverse(p.0));
+        v.into_iter().map(|p| p.1).collect()
+    }
+
+    /// Only on a message in a channel, never in a thread.
     pub fn thread(&self, ch: &Ch) -> Option<Thread> {
         let root = *self.roots.get(ch)?;
         let (parent, (since, _)) = *self.index.get(&root)?;
@@ -393,8 +396,7 @@ impl State {
                 && (*a == by || role == Role::Admin)
         };
         let topic = named.rev().find(may).map(|t| t.1);
-        // Named nothing: deleted, by an admin, or by its starter while
-        // every reply left is theirs.
+        // An empty name deletes: an admin's, or its starter's while alone.
         if let Some((a, n)) = topic
             && n.is_empty()
             && (self.role(a) == Role::Admin
@@ -412,7 +414,6 @@ impl State {
         Some(Thread { id: *ch, root, parent, by, name, count, last })
     }
 
-    /// Threads with replies, most recently active first.
     pub fn threads(&self) -> Vec<Thread> {
         let chs: HashSet<_> =
             self.posts.keys().chain(self.topics.keys()).collect();
@@ -423,13 +424,11 @@ impl State {
         v
     }
 
-    /// Channels, then threads: everywhere a message can be.
     pub fn rooms(&self) -> Vec<(Ch, String)> {
         let t = self.threads().into_iter().map(|t| (t.id, t.name));
         self.channels().into_iter().chain(t).collect()
     }
 
-    /// Everyone with a profile or a role.
     pub fn members(&self) -> Vec<Member> {
         let ids = self.profiles.keys().chain(self.roles.keys());
         let mut v: Vec<_> = ids
@@ -445,23 +444,20 @@ impl State {
         v
     }
 
-    /// Valid epochs: set by an admin at their place, oldest first.
     pub fn epochs(&self) -> &[Epoch] {
         &self.epochs
     }
 
-    /// Epochs whose setter is still an admin, newest first: a demoted or
-    /// banned admin's rekeys stop counting, however they were dated.
+    /// Newest first; a demoted admin's rekeys stop counting, however dated.
     pub fn live(&self) -> impl Iterator<Item = &Epoch> + Clone {
         self.epochs.iter().rev().filter(|e| self.role(&e.by) == Role::Admin)
     }
 
-    /// The epoch to seal with.
     pub fn epoch(&self) -> Option<&Epoch> {
         self.live().next()
     }
 
-    /// Someone banned may hold the current epoch's key: time to rekey.
+    /// Someone banned may hold the current key: time to rekey.
     pub fn leaks(&self) -> bool {
         let banned = |u: &Id| self.role(u) == Role::Banned;
         let e = self.epoch();
@@ -470,8 +466,7 @@ impl State {
             || self.bans.iter().any(|(at, u)| after(at) && banned(u))
     }
 
-    /// What a ban or rekey must date after to take effect: the current
-    /// epoch and every standing ban, however far ahead they were dated.
+    /// What a ban or rekey must outdate: the epoch and standing bans.
     pub fn horizon(&self) -> u64 {
         let banned = |u: &Id| self.role(u) == Role::Banned;
         let bans = self.bans.iter().filter(|(_, u)| banned(u));
@@ -491,13 +486,10 @@ impl State {
         self.storage.values().flatten().cloned().collect()
     }
 
-    /// Whether our storage node `node` keeps `space`.
     pub fn keeps(&self, node: &EndpointId, space: &Id) -> bool {
         self.stored.get(&(*node, *space)).copied().unwrap_or(false)
     }
 
-    /// Devices heard from, most recent first; no banned member's.
-    /// Whose device `d` is, by its latest op.
     pub fn owner_of(&self, d: &EndpointId) -> Option<Id> {
         let mine = self
             .devices
@@ -517,7 +509,6 @@ impl State {
         v.into_iter().take(n).map(|(_, d)| d).collect()
     }
 
-    /// Up to `n` visible messages before `before` (or newest), oldest first.
     pub fn messages(
         &self,
         ch: &Ch,
@@ -532,9 +523,6 @@ impl State {
         v
     }
 
-    /// Messages holding every word of `q` (in their text or files' names),
-    /// newest first: in `room` (a channel and its threads, or a thread),
-    /// else anywhere here.
     pub fn search(
         &self,
         q: &str,
@@ -567,7 +555,6 @@ impl State {
         hits.into_iter().filter_map(view).take(n).collect()
     }
 
-    /// Text after edits by its author; `None` if deleted or hidden.
     fn resolve(&self, id: &Id, p: &Post) -> Option<(String, bool)> {
         if self.role(&p.author) == Role::Banned {
             return None;
@@ -585,7 +572,6 @@ impl State {
         }
     }
 
-    /// One message, and where it is.
     pub fn message(&self, id: &Id) -> Option<(Ch, Message)> {
         let (ch, at) = self.index.get(id)?;
         Some((*ch, self.view(at, self.posts.get(ch)?.get(at)?)?))
@@ -621,6 +607,9 @@ impl State {
         let (author, name) = (p.author, self.display_name(&p.author));
         let reactions = reactions.into_iter().collect();
         let (reply, files) = (p.reply, p.files.clone());
+        let pinned = self.pins.get(&id).is_some_and(|(at, by, on)| {
+            *on && self.role(by) != Role::Banned && !self.stale_at(at, by)
+        });
         let t = self.posts.get(&id.thread()).and(self.thread(&id.thread()));
         let thread = t.map_or(0, |t| t.count);
         Some(Message {
@@ -634,6 +623,7 @@ impl State {
             quote,
             reactions,
             files,
+            pinned,
             thread,
         })
     }
@@ -642,7 +632,7 @@ impl State {
         Some(self.posts.get(ch)?.last_key_value()?.0.0)
     }
 
-    /// Posts by others after `since` (up to 100), and mentions of `me`.
+    /// (posts by others, mentions of `me`) after `since`, up to 100.
     pub fn unread(&self, ch: &Ch, since: u64, me: &Id) -> (usize, usize) {
         let tag = self.tag(me);
         self.after(ch, since, me).take(100).fold((0, 0), |(n, m), (_, p)| {
@@ -650,12 +640,10 @@ impl State {
         })
     }
 
-    /// The newest message by someone else after `since`.
     pub fn last_from(&self, ch: &Ch, since: u64, me: &Id) -> Option<Message> {
         self.after(ch, since, me).find_map(|(k, p)| self.view(k, p))
     }
 
-    /// The newest mention of `me` after `since` (in a DM, any message).
     pub fn last_mention(
         &self,
         ch: &Ch,
@@ -846,6 +834,34 @@ mod tests {
     }
 
     #[test]
+    fn an_admin_orders_channels_and_anyone_pins() {
+        let [o, a, _] = people();
+        let mut st = State::new(&Invite::new(o, "", None));
+        let (x, y) = (Ch([1; 8]), Ch([2; 8]));
+        let names = |st: &State| {
+            st.channels().into_iter().map(|c| c.1).collect::<Vec<_>>()
+        };
+        st.extend([
+            op(1, o, Op::Channel { id: CH, name: Some("general".into()) }),
+            op(2, o, Op::Channel { id: x, name: Some("b".into()) }),
+            op(3, o, Op::Channel { id: y, name: Some("a".into()) }),
+        ]);
+        assert_eq!(names(&st), ["a", "b", "general"], "by name");
+        st.extend([op(4, o, Op::Order { channels: vec![CH, x] })]);
+        assert_eq!(names(&st), ["general", "b", "a"], "theirs, then the rest");
+        st.extend([op(5, a, Op::Order { channels: vec![y] })]);
+        assert_eq!(names(&st), ["general", "b", "a"], "not a member's");
+
+        st.extend([op(6, a, post("hi", None))]);
+        let pinned = |st: &State| st.pins(&CH).len();
+        st.extend([op(7, a, Op::Pin { target: Id([6; 32]), on: true })]);
+        assert_eq!(pinned(&st), 1);
+        assert!(st.message(&Id([6; 32])).unwrap().1.pinned);
+        st.extend([op(8, o, Op::Pin { target: Id([6; 32]), on: false })]);
+        assert_eq!(pinned(&st), 0, "newest wins");
+    }
+
+    #[test]
     fn threads_are_named_by_their_starter_or_an_admin() {
         let [o, a, b] = people();
         let mut st = State::new(&Invite::new(o, "", None));
@@ -866,8 +882,7 @@ mod tests {
         st.extend([op(5, o, topic("ours"))]);
         assert_eq!(name(&st).as_deref(), Some("ours"));
         assert_eq!(st.threads()[0].by, a);
-        // Named nothing: deleted. Its starter's word while the replies
-        // are all theirs; an admin's whatever they are; renamed, back.
+        // An empty name deletes: the starter's while alone, an admin's always.
         let t = Id([2; 32]).thread();
         let say = |n, who, text: &str| {
             op(
@@ -961,8 +976,7 @@ mod tests {
         assert_eq!(m, ["a, offline", "o"]);
         assert!(st.stale(&[0; 8], &(10, Id([10; 32])), &x));
         assert!(!st.stale(&[1; 8], &(10, Id([10; 32])), &x));
-        // Re-sealed under the old key by someone else: still shown, in
-        // either order; dated before the reset: still no new keys.
+        // Re-sealed under the old key by someone else: shown either way.
         let n = Id([9; 32]);
         let (np, nk) = (sealed(20, n, [1; 8], post("n", None)), name("n"));
         let older = |s: &Signed| Signed { epoch: [0; 8], ..s.clone() };
@@ -1020,8 +1034,7 @@ mod tests {
         ]);
         assert_eq!(st.epochs().len(), 2);
         assert_eq!(st.epoch().unwrap().tag, [1; 8], "a, demoted, is out");
-        // An admin's epoch dated far ahead reached b, since banned: only a
-        // rekey dated after it ends the leak. So with a ban dated far ahead.
+        // b, banned, got a far-ahead epoch: only a later rekey ends the leak.
         st.extend([op(5, o, role(a, Role::Admin)), op(200, a, rekey(3, &[b]))]);
         st.extend([op(6, o, role(b, Role::Banned))]);
         assert!(st.leaks() && st.horizon() == 200);

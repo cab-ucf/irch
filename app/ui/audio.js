@@ -1,5 +1,4 @@
-// The microphone, out in 20 ms frames; each speaker, in: played after a
-// frame of slack, and never more than 200 ms behind (the oldest go).
+// Played a frame late; past 200 ms behind, the oldest frames go.
 
 registerProcessor("mic", class extends AudioWorkletProcessor {
   buf = new Float32Array(960);

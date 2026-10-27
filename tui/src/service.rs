@@ -1,5 +1,4 @@
-//! An always-on storage node for this computer's user: started at login
-//! (Linux: at boot, if lingering is allowed) and again if it stops.
+//! A storage node started at login (Linux: boot, if lingering) and kept up.
 
 use anyhow::{Context, Result, bail};
 use std::path::Path;
@@ -34,7 +33,6 @@ fn plist() -> Result<PathBuf> {
 #[cfg(target_os = "windows")]
 const TASK: &str = "irch storage node";
 
-/// Run `exe --serve` from now on, then show its storage code.
 pub fn install(exe: &Path) -> Result<()> {
     let exe = exe.to_str().context("an odd path")?;
     #[cfg(target_os = "linux")]
@@ -53,7 +51,7 @@ pub fn install(exe: &Path) -> Result<()> {
         run("systemctl", &["--user", "daemon-reload"])?;
         run("systemctl", &["--user", "enable", "--now", "irch-serve"])?;
         run("systemctl", &["--user", "restart", "irch-serve"])?;
-        // At boot, not just at login: allowed for oneself on most systems.
+        // At boot, not just login: allowed for oneself on most systems.
         if run("loginctl", &["enable-linger"]).is_err() {
             println!("(It starts when you log in: `loginctl enable-linger`");
             println!(" as an admin makes that at boot.)");

@@ -1,21 +1,16 @@
-# NixOS: irch for this computer's people, and an always-on storage node,
-# both kept at irch's latest release: its source checked against irch's
-# signing key, then built here, hourly.
-#   flakes: inputs.irch.url = "github:cab-ucf/irch";
-#           nixosSystem { modules = [ inputs.irch.nixosModules.default … ]; }
-#   else:   imports = [ "${builtins.fetchTarball
-#             "https://github.com/cab-ucf/irch/archive/main.tar.gz"}/nixos.nix" ];
+# The app and a storage node at irch's latest release: its source checked
+# against irch's signing key, then built here, hourly.
 #   programs.irch.enable = true;      # the app, and `irch` in a terminal
 #   services.irch.enable = true;      # a storage node, always on
 #   services.irch.users = [ "you" ];  # their irch pairs with it in one step
-#   sudo cat /run/irch/code   # the storage code: give it to others
+#   sudo cat /run/irch/code           # the storage code, for others
 { config, lib, pkgs, ... }:
 let
   cfg = config.services.irch;
   pinned = pkgs.callPackage ./package.nix { };
   latest = "https://github.com/cab-ucf/irch/releases";
   key = "RWSPfztwzR/MhakRL6cA70pN03n/nMCdTvoY5UHC2IcZuhcR+41RQI95";
-  # The newest release built here, else the one this configuration pins.
+  # The newest release built here, else the pinned one.
   pick = bin: lib.hiPrio (pkgs.writeShellScriptBin bin ''
     b=/var/lib/irch-app/app/bin/${bin}
     [ -x "$b" ] || b=${pinned}/bin/${bin}
@@ -31,15 +26,14 @@ in {
   options = {
     programs.irch.enable =
       lib.mkEnableOption "irch, the app and terminal client, kept up to date";
-    # The app at login, in the tray: told of messages, its window closed.
+    # The app at login, in the tray.
     programs.irch.autostart = lib.mkOption {
       type = lib.types.bool;
       default = true;
     };
     services.irch.enable =
       lib.mkEnableOption "an always-on irch storage node, kept up to date";
-    # Local accounts whose irch (app or terminal) may pair with this node
-    # without the code being copied: it waits in /run/irch, theirs to read.
+    # Accounts that read the node's code in /run/irch, to pair unasked.
     services.irch.users = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
@@ -52,15 +46,13 @@ in {
         isSystemUser = true; group = "irch"; home = "/var/lib/irch";
       };
       users.groups.irch.members = cfg.users;
-      # Builds apart from the node, which talks to the world: taken over,
-      # it still cannot swap what everyone here runs.
+      # Apart from the node: taken over, it cannot swap what all here run.
       users.users.irch-update = {
         isSystemUser = true; group = "irch-update"; home = "/var/lib/irch-app";
       };
       users.groups.irch-update = { };
 
-      # Unprivileged: Nix builds it; nothing here runs unchecked source,
-      # nor an older release than it has, nor one signed as another.
+      # Only source signed as this very release, never an older one.
       systemd.services.irch-update = {
         startAt = "hourly";
         wants = [ "network-online.target" ];
@@ -95,7 +87,7 @@ in {
           echo "$v" > built
         '';
       };
-      # Soon after it is first enabled, not just on the hour.
+      # Soon after it is enabled, not just on the hour.
       systemd.timers.irch-update.timerConfig.OnBootSec = "2min";
     }
 
@@ -134,7 +126,6 @@ in {
           SystemCallArchitectures = "native";
         };
       };
-      # A new release built: the node restarts on it.
       systemd.paths.irch-new = {
         wantedBy = [ "multi-user.target" ];
         pathConfig.PathChanged = "/var/lib/irch-app/built";

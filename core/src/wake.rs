@@ -1,9 +1,6 @@
-//! Waking a sleeping phone without Google, a router or a server: out of
-//! sight, irch keeps only a doorbell, an iroh endpoint of its own with no
-//! connection open (iroh keeps one quiet link to its home relay, through
-//! which anyone reaches it by key). Its spaces are told where it is and a
-//! secret; whoever writes rings it, handing over what they wrote (sealed,
-//! as gossip carries it), and it wakes to tell of it, then catch up.
+//! Waking a sleeping phone without Google, router or server: a doorbell
+//! endpoint idles on its home relay; writers ring it with a secret and the
+//! sealed op, and it wakes, tells of it and catches up.
 
 use crate::Net;
 use crate::op::code;
@@ -17,15 +14,14 @@ use tokio::time::timeout;
 
 pub const ALPN: &[u8] = b"irch/wake/1";
 const SLOW: Duration = Duration::from_secs(15);
-/// The most a ring brings: a space's id and one sealed op.
+/// A space's id and one sealed op.
 const MAX: usize = 64 * 1024;
 
-/// What rang: in which space, and the sealed op (as gossip carries it).
 pub type News = (crate::Id, Vec<u8>);
 
 type Bell = (Endpoint, [u8; 16]);
 
-/// Doorbells by folder: one per profile, bound once.
+/// One per profile folder, bound once.
 static BELLS: Mutex<Option<HashMap<PathBuf, Bell>>> = Mutex::const_new(None);
 
 fn same(a: &[u8], b: &[u8]) -> bool {
@@ -38,7 +34,7 @@ async fn bell(dir: &Path, net: &Net) -> Result<Bell> {
     if let Some(b) = bells.get(dir) {
         return Ok(b.clone());
     }
-    // Its key and the secret that rings it: kept, so the address holds.
+    // Kept, so the address holds.
     let f = dir.join("bell");
     let k = match std::fs::read(&f) {
         Ok(k) if k.len() == 48 => k,
@@ -57,7 +53,6 @@ async fn bell(dir: &Path, net: &Net) -> Result<Bell> {
     Ok(bell)
 }
 
-/// Another network: each doorbell finds its relay again now.
 pub async fn moved() {
     let bells = BELLS.lock().await.clone().unwrap_or_default();
     for (ep, _) in bells.values() {
@@ -65,7 +60,6 @@ pub async fn moved() {
     }
 }
 
-/// This device's doorbell, as its spaces are told it (its push URL).
 pub async fn doorbell(dir: &Path, net: &Net) -> Result<String> {
     let (ep, secret) = bell(dir, net).await?;
     if matches!(net, Net::Default | Net::Relay(_)) {
@@ -74,8 +68,7 @@ pub async fn doorbell(dir: &Path, net: &Net) -> Result<String> {
     Ok(code("wake", &(ep.addr(), secret)))
 }
 
-/// Until someone rings who knows the secret; with what they wrote, if
-/// they said (older irch rings bare).
+/// Until rung with the secret; with news, unless an older irch rang bare.
 pub async fn rung(dir: &Path, net: &Net) -> Result<Option<News>> {
     let (ep, secret) = bell(dir, net).await?;
     loop {
@@ -105,9 +98,7 @@ pub async fn rung(dir: &Path, net: &Net) -> Result<Option<News>> {
     }
 }
 
-/// Ring the doorbell behind `url` (at a few of its addresses, relays
-/// https only: whoever names them is a member, not trusted), handing it
-/// `news` if it fits.
+/// Relays https only: any member names them, so none is trusted.
 pub async fn ring(ep: &Endpoint, url: &str, news: Option<&News>) -> Result<()> {
     let (to, secret): (EndpointAddr, [u8; 16]) =
         crate::op::uncode("wake", url)?;

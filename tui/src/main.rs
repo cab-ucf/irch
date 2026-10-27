@@ -1,6 +1,3 @@
-//! irch in a terminal; or headless, as a storage node or an always-on
-//! device of yours.
-
 mod app;
 mod service;
 
@@ -48,8 +45,7 @@ struct Cli {
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Released builds (IRCH_RELEASE, set by release.yml) keep themselves up to
-/// date while they serve; others leave that to whoever built them.
+/// Only release builds (IRCH_RELEASE, from release.yml) update themselves.
 async fn updated(exe: &std::path::Path) {
     if option_env!("IRCH_RELEASE").is_none() {
         return std::future::pending().await;
@@ -66,7 +62,6 @@ async fn updated(exe: &std::path::Path) {
     }
 }
 
-/// The same command line, on the binary now at `exe`.
 fn restart(exe: &std::path::Path) -> Result<()> {
     let args = std::env::args_os().skip(1);
     let mut cmd = std::process::Command::new(exe);
@@ -128,10 +123,8 @@ async fn main() -> Result<()> {
     let code_file = dir.join("code");
     let n = Node::start(Config { dir, name, net, link, serve, notes }).await?;
     if let Some(code) = n.storage_code().await {
-        // Where irch on this computer finds it (irch_core::local_storage).
         std::fs::write(code_file, &code)?;
-        // nixos.nix: where this computer's own users' irch finds it; not
-        // printed, so not in a journal more can read than they.
+        // For nixos.nix; unprinted, so no wider-read journal holds it.
         match std::env::var_os("IRCH_CODE_FILE") {
             Some(p) => std::fs::write(p, &code)?,
             None => {

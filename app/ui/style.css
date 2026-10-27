@@ -1,13 +1,13 @@
 /* irch: neon on black. No external fonts or assets (CSP). */
 
 :root {
-  --bg-1: #000; /* dialog footers */
-  --bg-2: #000; /* sidebars */
-  --bg-3: #000; /* chat */
-  --bg-4: #150b24; /* composer, chips */
-  --bg-float: #0e0719; /* menus, tooltips, dialogs */
-  --field: #160c26; /* inputs, code */
-  --line: rgba(180, 77, 255, 0.24); /* panel edges */
+  --bg-1: #000;
+  --bg-2: #000;
+  --bg-3: #000;
+  --bg-4: #150b24;
+  --bg-float: #0e0719;
+  --field: #160c26;
+  --line: rgba(180, 77, 255, 0.24);
   --hover: rgba(180, 77, 255, 0.12);
   --active: rgba(180, 77, 255, 0.24);
   --msg-hover: rgba(180, 77, 255, 0.06);
@@ -21,7 +21,7 @@
   --cyan: #00e5ff;
   --soft: #ecd2ff;
   --neon: linear-gradient(135deg, var(--brand), var(--pink));
-  --on-brand: #fff; /* text on --neon */
+  --on-brand: #fff;
   --glow: 0 0 14px rgba(255, 43, 214, 0.45);
   --green: #39ff9a;
   --red: #ff2d6f;
@@ -39,7 +39,6 @@
     monospace;
   color-scheme: dark;
 }
-/* Other themes (My Account): the same names, other colors. */
 :root[data-theme="midnight"] {
   --bg-1: #232428; --bg-2: #2b2d31; --bg-3: #313338; --bg-4: #383a40;
   --bg-float: #111214; --field: #1e1f22;
@@ -67,18 +66,18 @@
   --scroll: #4c566a; --grey: #4c566a; --grey-hover: #5e6a82;
 }
 :root[data-theme="ucf"] {
-  /* UCF: Pegasus gold on black. */
-  --bg-1: #000; --bg-2: #0b0b0b; --bg-3: #000; --bg-4: #1a1a1a;
-  --bg-float: #121212; --field: #1a1a1a;
-  --line: rgba(255, 201, 4, 0.2); --border: rgba(255, 201, 4, 0.16);
+  --bg-1: #000; --bg-2: #0d0d0d; --bg-3: #000; --bg-4: #1c1c1c;
+  --bg-float: #141414; --field: #1c1c1c;
+  --line: rgba(237, 184, 13, 0.22); --border: rgba(237, 184, 13, 0.18);
   --hover: rgba(255, 201, 4, 0.1); --active: rgba(255, 201, 4, 0.2);
   --msg-hover: rgba(255, 201, 4, 0.05);
-  --text: #fff; --text-strong: #fff; --muted: #c8c8c8; --dim: #8a8a8a;
-  --brand: #ffc904; --brand-hover: #ffd84d; --pink: #ffc904;
-  --cyan: #ffc904; --soft: #fff3c4; --neon: var(--brand); --on-brand: #000;
-  --glow: 0 0 12px rgba(255, 201, 4, 0.4);
-  --green: #3ddc84; --red: #ff4d4d; --yellow: #ffc904;
-  --mention-bg: rgba(255, 201, 4, 0.12); --link: #ffc904;
+  --text: #f2f2f2; --text-strong: #fff; --muted: #c9c9c9; --dim: #8c8c8c;
+  --brand: #edb80d; --brand-hover: #ffc904; --pink: #ffc904;
+  --cyan: #ffc904; --soft: #ffe58a;
+  --neon: linear-gradient(135deg, #edb80d, #ffc904); --on-brand: #000;
+  --glow: 0 0 14px rgba(255, 201, 4, 0.45);
+  --green: #3ddc84; --red: #ff5a5a; --yellow: #ffc904;
+  --mention-bg: rgba(255, 201, 4, 0.13); --link: #ffc904;
   --scroll: #333; --grey: #262626; --grey-hover: #3a3a3a;
 }
 :root[data-theme="light"] {
@@ -95,7 +94,10 @@
   --scroll: #c4c9ce; --grey: #d4d7dc; --grey-hover: #c4c9ce;
   color-scheme: light;
 }
-::selection { background: rgba(255, 43, 214, 0.35); color: #fff; }
+::selection {
+  background: color-mix(in srgb, var(--pink) 35%, transparent);
+  color: var(--text-strong);
+}
 :focus-visible { outline: 1px solid var(--pink); outline-offset: 1px; }
 
 * { box-sizing: border-box; }
@@ -181,7 +183,6 @@ svg.icon {
 }
 #server-header button { display: grid; color: var(--muted); }
 #server-header button:hover { color: var(--pink); }
-/* A space: its name folds its channels. */
 .space {
   display: flex;
   align-items: center;
@@ -347,6 +348,7 @@ svg.icon {
 
 /* ===== Chat ===== */
 #chat {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -474,7 +476,6 @@ svg.icon {
   text-transform: uppercase;
 }
 
-/* IRC-dense: time, nick, text; a new speaker gets a little air. */
 .msg {
   position: relative;
   display: grid;
@@ -556,7 +557,7 @@ table.keys kbd {
 /* Temml makes every <math> a flexbox; Typst's need MathML's own layout. */
 .typst math { display: math; }
 .typst math[display="block"] { display: block math; }
-/* Code: Prism's token types, in the neon palette. */
+/* Code: Prism's tokens */
 .tok.comment, .tok.prolog, .tok.doctype, .tok.cdata { color: var(--dim); }
 .tok.keyword, .tok.important, .tok.atrule, .tok.selector { color: var(--pink); }
 .tok.string, .tok.char, .tok.regex, .tok.attr-value { color: var(--cyan); }
@@ -1086,11 +1087,12 @@ dialog .m-foot .spacer { flex: 1; }
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--bg-2);
-  box-shadow: 0 0 16px rgba(180, 77, 255, 0.3);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--brand) 30%, transparent);
 }
-.chips { display: flex; gap: 6px; margin-top: 8px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .chip {
-  padding: 3px 10px;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px 3px 4px;
   border: 1px solid var(--line);
   border-radius: 999px;
   color: var(--muted);
@@ -1174,7 +1176,6 @@ dialog .m-foot .spacer { flex: 1; }
     box-shadow: -8px 0 16px rgba(0, 0, 0, 0.3);
   }
   #menu-btn { display: grid; }
-  /* Narrow: time and nick above, the text the full width. */
   .msg { padding-right: 16px; grid-template-columns: auto minmax(0, 1fr); }
   .msg .author { text-align: left; }
   .msg > :not(.head, .side-time, .toolbar) { grid-column: 1 / -1; }
@@ -1273,8 +1274,8 @@ img.attachment {
   gap: 10px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--line);
-  background: radial-gradient(ellipse at top, rgba(180, 77, 255, 0.16),
-    transparent 70%);
+  background: radial-gradient(ellipse at top,
+    color-mix(in srgb, var(--brand) 16%, transparent), transparent 70%);
 }
 .tiles {
   min-height: 0;
@@ -1371,7 +1372,6 @@ dialog:has(.preview) { width: min(900px, calc(100vw - 32px)); }
 .preview :is(video, audio) { width: 100%; max-height: 60vh; }
 .preview pre { font: 13px/1.45 var(--mono); white-space: pre-wrap; margin: 0; }
 
-/* Chat first: a channel's start is one modest line, not a banner. */
 #welcome .big, #welcome .avatar.big { display: none; }
 #welcome h1 { font-size: 20px; margin: 0 0 2px; }
 #health:empty { display: none; }
@@ -1384,7 +1384,7 @@ dialog:has(.preview) { width: min(900px, calc(100vw - 32px)); }
 .check { margin: 4px 0; color: var(--red); font-size: 14px; }
 .check.ok { color: var(--green); }
 
-/* The camera, reading a QR code. */
+/* QR scanner */
 video.scan {
   width: 100%;
   max-height: 50vh;
@@ -1392,3 +1392,17 @@ video.scan {
   background: #000;
   object-fit: cover;
 }
+.swatch { width: 18px; height: 18px; border-radius: 6px;
+  box-shadow: 0 0 0 1px var(--line); }
+.msg.pinned { box-shadow: inset 2px 0 var(--brand); }
+#latest {
+  position: absolute; right: 24px; bottom: 96px; z-index: 5;
+  width: 36px; height: 36px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: var(--neon); color: var(--on-brand); box-shadow: var(--glow);
+}
+#mic-btn.live { color: var(--red); animation: pulse 1s infinite; }
+@keyframes pulse { 50% { opacity: 0.4; } }
+.voice { display: flex; flex-direction: column; gap: 4px; }
+.voice audio { max-width: 320px; height: 36px; }
+.channel[draggable="true"] { cursor: grab; }
