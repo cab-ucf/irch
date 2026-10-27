@@ -2111,9 +2111,13 @@ impl Node {
                 peer,
                 info.into_addrs().map(|a| a.into_addr()),
             );
-            // Members' devices only, the latest 512: anyone who knows a
-            // space's id may join its topic, and must not crowd them out.
-            let keep = !a.is_empty() && n.member_device(&peer);
+            // Members' devices and storage nodes only, the latest 512:
+            // anyone who knows a space's id may join its topic, and must
+            // not crowd them out.
+            let host =
+                n.view(&sp.id, |s| s.hosts().iter().any(|h| h.id == peer));
+            let ok = n.member_device(&peer) || host == Some(true);
+            let keep = !a.is_empty() && ok;
             let mut l = lock(&n.local);
             if keep {
                 if l.peers.len() >= 512 && !l.peers.contains_key(&peer) {
@@ -2242,9 +2246,24 @@ async fn pump(n: Arc<Node>, sp: Weak<Space>, boot: Vec<EndpointId>) {
             continue;
         };
         let (tx, mut rx) = topic.split();
-        *lock(&s.tx) = Some(tx);
+        *lock(&s.tx) = Some(tx.clone());
         drop(s);
-        while let Some(ev) = rx.next().await {
+        // Alone (a dial failed: our relay not up yet, say), dial again soon,
+        // then less often, up to the heartbeat's minute.
+        let mut wait = Duration::from_secs(2);
+        loop {
+            let ev = match tokio::time::timeout(wait, rx.next()).await {
+                Ok(Some(ev)) => ev,
+                Ok(None) => break,
+                Err(_) => {
+                    let Some(s) = sp.upgrade() else { return };
+                    if s.nbrs().is_empty() {
+                        let _ = tx.join_peers(n.bootstrap(&s)).await;
+                    }
+                    wait = (wait * 2).min(BEAT);
+                    continue;
+                }
+            };
             let Some(s) = sp.upgrade() else { return };
             match ev {
                 Ok(Gossiped::Received(m)) => {
@@ -2253,7 +2272,12 @@ async fn pump(n: Arc<Node>, sp: Weak<Space>, boot: Vec<EndpointId>) {
                 }
                 Ok(Gossiped::NeighborUp(p)) => n.neighbor(&s, p),
                 Ok(Gossiped::NeighborDown(p)) => {
-                    lock(&s.nbrs).remove(&p);
+                    let mut nb = lock(&s.nbrs);
+                    nb.remove(&p);
+                    if nb.is_empty() {
+                        wait = Duration::from_secs(2);
+                    }
+                    drop(nb);
                     n.emit(Event::Changed { space: s.id });
                 }
                 Ok(Gossiped::Lagged) | Err(_) => break,

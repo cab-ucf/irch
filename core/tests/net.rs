@@ -352,6 +352,33 @@ async fn a_ring_tells_a_sleeping_phone_what_rang() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_phone_finds_its_storage_node_back() {
+    let (db, ds) = (dir("b"), dir("s"));
+    let a = node("a").await;
+    let s = start(&ds, "s", None, true).await;
+    let b = start(&db, "b", None, false).await;
+    let id = a.create("lab").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    pair(&a, &s, &[id]).await;
+    until("s keeps it", || s.held().iter().any(|h| h.0 == id)).await;
+    let hosted = || b.view(&id, |st| !st.hosts().is_empty()) == Some(true);
+    until("b knows the storage node", hosted).await;
+    for n in [&a, &b, &s] {
+        n.shutdown().await;
+    }
+    drop((a, b, s));
+    tokio::time::sleep(Duration::from_secs(6)).await; // their ports, free
+
+    // b is back first, and no one answers; then the storage node, which
+    // cannot know where b is now: b must try again.
+    let b = start(&db, "b", None, false).await;
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert_eq!(b.peers(&id), 0, "no one to find");
+    let _s = start(&ds, "s", None, true).await;
+    until("b finds it again", || b.peers(&id) > 0).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn storage_keeps_only_the_spaces_chosen() {
     let s = start(&dir("s"), "s", None, true).await;
     let a = node("a").await;
