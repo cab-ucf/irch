@@ -251,7 +251,10 @@ altogether, and whoever writes wakes it. With no push app, nothing to
 install, no server and no router: irch keeps a doorbell, an iroh
 endpoint of its own with no connection open (a quiet "Connected for
 messages and calls" notification, from boot on); iroh's link to its
-relay, a few bytes every 15 s, is all it sends. Its spaces are told,
+relay, a few bytes every 15 s, is all it sends. The phone stays awake
+(idle) for it: a relay drops a client that takes over 5 s to answer its
+ping, which a sleeping phone often does, and its doorbell would fall
+silent until Android next woke it, minutes later. Its spaces are told,
 sealed like any op, where it is and a secret; a writer's device rings it
 over iroh, handing over what it wrote (sealed, as gossip carries it;
 again over a minute if unanswered), and it notifies at once, then

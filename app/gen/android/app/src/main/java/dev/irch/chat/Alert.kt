@@ -23,7 +23,8 @@ fun alert(ctx: Context, a: JSONObject) {
   if (!notificationsAllowed(ctx)) return
   val (space, room) = a.getString("space") to a.getString("room")
   val (title, body) = a.getString("title") to a.getString("body")
-  if (a.optBoolean("ring")) postCall(ctx, space, room, title)
+  if (a.optBoolean("hush")) hush(ctx, space)
+  else if (a.optBoolean("ring")) postCall(ctx, space, room, title)
   else postMessage(ctx, space + room, title, body)
 }
 
@@ -114,10 +115,11 @@ fun postCall(ctx: Context, space: String, room: String, who: String) {
   NotificationManagerCompat.from(ctx).notify(tag, CALL, n)
 }
 
-/** Every ringing call stops: answered or declined. */
-fun hush(ctx: Context) {
+/** Every ringing call stops (answered or declined), or `space`'s (its
+ *  caller hung up). */
+fun hush(ctx: Context, space: String = "") {
   val nm = NotificationManagerCompat.from(ctx)
-  nm.activeNotifications.filter { it.id == CALL }
+  nm.activeNotifications.filter { it.id == CALL && it.tag.startsWith(space) }
     .forEach { nm.cancel(it.tag, CALL) }
 }
 

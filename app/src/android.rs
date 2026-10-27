@@ -4,7 +4,7 @@
 
 use anyhow::Context;
 use irch_core::wake::{self, News};
-use irch_core::{Node, Notice};
+use irch_core::{Id, Node, Notice};
 use jni::JNIEnv;
 use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jboolean, jstring};
@@ -238,12 +238,26 @@ async fn wake(
     }
     let news =
         std::mem::take(&mut *NEWS.lock().unwrap_or_else(|e| e.into_inner()));
+    let spaces: Vec<_> = news.iter().map(|x| x.0).collect();
     news.into_iter().for_each(|x| n.deliver(x));
     if crate::FG.load(SeqCst) {
         return Ok(vec![]); // in sight: the app shows it
     }
     if !full {
-        return Ok(crate::alerts(&n, false)); // what rang, told now
+        // What rang, told now; a DM whose call ended stops ringing.
+        let mut v = crate::alerts(&n, false);
+        let dm = |s: &Id| n.view(s, |s| s.dm.is_some()) == Some(true);
+        let ended =
+            spaces.into_iter().filter(|s| dm(s) && n.calls(s).is_empty());
+        v.extend(ended.map(|space| Notice {
+            space,
+            room: irch_core::state::DM,
+            title: String::new(),
+            body: String::new(),
+            ring: false,
+            hush: true,
+        }));
+        return Ok(v);
     }
     n.resume().await;
     // Catch up until a few quiet seconds, at most half a minute.

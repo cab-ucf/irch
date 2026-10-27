@@ -671,6 +671,12 @@ function incoming(sid, ch, who) {
   const rings = android ? 0 : setInterval(ringing, 6000);
   if (!android) ringing();
   const late = setTimeout(() => $("modal").close(), 45e3);
+  // Hung up before it was answered: it stops ringing.
+  let seen = false;
+  const gone = setInterval(() => {
+    if ((callOf(sid, ch)?.call ?? []).length) seen = true;
+    else if (seen) $("modal").close();
+  }, 2000);
   calling = modal((finish) => h("div", {},
     h("div", { class: "m-body" }, h("h2", {}, who),
       h("p", { class: "sub" }, "is calling you")),
@@ -680,6 +686,7 @@ function incoming(sid, ch, who) {
       "Answer"))));
   calling.then((yes) => {
     clearInterval(rings);
+    clearInterval(gone);
     clearTimeout(late);
     calling = null;
     quiet(invoke("hush"));
