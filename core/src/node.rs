@@ -487,7 +487,7 @@ fn public(ip: &std::net::IpAddr) -> bool {
 
 /// An endpoint as `net` says: which relays, and how peers are found.
 pub(crate) fn endpoint(net: &Net) -> iroh::endpoint::Builder {
-    match net {
+    let b = match net {
         Net::Default => Endpoint::builder(presets::N0).relay_mode(
             RelayMode::custom(RELAYS.map(|r| r.parse().expect("relay url"))),
         ),
@@ -501,7 +501,13 @@ pub(crate) fn endpoint(net: &Net) -> iroh::endpoint::Builder {
         Net::Direct => {
             Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled)
         }
-    }
+    };
+    // Through a network's proxy, if it has one, trusting what the system
+    // trusts (desktops): relays, as any other https.
+    let b = b.proxy_from_env();
+    #[cfg(not(target_os = "android"))]
+    let b = b.ca_tls_config(iroh::tls::CaTlsConfig::system());
+    b
 }
 
 /// Serves sync and blobs; the ALPN says which.
