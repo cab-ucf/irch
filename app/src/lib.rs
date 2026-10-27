@@ -152,6 +152,99 @@ fn pick() -> Vec<String> {
     vec![]
 }
 
+/// In the tray (where the desktop has one): closing the window hides it.
+#[cfg(desktop)]
+static TRAY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The tray's icon and menu; at first, irch starts at login (NixOS: its
+/// configuration says). Started at login: in the tray, no window.
+#[cfg(desktop)]
+fn tray(app: &tauri::App) {
+    use tauri::menu::{CheckMenuItem, Menu, MenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
+    use tauri_plugin_autostart::ManagerExt;
+    let auto = app.autolaunch();
+    let first = root(app.handle()).ok().map(|r| r.join("autostart"));
+    if let Some(f) = first.filter(|f| !f.exists() && !NIXOS) {
+        let _ = auto.enable().and_then(|()| Ok(std::fs::write(f, "")?));
+    } else if auto.is_enabled().unwrap_or(false) {
+        let _ = auto.enable(); // where irch is now: it may have moved
+    }
+    let on = auto.is_enabled().unwrap_or(false);
+    // Linux: a tray only with the library it loads (else it aborts).
+    #[cfg(target_os = "linux")]
+    let lib = ["libayatana-appindicator3.so.1", "libappindicator3.so.1"]
+        .iter()
+        .any(|l| unsafe { libloading::Library::new(l) }.is_ok());
+    #[cfg(not(target_os = "linux"))]
+    let lib = true;
+    let built = lib.then(|| {
+        let open =
+            MenuItem::with_id(app, "open", "Open irch", true, None::<&str>)?;
+        let login = CheckMenuItem::with_id(
+            app,
+            "login",
+            "Start at login",
+            !NIXOS,
+            on,
+            None::<&str>,
+        )?;
+        let quit =
+            MenuItem::with_id(app, "quit", "Quit irch", true, None::<&str>)?;
+        let menu = Menu::with_items(app, &[&open, &login, &quit])?;
+        let icon = app.default_window_icon().cloned().ok_or(
+            tauri::Error::InvalidIcon(std::io::Error::other("no icon")),
+        )?;
+        tauri::tray::TrayIconBuilder::with_id("irch")
+            .icon(icon)
+            .tooltip("irch")
+            .menu(&menu)
+            .show_menu_on_left_click(false)
+            .on_menu_event(move |app, e| match e.id.as_ref() {
+                "open" => show(app),
+                "login" => {
+                    let a = app.autolaunch();
+                    let on = a.is_enabled().unwrap_or(false);
+                    let _ = if on { a.disable() } else { a.enable() };
+                    let _ = login.set_checked(a.is_enabled().unwrap_or(false));
+                }
+                "quit" => app.exit(0),
+                _ => {}
+            })
+            .on_tray_icon_event(|t, e| {
+                if let TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } = e
+                {
+                    show(t.app_handle());
+                }
+            })
+            .build(app)
+    });
+    let tray = built.is_some_and(|t| {
+        t.inspect_err(|e| tracing::warn!("tray: {e}")).is_ok()
+    });
+    TRAY.store(tray, std::sync::atomic::Ordering::SeqCst);
+    // No tray to come back from: a window, whatever started it.
+    let hidden = std::env::args().any(|a| a == "--hidden");
+    if hidden
+        && tray
+        && let Some(w) = app.get_webview_window("main")
+    {
+        let _ = w.hide();
+    }
+}
+
+#[cfg(desktop)]
+fn show(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = (w.show(), w.unminimize(), w.set_focus());
+    }
+}
+
 /// Become another device of the person behind `code`. A fresh
 /// install only: this device's own identity is thrown away.
 #[tauri::command]
@@ -486,11 +579,7 @@ pub fn run() {
     // One irch per device: a second launch (an irch:// link from a note,
     // say) hands its link to the first and leaves.
     #[cfg(desktop)]
-    let b = b.plugin(tauri_plugin_single_instance::init(|app, _, _| {
-        if let Some(w) = app.get_webview_window("main") {
-            let _ = (w.unminimize(), w.set_focus());
-        }
-    }));
+    let b = b.plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)));
     #[cfg(desktop)]
     let b = b
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -508,8 +597,25 @@ pub fn run() {
     let b = b.plugin(tauri_plugin_notification::init());
     #[cfg(target_os = "android")]
     let b = b.plugin(android::init());
+    #[cfg(desktop)]
+    let b = b
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--hidden"]),
+        ))
+        // Closed, irch stays in the tray: still told of messages and calls.
+        .on_window_event(|w, e| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = e
+                && TRAY.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                api.prevent_close();
+                let _ = w.hide();
+            }
+        });
     let b = b.setup(|app| {
         app.manage(App(watch::channel(None).0));
+        #[cfg(desktop)]
+        tray(app);
         // WebKitGTK keeps getUserMedia off unless asked.
         #[cfg(target_os = "linux")]
         if let Some(w) = app.get_webview_window("main") {
@@ -565,6 +671,9 @@ pub fn run() {
     app.run(|app, e| {
         let n = || app.state::<App>().0.borrow().clone().and_then(Result::ok);
         match e {
+            // macOS: the Dock's icon, clicked, with the window in the tray.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => show(app),
             // Back in front: connections may have died while frozen.
             #[cfg(mobile)]
             tauri::RunEvent::Resumed => {

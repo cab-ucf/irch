@@ -32,6 +32,11 @@ in {
   options = {
     programs.irch.enable =
       lib.mkEnableOption "irch, the app and terminal client, kept up to date";
+    # The app at login, in the tray: told of messages, its window closed.
+    programs.irch.autostart = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+    };
     services.irch.enable =
       lib.mkEnableOption "an always-on irch storage node, kept up to date";
     # Local accounts whose irch (app or terminal) may pair with this node
@@ -113,6 +118,16 @@ in {
 
     (lib.mkIf config.programs.irch.enable {
       environment.systemPackages = [ pinned (pick "irch-app") (pick "irch") ];
+      environment.etc."xdg/autostart/irch.desktop" =
+        lib.mkIf config.programs.irch.autostart {
+          text = ''
+            [Desktop Entry]
+            Type=Application
+            Name=irch
+            Exec=irch-app --hidden
+            NoDisplay=true
+          '';
+        };
     })
 
     (lib.mkIf cfg.enable {

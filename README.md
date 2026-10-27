@@ -169,8 +169,11 @@ Invites carry your relay address, not your IP, whenever a relay is known.
 
 ## A server
 
-An always-on member's desktop keeps the spaces it is in synced, but it can
-read them and covers only those. A storage node (`irch --serve`) keeps
+The app lives in the tray (where the desktop has one): closing its
+window leaves it there, still told of messages and calls, and it starts
+at login, in the tray (its menu's "Start at login"; on NixOS,
+`programs.irch.autostart`). An always-on member's desktop keeps the
+spaces it is in synced, but it can read them and covers only those. A storage node (`irch --serve`) keeps
 the spaces its users choose, ciphertext only. `irch --install` keeps one
 running as you (systemd for your user, a LaunchAgent, a scheduled task),
 at login, or at boot where Linux allows lingering; `--uninstall` stops

@@ -47,7 +47,7 @@ jobs:
           key: ${{ matrix.target }}
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y
-          libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev
+          libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev
           libjavascriptcoregtk-4.1-dev librsvg2-dev
       - run: cargo install tauri-cli --version 2.12.4 --locked
       # A tag is only ever a version, and the one irch says it is: anything
