@@ -40,7 +40,8 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
 - Voice and video calls with screen sharing; a DM call rings like a phone.
 - Notifications on desktops and phones, per space: all, @mentions or none.
 - Search on this device, Ctrl+K switcher, drafts per channel, vim keys
-  (Esc, then `j`/`k`, `r`, `e`, `dd`, `?`), swipe gestures on phones.
+  as in the terminal (Esc, then `j`/`k`, `l`/`h`, `J`/`K`, `r`, `e`, `dd`,
+  `?`; off in Settings), swipe gestures on phones.
 - The terminal client is modal like vim: counts, `gg`/`G`, `/` and `n`,
   `:` commands, `l`/`h` into and out of threads, `J`/`K` channels, `?`.
 - A DM closes (✕) and comes back with its next message; deleting it is
@@ -99,8 +100,8 @@ space = a grow-only set of envs;   state = a deterministic fold of it
 - Peers see each other's addresses, relays see endpoint ids and traffic,
   storage nodes see sizes, times and devices.
 - Calls are for a handful of people; macOS needs Safari 26's WebKit.
-- Any member, banned ones included, can have the space's storage nodes
-  keep sealed files up to 25 MB each; its owner stops by unhosting it.
+- Any member can have the space's storage nodes keep sealed files up to
+  25 MB each, 4 GB a day for the space; a ban stops them.
 - A storage code is a password. Unaudited.
 
 ## Layout
