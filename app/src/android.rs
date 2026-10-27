@@ -299,11 +299,18 @@ async fn rung(dir: PathBuf) -> anyhow::Result<()> {
         node(dir.clone()).await?.set_push(Some(url.clone())).await;
         *TOLD.lock().unwrap_or_else(|e| e.into_inner()) = Some(url);
     }
-    while crate::FG.load(SeqCst) {
-        // In sight: the app shows what arrives.
+    // In sight, or out of it for under a minute, or in a call: the node
+    // runs, and shows or tells of what arrives itself. Then it naps (a
+    // call ended out of sight, say, or a node up only to tell where the
+    // doorbell is), and the doorbell waits.
+    let mut away = 0;
+    while crate::FG.load(SeqCst) || crate::running().is_some() {
         tokio::time::sleep(Duration::from_secs(5)).await;
+        away = if crate::FG.load(SeqCst) { 0 } else { away + 5 };
+        if away >= 60 {
+            crate::nap().await;
+        }
     }
-    crate::nap().await;
     let half = Duration::from_secs(30 * 60);
     if let Ok(news) = tokio::time::timeout(half, wake::rung(&dir, &net)).await {
         NEWS.lock().unwrap_or_else(|e| e.into_inner()).extend(news?);
