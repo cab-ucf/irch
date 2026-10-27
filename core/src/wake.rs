@@ -2,7 +2,8 @@
 //! sight, irch keeps only a doorbell, an iroh endpoint of its own with no
 //! connection open (iroh keeps one quiet link to its home relay, through
 //! which anyone reaches it by key). Its spaces are told where it is and a
-//! secret; whoever writes rings it, and it wakes to catch up.
+//! secret; whoever writes rings it, handing over what they wrote (sealed,
+//! as gossip carries it), and it wakes to tell of it, then catch up.
 
 use crate::Net;
 use crate::op::code;
@@ -16,6 +17,11 @@ use tokio::time::timeout;
 
 pub const ALPN: &[u8] = b"irch/wake/1";
 const SLOW: Duration = Duration::from_secs(15);
+/// The most a ring brings: a space's id and one sealed op.
+const MAX: usize = 64 * 1024;
+
+/// What rang: in which space, and the sealed op (as gossip carries it).
+pub type News = (crate::Id, Vec<u8>);
 
 type Bell = (Endpoint, [u8; 16]);
 
@@ -51,6 +57,14 @@ async fn bell(dir: &Path, net: &Net) -> Result<Bell> {
     Ok(bell)
 }
 
+/// Another network: each doorbell finds its relay again now.
+pub async fn moved() {
+    let bells = BELLS.lock().await.clone().unwrap_or_default();
+    for (ep, _) in bells.values() {
+        ep.network_change().await;
+    }
+}
+
 /// This device's doorbell, as its spaces are told it (its push URL).
 pub async fn doorbell(dir: &Path, net: &Net) -> Result<String> {
     let (ep, secret) = bell(dir, net).await?;
@@ -60,8 +74,9 @@ pub async fn doorbell(dir: &Path, net: &Net) -> Result<String> {
     Ok(code("wake", &(ep.addr(), secret)))
 }
 
-/// Until someone rings who knows the secret.
-pub async fn rung(dir: &Path, net: &Net) -> Result<()> {
+/// Until someone rings who knows the secret; with what they wrote, if
+/// they said (older irch rings bare).
+pub async fn rung(dir: &Path, net: &Net) -> Result<Option<News>> {
     let (ep, secret) = bell(dir, net).await?;
     loop {
         let Some(inc) = ep.accept().await else { bail!("doorbell closed") };
@@ -71,20 +86,29 @@ pub async fn rung(dir: &Path, net: &Net) -> Result<()> {
             let mut got = [0u8; 16];
             rx.read_exact(&mut got).await?;
             let ok = same(&got, &secret);
+            let news = match ok {
+                true => rx.read_to_end(MAX).await?,
+                false => vec![],
+            };
             tx.write_all(&[ok as u8]).await?;
             tx.finish()?;
             let _ = timeout(SLOW, c.closed()).await;
-            anyhow::Ok(ok)
+            let news = (news.len() > 32).then(|| {
+                let id = crate::Id(news[..32].try_into().expect("32"));
+                (id, news[32..].to_vec())
+            });
+            anyhow::Ok(ok.then_some(news))
         };
-        if let Ok(Ok(true)) = timeout(SLOW, answer).await {
-            return Ok(());
+        if let Ok(Ok(Some(news))) = timeout(SLOW, answer).await {
+            return Ok(news);
         }
     }
 }
 
 /// Ring the doorbell behind `url` (at a few of its addresses, relays
-/// https only: whoever names them is a member, not trusted).
-pub async fn ring(ep: &Endpoint, url: &str) -> Result<()> {
+/// https only: whoever names them is a member, not trusted), handing it
+/// `news` if it fits.
+pub async fn ring(ep: &Endpoint, url: &str, news: Option<&News>) -> Result<()> {
     let (to, secret): (EndpointAddr, [u8; 16]) =
         crate::op::uncode("wake", url)?;
     let ok = |a: &&TransportAddr| match a {
@@ -96,7 +120,12 @@ pub async fn ring(ep: &Endpoint, url: &str) -> Result<()> {
         let c =
             ep.connect(EndpointAddr::from_parts(to.id, addrs), ALPN).await?;
         let (mut tx, mut rx) = c.open_bi().await?;
-        tx.write_all(&secret).await?;
+        let mut m = secret.to_vec();
+        if let Some((id, raw)) = news.filter(|n| 32 + n.1.len() <= MAX) {
+            m.extend_from_slice(&id.0);
+            m.extend_from_slice(raw);
+        }
+        tx.write_all(&m).await?;
         tx.finish()?;
         let got = rx.read_to_end(1).await?;
         c.close(0u8.into(), b"");
@@ -122,12 +151,14 @@ mod tests {
         let wrong = code("wake", &(to, [0u8; 16]));
         let d = dir.clone();
         let wait = tokio::spawn(async move { rung(&d, &Net::Direct).await });
-        assert!(ring(&ep, &wrong).await.is_err());
+        assert!(ring(&ep, &wrong, None).await.is_err());
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(!wait.is_finished(), "a wrong secret rings nothing");
-        ring(&ep, &url).await.unwrap();
+        let news = (crate::Id([7; 32]), b"sealed".to_vec());
+        ring(&ep, &url, Some(&news)).await.unwrap();
         let woke = timeout(Duration::from_secs(5), wait).await;
-        assert!(woke.unwrap().unwrap().is_ok());
+        let got = woke.unwrap().unwrap().unwrap().expect("what was written");
+        assert_eq!((got.0.0, got.1), (news.0.0, news.1), "handed over");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

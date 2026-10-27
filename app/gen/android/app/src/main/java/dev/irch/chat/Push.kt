@@ -21,8 +21,14 @@ import org.unifiedpush.android.connector.data.PushMessage
 object Wake {
   init { System.loadLibrary("irch_app") }
 
-  /** Start or wake the node, catch up; what to notify, as JSON. */
-  @JvmStatic external fun run(ctx: Context, dir: String, push: String?): String
+  /** Start or wake the node, take in what rang; what to notify, as
+   *  JSON: at once, or ([full]) after catching up. */
+  @JvmStatic external fun run(
+    ctx: Context, dir: String, push: String?, full: Boolean,
+  ): String
+
+  /** Another network: the doorbell finds its relay again. */
+  @JvmStatic external fun moved()
 
   /** Until irch's doorbell rings (waiting, with the CPU let sleep). */
   @JvmStatic external fun rung(ctx: Context, dir: String): String
@@ -60,17 +66,19 @@ class IrchPush : PushService() {
 }
 
 /**
- * Catch up, then notify, with the CPU held awake (at most a minute):
- * asleep, Android would freeze irch mid-sync, and the notification with
- * it, until something else woke the phone.
+ * Tell of what rang (the ring carries it), then catch up and tell of the
+ * rest, with the CPU held awake (at most a minute): asleep, Android would
+ * freeze irch mid-sync, and the notification with it, until something
+ * else woke the phone.
  */
 fun catchUp(ctx: Context, push: String?) {
   val pm = ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
   val lock = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "irch:catch-up")
   lock.acquire(60_000)
   try {
-    runCatching {
-      val got = JSONArray(Wake.run(ctx.applicationContext, ctx.dataDir.absolutePath, push))
+    for (full in listOf(false, true)) runCatching {
+      val dir = ctx.dataDir.absolutePath
+      val got = JSONArray(Wake.run(ctx.applicationContext, dir, push, full))
       for (k in 0 until got.length()) alert(ctx, got.getJSONObject(k))
     }
   } finally {
@@ -131,12 +139,21 @@ class IrchLive : Service() {
     } else {
       startForeground(3, n)
     }
-    if (running.compareAndSet(false, true)) Thread {
-      while (true) {
-        runCatching { Wake.rung(applicationContext, dataDir.absolutePath) }
-        catchUp(this, null)
-      }
-    }.start()
+    if (running.compareAndSet(false, true)) {
+      // Native code cannot see the network change; the doorbell must.
+      val cm = getSystemService(android.net.ConnectivityManager::class.java)
+      cm.registerDefaultNetworkCallback(object :
+        android.net.ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(n: android.net.Network) =
+          Thread { runCatching { Wake.moved() } }.start()
+      })
+      Thread {
+        while (true) {
+          runCatching { Wake.rung(applicationContext, dataDir.absolutePath) }
+          catchUp(this, null)
+        }
+      }.start()
+    }
     return START_STICKY
   }
 

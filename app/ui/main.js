@@ -164,7 +164,7 @@ const store = {
 
 /** Looks, on this device: style.css has each. */
 const THEMES = { neon: "Neon", midnight: "Midnight", nord: "Nord",
-  light: "Light" };
+  ucf: "UCF", light: "Light" };
 const theme = (t) => {
   t = THEMES[t] ? t : "neon";
   document.documentElement.dataset.theme = t;
@@ -466,7 +466,8 @@ async function updates(quietly) {
   const ok = await modal((finish) => h("div", {},
     h("div", { class: "m-body" }, h("h2", {}, `irch ${v} is out`),
       h("p", { class: "sub" }, android
-        ? "It downloads, then Android asks to install it over this one."
+        ? "Your browser downloads it; open it, and Android installs it "
+          + "over this one."
         : "It downloads, checks its signature, and irch restarts (or, if "
           + "irch came another way, its release page opens).")),
     foot(cancel(finish),
@@ -633,7 +634,14 @@ async function ring() {
 // ---------- alerts ----------
 
 // Desktops sound alerts here (phones: the system's sound, the ringtone).
+// A web view lets sound play only once someone has clicked or typed.
 let audio;
+for (const e of ["pointerdown", "keydown"]) {
+  addEventListener(e, () => {
+    audio ??= new AudioContext();
+    quiet(audio.resume());
+  }, { once: true, capture: true });
+}
 function tone(notes, gain) {
   audio ??= new AudioContext();
   quiet(audio.resume());
@@ -1815,6 +1823,21 @@ async function profilesFlow() {
   location.reload();
 }
 
+/** Android: what keeps calls and messages from this phone, said atop the
+ *  sidebar until it is fixed (one tap asks for it). */
+async function health(ask = "") {
+  if (!android) return;
+  const a = await invoke("notify_check", { ask }).catch(() => null);
+  const bad = a ? [!a.notify && "notifications are off",
+    !a.background && "Android cuts irch off while the phone sleeps",
+    !a.calls && "calls cannot ring on a locked screen"].filter(Boolean) : [];
+  put($("health"), bad.length > 0 && [
+    h("b", {}, "Messages and calls may not reach you: "), bad.join("; "),
+    h("button", { class: "btn", onclick: () => health("fix") }, "Fix")]);
+}
+document.addEventListener("visibilitychange",
+  () => !document.hidden && health());
+
 /** A phone in a pocket is told only if Android lets irch: what it allows
  *  now, a way to allow the rest, and a test. */
 function notifyCheck() {
@@ -1828,12 +1851,13 @@ function notifyCheck() {
       row(a.notify, "irch may show notifications"),
       row(a.background, "irch may run in the background (else, asleep " +
         "in a pocket, Android cuts it off and it cannot ring)"),
+      row(a.calls, "calls may fill the screen when the phone is locked"),
       h("p", { class: "note" }, a.push
         ? `Whoever writes wakes it through ${a.push}: no battery to speak of.`
         : "It stays connected, shown by a quiet notification. A " +
           "UnifiedPush app such as ntfy costs less battery."),
       h("div", { class: "row" },
-        !(a.notify && a.background) && h("button",
+        !(a.notify && a.background && a.calls) && h("button",
           { class: "btn", onclick: () => draw("fix") }, "Allow"),
         h("button", { class: "btn grey", onclick: () => draw("test") },
           "Send a test notification")));
@@ -2511,9 +2535,10 @@ async function start() {
   await T.event.listen("open-url", ({ payload }) => openUrl(payload));
   await T.event.listen("alert", ({ payload: a }) => {
     if (a.ring) return incoming(a.space, a.room, a.title);
-    if (!android) chime();
+    if (!android && document.hasFocus()) chime(); // else: a banner sounds
   });
   await loadSidebar();
+  health();
   if (!S.spaces.length) renderHeader();
   const url = await invoke("opened").catch(() => null);
   if (url) openUrl(url);

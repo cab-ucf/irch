@@ -188,8 +188,9 @@ it, to hand out; it is never logged).
 
 The apps check for a newer release at launch (and in My Account) and
 install it: desktops in place, the update's signature checked against
-the key in `tauri.conf.json`; Android through its installer, which takes
-only an APK signed with irch's own key. A storage node from a release
+the key in `tauri.conf.json`; on Android the browser downloads it and
+the system installer takes only an APK signed with irch's own key (irch
+never fetches or installs apps itself). A storage node from a release
 checks every six hours and replaces itself, under the same signature.
 An irch the updater cannot replace (built with cargo, an unpacked
 AppImage) opens the release page instead; Nix builds leave it to NixOS.
@@ -252,8 +253,11 @@ endpoint of its own with no connection open (a quiet "Connected for
 messages and calls" notification, from boot on); iroh's link to its
 relay, a few bytes every 15 s, is all it sends. Its spaces are told,
 sealed like any op, where it is and a secret; a writer's device rings it
-over iroh (at most every 2 s), and it wakes for a few seconds, fetches
-over iroh, and notifies. With a UnifiedPush app
+over iroh, handing over what it wrote (sealed, as gossip carries it;
+again over a minute if unanswered), and it notifies at once, then
+catches up for a few seconds over iroh (and every half hour anyway, in
+case a ring was missed). Android lets it do so only when allowed to run
+unrestricted: until it is, irch says so atop the sidebar. With a UnifiedPush app
 ([ntfy](https://ntfy.sh): from F-Droid, or from Google Play on ntfy.sh,
 which rides Google's own connection at no battery cost) irch keeps no
 doorbell: the writer's device sends that app's address a ping with

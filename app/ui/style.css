@@ -21,6 +21,7 @@
   --cyan: #00e5ff;
   --soft: #ecd2ff;
   --neon: linear-gradient(135deg, var(--brand), var(--pink));
+  --on-brand: #fff; /* text on --neon */
   --glow: 0 0 14px rgba(255, 43, 214, 0.45);
   --green: #39ff9a;
   --red: #ff2d6f;
@@ -64,6 +65,21 @@
   --green: #a3be8c; --red: #bf616a; --yellow: #ebcb8b;
   --mention-bg: rgba(235, 203, 139, 0.1); --link: #88c0d0;
   --scroll: #4c566a; --grey: #4c566a; --grey-hover: #5e6a82;
+}
+:root[data-theme="ucf"] {
+  /* UCF: Pegasus gold on black. */
+  --bg-1: #000; --bg-2: #0b0b0b; --bg-3: #000; --bg-4: #1a1a1a;
+  --bg-float: #121212; --field: #1a1a1a;
+  --line: rgba(255, 201, 4, 0.2); --border: rgba(255, 201, 4, 0.16);
+  --hover: rgba(255, 201, 4, 0.1); --active: rgba(255, 201, 4, 0.2);
+  --msg-hover: rgba(255, 201, 4, 0.05);
+  --text: #fff; --text-strong: #fff; --muted: #c8c8c8; --dim: #8a8a8a;
+  --brand: #ffc904; --brand-hover: #ffd84d; --pink: #ffc904;
+  --cyan: #ffc904; --soft: #fff3c4; --neon: var(--brand); --on-brand: #000;
+  --glow: 0 0 12px rgba(255, 201, 4, 0.4);
+  --green: #3ddc84; --red: #ff4d4d; --yellow: #ffc904;
+  --mention-bg: rgba(255, 201, 4, 0.12); --link: #ffc904;
+  --scroll: #333; --grey: #262626; --grey-hover: #3a3a3a;
 }
 :root[data-theme="light"] {
   --bg-1: #ebedef; --bg-2: #f2f3f5; --bg-3: #fff; --bg-4: #ebedef;
@@ -837,15 +853,15 @@ table.keys kbd {
   font-size: 14px;
   font-weight: 600;
   background: var(--neon);
-  color: #fff;
+  color: var(--on-brand);
 }
 .btn:hover { box-shadow: var(--glow); }
 .btn.grey { background: var(--grey); color: var(--text-strong); }
 .btn.grey:hover { background: var(--grey-hover); box-shadow: none; }
-.btn.red { background: var(--red); }
+.btn.red { background: var(--red); color: #fff; }
 .btn.link { background: none; color: var(--text); }
 .btn.link:hover { text-decoration: underline; }
-.btn.green { background: var(--green); }
+.btn.green { background: var(--green); color: #fff; }
 
 .menu {
   position: fixed;
@@ -870,7 +886,7 @@ table.keys kbd {
   color: var(--muted);
   text-align: left;
 }
-.menu button:hover { background: var(--neon); color: #fff; }
+.menu button:hover { background: var(--neon); color: var(--on-brand); }
 .menu button.accent { color: var(--brand-hover); }
 .menu button.danger { color: var(--red); }
 .menu button.danger:hover { background: var(--red); color: #fff; }
@@ -1358,6 +1374,13 @@ dialog:has(.preview) { width: min(900px, calc(100vw - 32px)); }
 /* Chat first: a channel's start is one modest line, not a banner. */
 #welcome .big, #welcome .avatar.big { display: none; }
 #welcome h1 { font-size: 20px; margin: 0 0 2px; }
+#health:empty { display: none; }
+#health {
+  margin: 8px; padding: 8px 10px; border-radius: 6px; font-size: 13px;
+  background: var(--red); color: #fff;
+}
+#health .btn { display: block; margin-top: 6px; background: #fff;
+  color: #000; }
 .check { margin: 4px 0; color: var(--red); font-size: 14px; }
 .check.ok { color: var(--green); }
 
