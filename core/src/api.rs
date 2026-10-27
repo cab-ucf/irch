@@ -58,6 +58,11 @@ pub enum Call {
     Leave {
         space: Id,
     },
+    /// A conversation out of the list until its next message; kept.
+    Hide {
+        space: Id,
+        on: bool,
+    },
     Publish {
         space: Id,
         op: Op,
@@ -200,6 +205,7 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
         Call::Join { code } => json!(n.join(&code).await?),
         Call::Invite { space } => json!(n.invite(&space).await?),
         Call::Leave { space } => json!(n.leave(&space).await?),
+        Call::Hide { space, on } => json!(n.hide(&space, on)),
         Call::Publish { space, op } => json!(n.publish(&space, op).await?),
         Call::Ban { space, user, on } => json!(n.ban(&space, &user, on).await?),
         Call::Rekey { space } => json!(n.rekey(&space).await?),
@@ -312,6 +318,7 @@ fn space(n: &Node, id: &Id) -> Option<Value> {
             .map(|(device, who)| json!({ "device": device, "who": who }))
             .collect::<Vec<_>>(),
         "level": n.level(id),
+        "closed": n.hidden(id),
         "storage": n.stored(id).into_iter()
             .map(|(node, on)| json!({ "node": node, "on": on }))
             .collect::<Vec<_>>(),

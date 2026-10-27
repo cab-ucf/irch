@@ -39,6 +39,10 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
 - Notifications on desktops and phones, per space: all, @mentions or none.
 - Search on this device, Ctrl+K switcher, drafts per channel, vim keys
   (Esc, then `j`/`k`, `r`, `e`, `dd`, `?`), swipe gestures on phones.
+- The terminal client is modal like vim: counts, `gg`/`G`, `/` and `n`,
+  `:` commands, `l`/`h` into and out of threads, `J`/`K` channels, `?`.
+- A DM closes (✕) and comes back with its next message; deleting it is
+  separate (its menu, or `:leave`).
 - Several profiles per device, linked devices, invisible mode, themes
   (Neon, Midnight, Nord, UCF, Light).
 - *Add to notes*: a message or thread lands in a

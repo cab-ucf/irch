@@ -451,6 +451,8 @@ pub struct Node {
     spaces: RwLock<HashMap<Id, Arc<Space>>>,
     local: Mutex<Local>,
     prefs: Mutex<Prefs>,
+    // Closed conversations, and when: hidden until something newer.
+    closed: Mutex<BTreeMap<Id, u64>>,
     // Endpoints we woke: when last, and whether one more is held back.
     wake: Mutex<HashMap<String, (Option<Instant>, bool)>>,
     rang: Mutex<HashSet<(Id, Id, Ch)>>,
@@ -610,6 +612,7 @@ impl Node {
             SecretKey::from_bytes(&secret(&cfg.dir.join("device"), None)?);
         let mut local: Local = store::load(&cfg.dir.join("local"));
         let prefs: Prefs = store::load(&cfg.dir.join("prefs"));
+        let closed = store::load(&cfg.dir.join("closed"));
         let lookup = MemoryLookup::new();
         local.peers.values().for_each(|a| lookup.add_endpoint_info(a.clone()));
         let bind = async |port: u16| {
@@ -658,6 +661,7 @@ impl Node {
             invisible: AtomicBool::new(local.invisible),
             local: Mutex::new(local),
             prefs: Mutex::new(prefs),
+            closed: Mutex::new(closed),
             wake: Mutex::default(),
             rang: Mutex::default(),
             push: OnceLock::new(),
@@ -737,6 +741,30 @@ impl Node {
         if let Err(e) = store::save(&self.dir.join("local"), &*l) {
             warn!("saving local state: {e}");
         }
+    }
+
+    /// Out of sight, kept: back with its next message, or when opened.
+    pub fn hide(&self, id: &Id, on: bool) {
+        let last = self.last(id).unwrap_or_default();
+        let mut c = lock(&self.closed);
+        let _ = if on { c.insert(*id, last) } else { c.remove(id) };
+        if let Err(e) = store::save(&self.dir.join("closed"), &*c) {
+            warn!("saving closed: {e}");
+        }
+        drop(c);
+        self.emit(Event::Changed { space: *id });
+    }
+
+    pub fn hidden(&self, id: &Id) -> bool {
+        let t = lock(&self.closed).get(id).copied();
+        t.is_some_and(|t| self.last(id).unwrap_or_default() <= t)
+    }
+
+    fn last(&self, id: &Id) -> Option<u64> {
+        let last = |s: &State| {
+            s.channels().iter().filter_map(|(c, _)| s.latest(c)).max()
+        };
+        self.view(id, last).flatten()
     }
 
     fn save_prefs(&self) {
@@ -1128,6 +1156,9 @@ impl Node {
         l.hosted.remove(id);
         drop(l);
         self.persist();
+        if lock(&self.closed).contains_key(id) {
+            self.hide(id, false);
+        }
         self.emit(Event::Changed { space: *id });
     }
 
@@ -1465,6 +1496,7 @@ impl Node {
         let me = self.id();
         for sp in self.all() {
             if self.view(&sp.id, |s| s.peer(&me) == Some(*user)) == Some(true) {
+                self.hide(&sp.id, false);
                 return Ok(sp.id);
             }
         }

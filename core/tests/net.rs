@@ -246,11 +246,17 @@ async fn direct_messages() {
     until("b got the DM", || texts(&b, &dm, &irch_core::state::DM) == ["psst"])
         .await;
     assert!(b.spaces().contains(&dm));
+    a.hide(&dm, true);
+    assert!(a.hidden(&dm) && a.spaces().contains(&dm), "closed, not gone");
     say(&b, &dm, irch_core::state::DM, "hey").await;
     until("a got the answer", || {
         texts(&a, &dm, &irch_core::state::DM).len() == 2
     })
     .await;
+    assert!(!a.hidden(&dm), "back with its next message");
+    a.hide(&dm, true);
+    a.dm(&id, &b.id()).await.unwrap();
+    assert!(!a.hidden(&dm), "back when opened");
 }
 
 /// A DM's very first message is news, though it came before b was in it.
