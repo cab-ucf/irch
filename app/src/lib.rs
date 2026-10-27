@@ -81,7 +81,7 @@ fn config(
         _ => Net::Default,
     };
     let (name, serve) = ("anon".into(), false);
-    Ok(Config { dir, name, net, link, serve, notes })
+    Ok(Config { dir, name, net, link, serve, notes, big: None })
 }
 
 struct App(watch::Sender<Started>);
@@ -106,7 +106,9 @@ async fn irch(
     s: State<'_, App>,
     call: api::Call,
 ) -> Result<Value, String> {
-    if let api::Call::Offer { path, .. } = &call {
+    let mut upload = None;
+    if let api::Call::Offer { path, .. } | api::Call::Seal { path, .. } = &call
+    {
         let p = std::path::Path::new(path);
         let mut picked = PICKED.lock().unwrap_or_else(|e| e.into_inner());
         let chosen = picked.iter().position(|x| x == p);
@@ -116,8 +118,15 @@ async fn irch(
             return Err("only files you pick are shared".into());
         }
         chosen.map(|i| picked.remove(i));
+        // Sealed, an upload's plain copy goes.
+        let seal = matches!(call, api::Call::Seal { .. });
+        upload = (ours && seal).then(|| p.to_path_buf());
     }
-    api::call(&node(&s).await?, call).await.map_err(err)
+    let r = api::call(&node(&s).await?, call).await.map_err(err);
+    if let Some(p) = upload {
+        let _ = std::fs::remove_file(p);
+    }
+    r
 }
 
 #[cfg(desktop)]
