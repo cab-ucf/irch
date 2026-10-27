@@ -1,8 +1,7 @@
+# By hand only: each release builds, installs and runs everything itself
+# (release.yml's check), so pushes and pull requests cost nothing.
 name: ci
 on:
-  pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read
