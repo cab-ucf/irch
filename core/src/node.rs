@@ -25,7 +25,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{
+    AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed,
+};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -140,7 +142,10 @@ pub struct Space {
     nbrs: Mutex<HashSet<EndpointId>>,
     seen: Mutex<HashMap<Id, Instant>>,
     calls: Mutex<HashMap<Id, (Ch, EndpointId, Instant)>>,
-    busy: Mutex<HashSet<EndpointId>>,
+    // Syncing with now; true: asked again meanwhile, so once more after.
+    busy: Mutex<HashMap<EndpointId, bool>>,
+    // Devices our storage nodes were last told they may take from.
+    vouched: AtomicUsize,
     task: OnceLock<AbortOnDropHandle<()>>,
 }
 
@@ -470,6 +475,8 @@ pub struct Node {
     big: Option<String>,
     files: FsStore,
     held: Mutex<Option<std::fs::File>>,
+    // Per space, the day and what `Hold` took on it.
+    budget: Mutex<HashMap<Id, (u64, u64)>>,
     call: Mutex<Option<Call>>,
     media: call::Media,
 }
@@ -689,6 +696,7 @@ impl Node {
             big: cfg.big,
             files,
             held: Mutex::new(Some(held)),
+            budget: Mutex::default(),
             call: Mutex::new(None),
             media: broadcast::channel(128).0,
         });
@@ -1132,6 +1140,7 @@ impl Node {
             seen: Mutex::default(),
             calls: Mutex::default(),
             busy: Mutex::default(),
+            vouched: AtomicUsize::new(0),
             task: OnceLock::new(),
         });
         {
@@ -1253,6 +1262,11 @@ impl Node {
         }
         if sp.id == self.own {
             self.reconcile().await;
+        }
+        // Members came or went: our storage nodes hear at once whom to take.
+        let n = sp.devices().len();
+        if sp.inv.is_some() && sp.vouched.swap(n, Relaxed) != n {
+            self.stores(&sp.id).into_iter().for_each(|s| self.sync(&sp, s.0));
         }
         if fix {
             // Admins may race to fix it; a little jitter keeps that rare.
@@ -2147,8 +2161,38 @@ impl Node {
         });
     }
 
+    /// A device the space's owner vouched for (not banned since), or soon
+    /// will: a new member's first photo may come first.
+    async fn vouched(&self, sp: &Id, d: &EndpointId) -> bool {
+        for _ in 0..50 {
+            if self.get(sp).is_ok_and(|s| self.takes(&s, d)) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        false
+    }
+
+    /// Members' small files a storage node takes for a space: 25 MB each,
+    /// 4 GB a day, so no member fills its disk.
+    fn budget(&self, sp: &Id, size: u64) -> Result<(), &'static str> {
+        if size > crate::crypto::sealed_len(PREVIEW as u64) {
+            return Err("over 25 MB: the sender's own storage node keeps it");
+        }
+        let (mut b, day) = (lock(&self.budget), now() / DAY);
+        let used = b.entry(*sp).or_insert((day, 0));
+        if used.0 != day {
+            *used = (day, 0);
+        }
+        if used.1 + size > 4 << 30 {
+            return Err("this space's files for today are kept: try tomorrow");
+        }
+        used.1 += size;
+        Ok(())
+    }
+
     async fn give(&self, c: &Connection) -> Result<()> {
-        let (mut tx, mut rx) = c.accept_bi().await?;
+        let ((mut tx, mut rx), from) = (c.accept_bi().await?, c.remote_id());
         // A file's worth is read only after the head (and token), by storage.
         let mut head = [0u8; 17];
         rx.read_exact(&mut head).await?;
@@ -2169,7 +2213,6 @@ impl Node {
                 store::write(&self.blob(&Id(blake3::hash(&b).into())), &b)?;
             }
             Ask::Keep(t, h, pw) if self.serve == Some(t) => {
-                let from = c.remote_id();
                 let size = self.verified(&[from], &h).await;
                 let size = size.context("not reachable, or not there")?;
                 let same = |a: &str, b: &str| {
@@ -2186,18 +2229,17 @@ impl Node {
                 }
             }
             Ask::Hold(sp, t, h)
-                if self.serve.is_some_and(|s| hold_token(&s, &sp) == t)
-                    && self.get(&sp).is_ok() =>
+                if self.serve.is_some_and(|s| hold_token(&s, &sp) == t) =>
             {
-                let from = c.remote_id();
-                let size = self.verified(&[from], &h).await;
-                let size = size.context("not reachable, or not there")?;
-                if size > crate::crypto::sealed_len(PREVIEW as u64) {
-                    let no =
-                        "over 25 MB: the sender's own storage node keeps it";
-                    tx.write_all(no.as_bytes()).await?;
-                } else {
-                    self.fetch(&h, from);
+                ensure!(self.vouched(&sp, &from).await, "not vouched for");
+                let hash = iroh_blobs::Hash::from_bytes(h.0);
+                if !self.files.has(hash).await? {
+                    let size = self.verified(&[from], &h).await;
+                    let size = size.context("not reachable, or not there")?;
+                    match self.budget(&sp, size) {
+                        Ok(()) => self.fetch(&h, from),
+                        Err(no) => tx.write_all(no.as_bytes()).await?,
+                    }
                 }
             }
             Ask::Put(..) | Ask::Keep(..) => {
@@ -2241,24 +2283,32 @@ impl Node {
 
     async fn sync_with(self: Arc<Self>, sp: Arc<Space>, peer: EndpointAddr) {
         let id = peer.id;
-        if !self.takes(&sp, &id) || !lock(&sp.busy).insert(id) {
+        if !self.takes(&sp, &id) || lock(&sp.busy).insert(id, true).is_some() {
             return;
         }
-        let stores = self.stores(&sp.id);
-        let token = stores.into_iter().find(|s| s.0.id == id).map(|s| s.1);
-        let r = async {
-            let c = self.ep.connect(peer, sync::ALPN).await?;
-            let n = sync::initiate(&self, &sp, &c, token).await;
-            c.close(0u32.into(), b"done");
-            n
+        let again = || {
+            let mut b = lock(&sp.busy);
+            let again = b.insert(id, false) == Some(true);
+            if !again {
+                b.remove(&id);
+            }
+            again
         };
-        let r = tokio::time::timeout(sync::LIMIT, r).await;
-        let r = r.unwrap_or_else(|e| Err(e.into()));
-        lock(&sp.busy).remove(&id);
-        match r {
-            Ok(0) => {}
-            Ok(count) => self.emit(Event::Synced { space: sp.id, count }),
-            Err(e) => debug!("sync with {}: {e:#}", id.fmt_short()),
+        while again() {
+            let stores = self.stores(&sp.id);
+            let token = stores.into_iter().find(|s| s.0.id == id).map(|s| s.1);
+            let r = async {
+                let c = self.ep.connect(peer.clone(), sync::ALPN).await?;
+                let n = sync::initiate(&self, &sp, &c, token).await;
+                c.close(0u32.into(), b"done");
+                n
+            };
+            let r = tokio::time::timeout(sync::LIMIT, r).await;
+            match r.unwrap_or_else(|e| Err(e.into())) {
+                Ok(0) => {}
+                Ok(count) => self.emit(Event::Synced { space: sp.id, count }),
+                Err(e) => debug!("sync with {}: {e:#}", id.fmt_short()),
+            }
         }
     }
 
