@@ -88,7 +88,8 @@ fn tame(s: &str) -> String {
             None => l.into(),
         };
         let word = |w: &str| {
-            let bare = w.trim_start_matches(['*', '_', '~', '`', '[', '(']);
+            let marks = |c: &char| !"*_~`\\[(".contains(*c);
+            let bare: String = w.chars().filter(marks).collect();
             match bare.starts_with("due:") || bare.starts_with("at:") {
                 true => w.replacen(':', " :", 1),
                 false => w.into(),
@@ -217,9 +218,9 @@ fn messages_and_threads_become_markdown() {
         "\\![x](https://t/p.png)\n\\`\\`\\`dataviewjs"
     );
     // No task, event or time of its own for loroh.
-    let t = "- [ ] pay due:2030-01-01\n> 1. go **at:2030-01-01**\n*ok* 3.";
+    let t = "- [ ] pay due:2030-01-01\n> 1. go **at**:2030-01-01\n*ok* 3.";
     let ok =
-        "\\- [ ] pay due :2030-01-01\n\\> 1. go **at :2030-01-01**\n*ok* 3.";
+        "\\- [ ] pay due :2030-01-01\n\\> 1. go **at** :2030-01-01\n*ok* 3.";
     assert_eq!(tame(t), ok);
     // A link planted where the note's temporary file was: never written.
     #[cfg(unix)]
