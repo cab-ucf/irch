@@ -261,24 +261,29 @@ const isMe = (id) => id === S.me.id;
 
 // ---------- refresh scheduling ----------
 
+// One refresh at a time; what is asked meanwhile, once, after it.
 const need = new Set();
 let frame = 0;
-let chain = Promise.resolve();
+let busy = false;
 
 function schedule(...what) {
   what.forEach((w) => need.add(w));
-  if (!frame) frame = requestAnimationFrame(flush);
+  if (!frame && !busy) frame = requestAnimationFrame(flush);
 }
 
-function flush() {
-  frame = 0;
+async function flush() {
+  [frame, busy] = [0, true];
   const w = new Set(need);
   need.clear();
-  chain = chain.then(async () => {
+  try {
     if (w.has("side")) await loadSidebar();
     if (w.has("members")) await loadMembers();
     if (w.has("msgs")) await loadMessages();
-  }).catch((e) => console.error(e));
+  } catch (e) {
+    console.error(e);
+  }
+  busy = false;
+  if (need.size) schedule();
 }
 
 async function loadSidebar() {
@@ -310,11 +315,16 @@ async function loadMessages() {
     return renderMessages();
   }
   if (nearBottom() && S.limit > 100) S.limit = 100;
+  // The newest (500 at most, as the core gives) afresh; older pages stay.
+  const limit = Math.min(S.limit, 500);
   const msgs = await rpc("messages",
-    { space: s.id, channel: ch.id, before: null, limit: S.limit });
+    { space: s.id, channel: ch.id, before: null, limit });
   if (s.id !== S.sid || ch.id !== S.ch) return; // selection moved on
-  S.msgs = msgs;
-  S.more = msgs.length >= S.limit;
+  const top = msgs[0];
+  const older = msgs.length < limit ? [] : S.msgs.filter((m) =>
+    m.ts < top.ts || (m.ts === top.ts && m.id < top.id));
+  S.msgs = older.concat(msgs);
+  S.more = msgs.length >= limit && (!older.length || S.more);
   if (S.newFrom === undefined) computeNewFrom();
   const last = msgs.at(-1);
   if (last) S.typing.get(`${S.sid}|${S.ch}`)?.delete(last.author);
@@ -1098,10 +1108,11 @@ const size = (n) => {
   const i = Math.min(4, Math.floor(Math.log2(Math.max(1, n)) / 10));
   return `${i ? (n / 2 ** (10 * i)).toFixed(1) : n} ${"BKMGT"[i]}${i ? "B" : ""}`;
 };
-const images = new Map(); // hash -> Promise of a data: URL
+const images = new Map(); // hash -> Promise of a data: URL; the latest 64
 
 function image(f) {
   if (!images.has(f.hash)) {
+    if (images.size >= 64) images.delete(images.keys().next().value);
     images.set(f.hash, rpc("file", { space: S.sid, file: f })
       .then((b64) => `data:${mime(f.name)};base64,${b64}`)
       .catch((e) => (images.delete(f.hash), Promise.reject(e))));
@@ -1155,8 +1166,7 @@ function video(f, type) {
   const box = h("div", { class: "video" }, play);
   play.onclick = () => {
     box.classList.add("loading");
-    rpc("file", { space: S.sid, file: f }).then((b64) => {
-      const b = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    bytes(f).then((b) => {
       const src = URL.createObjectURL(new Blob([b], { type }));
       box.replaceChildren(h("video", { src, controls: true, autoplay: true,
         playsinline: true }));
