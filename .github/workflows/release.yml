@@ -16,15 +16,13 @@ on:
         description: The release's tag, vX.Y.Z
         required: true
 permissions:
-  contents: read
+  contents: write
 env:
   CARGO_TERM_COLOR: always
   TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   desktop:
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -122,8 +120,6 @@ jobs:
             install.sh install.ps1 --clobber
 
   android:
-    permissions:
-      contents: write
     runs-on: ubuntu-latest
     steps:
       - name: Room for the build
@@ -180,8 +176,6 @@ jobs:
   updater:
     needs: desktop
     if: ${{ !cancelled() }}
-    permissions:
-      contents: write
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -225,6 +219,8 @@ jobs:
   # The release as people get it: installed, run, and updating itself.
   check:
     needs: [updater, android]
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
