@@ -2,6 +2,7 @@
 //! (which iroh cannot see from native code there), notifications, the share
 //! sheet; and through `Push.kt`, push wakes when no activity is running.
 
+use anyhow::Context;
 use irch_core::{Node, Notice};
 use jni::JNIEnv;
 use jni::objects::{JClass, JObject, JString};
@@ -37,29 +38,74 @@ struct Text<'a> {
     text: &'a str,
 }
 
-/// The latest release, if newer than us; with `install`, its APK handed to
-/// Android's installer.
-pub async fn update(
+/// The latest release's APK, handed to Android's installer (which asks,
+/// the first time, whether irch may install apps). If that fails, the
+/// browser fetches it, and Android installs it from there.
+pub async fn upgrade(
     app: &tauri::AppHandle,
-    install: bool,
+    mut on: impl FnMut(usize, Option<u64>),
 ) -> anyhow::Result<Option<String>> {
-    let Some(latest) = crate::newer(app).await? else {
-        return Ok(None);
+    let url = format!("{}/download/irch.apk", crate::LATEST);
+    let bridge = app.try_state::<Bridge>().context("no bridge")?;
+    let get = |u: String| async move {
+        anyhow::Ok(irch_core::http().get(u).send().await?.error_for_status()?)
     };
-    if install {
-        let url = format!("{}/download/irch.apk", crate::LATEST);
-        let got = irch_core::http().get(url).send().await?;
-        let apk = got.error_for_status()?.bytes().await?;
+    // irch's own signature first: an APK it did not sign (another
+    // package, say, which Android would take as new) is never offered.
+    let v = irch_core::release::latest().await?;
+    let sig = get(format!("{url}.sig")).await?.bytes().await?;
+    let mut r = get(url.clone()).await?;
+    let (total, mut apk) = (r.content_length(), vec![]);
+    while let Some(c) = r.chunk().await? {
+        on(c.len(), total);
+        apk.extend_from_slice(&c);
+    }
+    irch_core::release::check(&apk, &sig, "irch.apk", &v)?;
+    let got = async {
         let dir = app.path().app_cache_dir()?.join("shared");
         std::fs::create_dir_all(&dir)?;
         let f = dir.join("irch.apk");
         std::fs::write(&f, &apk)?;
-        if let Some(b) = app.try_state::<Bridge>() {
-            b.call("install", FilePath { path: &f.to_string_lossy() }).await;
+        let path = &f.to_string_lossy();
+        bridge
+            .0
+            .run_mobile_plugin_async::<()>("install", FilePath { path })
+            .await?;
+        anyhow::Ok(())
+    };
+    match got.await {
+        Ok(()) => Ok(None),
+        Err(e) => {
+            bridge.call("browse", Url { url: &url }).await;
+            Ok(Some(format!("{e:#}. Your browser downloads irch: open it")))
         }
-        return Ok(None);
     }
-    Ok(Some(latest))
+}
+
+/// What decides whether this phone is told, after `ask`: "fix" (Android
+/// asks for what is missing), "background" (to run unrestricted), "test"
+/// (a notification, now), or nothing.
+pub async fn notify_check(
+    app: &tauri::AppHandle,
+    ask: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let b = app.try_state::<Bridge>().context("no bridge")?;
+    let cmd = match ask {
+        "fix" => Some("allowAlerts"),
+        "background" => Some("askBackground"),
+        "test" => Some("testAlert"),
+        _ => None,
+    };
+    if let Some(cmd) = cmd {
+        b.call(cmd, serde_json::json!({})).await;
+    }
+    let got = b.0.run_mobile_plugin_async("alerts", serde_json::json!({}));
+    Ok(got.await?)
+}
+
+#[derive(Serialize)]
+struct Url<'a> {
+    url: &'a str,
 }
 
 #[derive(Serialize)]
@@ -134,7 +180,9 @@ pub extern "system" fn Java_dev_irch_chat_Wake_run<'l>(
     push: JString<'l>,
 ) -> jstring {
     let (dir, push) = (text(&mut env, &dir), text(&mut env, &push));
-    let wake = wake(dir.unwrap_or_default().into(), push);
+    let dir =
+        irch_core::profile(std::path::Path::new(&dir.unwrap_or_default()));
+    let wake = wake(dir, push);
     reply(env, ctx, wake)
 }
 
@@ -149,7 +197,7 @@ pub extern "system" fn Java_dev_irch_chat_Wake_next<'l>(
 ) -> jstring {
     crate::LIVE.store(true, SeqCst);
     let dir = text(&mut env, &dir).unwrap_or_default();
-    reply(env, ctx, next(dir.into()))
+    reply(env, ctx, next(irch_core::profile(std::path::Path::new(&dir))))
 }
 
 fn text(env: &mut JNIEnv, s: &JString) -> Option<String> {
@@ -227,25 +275,24 @@ async fn node(dir: PathBuf) -> anyhow::Result<std::sync::Arc<Node>> {
     Ok(n)
 }
 
-/// The next notices, as soon as there are any (the app, in sight, may
-/// take them first: then this waits on).
+/// The next notices. Out of sight, no node at all: only the doorbell
+/// (wake.rs), which its spaces are told of; rung, a catch-up.
 async fn next(dir: PathBuf) -> anyhow::Result<Vec<Notice>> {
-    use irch_core::Event::{Call, Changed};
-    use tokio::sync::broadcast::error::RecvError::Closed;
+    let net = crate::config(dir.clone(), None, None)?.net;
+    let url = irch_core::wake::doorbell(&dir, &net).await?;
+    node(dir.clone()).await?.set_push(Some(url)).await;
     loop {
-        let n = node(dir.clone()).await?;
-        let (mut rx, w) = (n.subscribe(), std::sync::Arc::downgrade(&n));
-        drop(n);
-        loop {
-            let news = match rx.recv().await {
-                Err(Closed) => break, // stopped: a new one
-                e => matches!(e, Ok(Changed { .. } | Call { .. }) | Err(_)),
-            };
-            let Some(n) = w.upgrade() else { break };
-            let got = news.then(|| crate::alerts(&n, crate::FG.load(SeqCst)));
-            if let Some(got) = got.filter(|g| !g.is_empty()) {
-                return Ok(got);
-            }
+        if crate::FG.load(SeqCst) {
+            // In sight: the app shows what arrives.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
+        }
+        crate::LIVE.store(false, SeqCst);
+        crate::nap().await;
+        irch_core::wake::rung(&dir, &net).await?;
+        let got = wake(dir.clone(), None).await?;
+        if !got.is_empty() {
+            return Ok(got);
         }
     }
 }

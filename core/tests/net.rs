@@ -304,6 +304,9 @@ async fn offered_files_go_from_device_to_members_only() {
     std::fs::write(&src, &big).unwrap();
     let f = a.offer(&src, None).await.unwrap();
     assert!(f.offered() && f.size == big.len() as u64 && f.name == "big.bin");
+    // Said to be a byte, to open in place: refused before any of it comes.
+    let tiny = irch_core::File { size: 1, ..f.clone() };
+    assert!(b.file(&id, &tiny).await.is_err(), "not the size it says");
     let saved = b.save(&id, &f, &dir("saved")).await.unwrap();
     assert!(std::fs::read(&saved).unwrap() == big, "b has it, whole");
     // x knows the space, the hash and a's address, but holds no key.
@@ -503,6 +506,10 @@ async fn writing_wakes_a_sleeping_device() {
     let told = |n: &Node| n.view(&id, |s| s.pushes().len()) == Some(1);
     until("a knows where to wake b", || told(&a)).await;
     assert!(b.notices().is_empty(), "history stays quiet");
+    let named = |n: &Node| n.view(&id, |s| s.profile(&a.id()).is_some());
+    until("b knows a by name", || named(&b) == Some(true)).await;
+    // Later than that first ask, not in its very millisecond.
+    tokio::time::sleep(Duration::from_millis(2)).await;
 
     say(&a, &id, ch, "@b the samples are in").await;
     until("a woke b", || pushes.load(Relaxed) == 1).await;
@@ -519,4 +526,32 @@ async fn writing_wakes_a_sleeping_device() {
     b.set_level(&id, irch_core::Level::Mentions);
     until("b has it", || texts(&b, &id, &ch).len() == 2).await;
     assert!(b.notices().is_empty(), "mentions only");
+}
+
+/// b's phone sleeps: its node stopped, only its doorbell left, which a
+/// rings when it writes. No server, no router, nothing but iroh.
+#[tokio::test(flavor = "multi_thread")]
+async fn writing_rings_a_sleeping_phone() {
+    use irch_core::wake;
+    let db = dir("b");
+    let a = node("a").await;
+    let b = start(&db, "b", None, false).await;
+    let id = a.create("lab").await.unwrap();
+    let ch = general(&a, &id);
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let url = wake::doorbell(&db, &Net::Direct).await.unwrap();
+    b.set_push(Some(url.clone())).await;
+    let told =
+        |n: &Node| n.view(&id, |s| s.pushes().iter().any(|p| p.1 == url));
+    until("a knows b's doorbell", || told(&a) == Some(true)).await;
+    b.shutdown().await;
+    drop(b);
+
+    let d = db.clone();
+    let phone = tokio::spawn(async move { wake::rung(&d, &Net::Direct).await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!phone.is_finished(), "it sleeps");
+    say(&a, &id, ch, "lunch?").await;
+    let woke = tokio::time::timeout(Duration::from_secs(10), phone).await;
+    assert!(woke.expect("rung within seconds").unwrap().is_ok());
 }

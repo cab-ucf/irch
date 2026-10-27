@@ -1014,6 +1014,36 @@ dialog .m-foot .spacer { flex: 1; }
 }
 .qs-list button.sel { background: var(--active); color: var(--text-strong); }
 .qs-list small { margin-left: auto; font-size: 12px; color: var(--dim); }
+#composer { position: relative; }
+.qs-list.mentions {
+  position: absolute;
+  left: 16px;
+  bottom: 100%;
+  z-index: 5;
+  min-width: 220px;
+  margin: 0 0 4px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  box-shadow: 0 0 16px rgba(180, 77, 255, 0.3);
+}
+.chips { display: flex; gap: 6px; margin-top: 8px; }
+.chip {
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.chip.on { border-color: var(--pink); color: var(--text-strong); }
+.qs-list.search button { align-items: flex-start; text-align: left; }
+.qs-list.search p {
+  margin: 2px 0 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.qs-list.search small { margin-left: 4px; }
 
 #toasts {
   position: fixed;
@@ -1284,3 +1314,5 @@ dialog:has(.preview) { width: min(900px, calc(100vw - 32px)); }
 /* Chat first: a channel's start is one modest line, not a banner. */
 #welcome .big, #welcome .avatar.big { display: none; }
 #welcome h1 { font-size: 20px; margin: 0 0 2px; }
+.check { margin: 4px 0; color: var(--red); font-size: 14px; }
+.check.ok { color: var(--green); }

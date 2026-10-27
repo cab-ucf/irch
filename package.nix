@@ -1,11 +1,16 @@
 # irch from source: the app, and `irch` (the terminal client and storage
 # node). nixos.nix builds each release with it.
 { lib, rustPlatform, pkg-config, wrapGAppsHook3, webkitgtk_4_1, libsoup_3
-, glib-networking, gst_all_1, openssl, makeDesktopItem, copyDesktopItems }:
+, glib-networking, gst_all_1, openssl, makeDesktopItem, copyDesktopItems
+, libayatana-appindicator }:
 rustPlatform.buildRustPackage {
   pname = "irch";
   version = (lib.importTOML ./Cargo.toml).workspace.package.version;
-  src = lib.cleanSource ./.;
+  # Not a checkout's builds (cargo's target/, gigabytes).
+  src = lib.cleanSourceWith {
+    src = lib.cleanSource ./.;
+    filter = p: _: baseNameOf p != "target";
+  };
   cargoLock.lockFile = ./Cargo.lock;
   # typst asks for rustc 1.92 and builds with NixOS 25.11's 1.91.
   cargoBuildFlags = [ "-p" "irch" "-p" "irch-app" "--ignore-rust-version" ];
@@ -16,6 +21,10 @@ rustPlatform.buildRustPackage {
   nativeBuildInputs = [ pkg-config wrapGAppsHook3 copyDesktopItems ];
   buildInputs = [ webkitgtk_4_1 libsoup_3 glib-networking openssl ]
     ++ (with gst_all_1; [ gstreamer gst-plugins-base gst-plugins-good ]);
+  # The tray loads it when it starts.
+  preFixup = ''
+    gappsWrapperArgs+=(--prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ libayatana-appindicator ]})
+  '';
   desktopItems = [
     (makeDesktopItem {
       name = "irch";

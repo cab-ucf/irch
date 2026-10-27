@@ -48,8 +48,17 @@ class IrchPush : PushService() {
   private fun wake(push: String?) {
     val i = Intent(this, IrchWake::class.java).putExtra("push", push)
     // The distributor holds us in the foreground for a few seconds: enough
-    // to start a short foreground service from the background.
-    runCatching { startForegroundService(i) }
+    // to start a short foreground service from the background. Refused
+    // (Android 12+, irch under battery optimization): catch up here, in
+    // the seconds this service has.
+    runCatching { startForegroundService(i) }.onFailure {
+      Thread {
+        runCatching {
+          val got = JSONArray(Wake.run(applicationContext, dataDir.absolutePath, push))
+          for (k in 0 until got.length()) alert(this, got.getJSONObject(k))
+        }
+      }.start()
+    }
   }
 }
 
@@ -87,7 +96,8 @@ class IrchWake : Service() {
 
 const val SYNCING = "syncing"
 
-/** No push app: irch stays connected, so messages and calls arrive. */
+/** No push app: irch keeps its doorbell (src/android.rs), which those
+ *  who write ring: messages and calls arrive, for little battery. */
 fun live(ctx: Context) {
   runCatching { ctx.startForegroundService(Intent(ctx, IrchLive::class.java)) }
 }

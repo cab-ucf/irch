@@ -26,7 +26,7 @@ pub fn markdown(
     }
     let rooms = st.rooms();
     let room = rooms.iter().find(|r| r.0 == ch).map_or("", |r| &r.1);
-    let who = format!("{} in #{room}", m.name).replace(['[', ']'], "");
+    let who = plain(&format!("{} in #{room}", m.name));
     let at = format!("[{who}]({})", link(space, &ch, &m.id));
     let first = |t: &str| {
         let l = t.lines().find(|l| !l.trim().is_empty());
@@ -46,10 +46,30 @@ pub fn markdown(
         String::new()
     };
     for x in std::iter::once(&m).chain(&replies) {
-        let text = x.text.trim().replace('\n', "\n  ");
-        s += &format!("- **{}**: {text}\n", x.name);
+        let text = tame(x.text.trim()).replace('\n', "\n  ");
+        s += &format!("- **{}**: {text}\n", plain(&x.name));
     }
     Some(s + &format!("\n— {at}\n"))
+}
+
+/// A name as text, never Markdown: one line, its marks escaped.
+fn plain(s: &str) -> String {
+    let mut o = String::new();
+    for c in s.chars() {
+        match c {
+            '\n' | '\r' => o.push(' '),
+            c if "\\`*_[]()<>!|~".contains(c) => o.extend(['\\', c]),
+            c => o.push(c),
+        }
+    }
+    o
+}
+
+/// Someone else's Markdown, kept, but nothing a note would fetch or run:
+/// no images (they load from anywhere), no fenced blocks (a plugin may
+/// run them).
+fn tame(s: &str) -> String {
+    s.replace("![", "\\![").replace("```", "\\`\\`\\`").replace("~~~", "\\~~~")
 }
 
 /// Every note in `vault`, shared folders included: relative, sorted.
@@ -57,7 +77,9 @@ pub fn list(vault: &Path) -> Vec<String> {
     fn walk(root: &Path, d: &Path, out: &mut Vec<String>) {
         for e in fs::read_dir(d).into_iter().flatten().flatten() {
             let p = e.path();
-            if e.file_name().to_string_lossy().starts_with('.') {
+            // Not hidden, nor a link (which may lead out, or round).
+            let link = e.file_type().is_ok_and(|t| t.is_symlink());
+            if link || e.file_name().to_string_lossy().starts_with('.') {
                 continue;
             } else if p.is_dir() {
                 walk(root, &p, out);
@@ -87,7 +109,8 @@ pub fn append(vault: &Path, file: &str, md: &str) -> Result<()> {
     ensure!(ok, "notes are .md files inside the notes folder");
     let p = vault.join(rel);
     let name = p.file_name().unwrap_or_default().to_string_lossy();
-    let tmp = p.with_file_name(format!(".{name}.irch"));
+    let r = data_encoding::HEXLOWER.encode(&crate::crypto::rand::<8>());
+    let tmp = p.with_file_name(format!(".{name}.{r}.irch"));
     fs::create_dir_all(p.parent().unwrap_or(vault))?;
     let old = fs::read_to_string(&p).unwrap_or_default();
     let gap = match () {
@@ -95,7 +118,11 @@ pub fn append(vault: &Path, file: &str, md: &str) -> Result<()> {
         _ if old.ends_with('\n') => "\n",
         _ => "\n\n",
     };
-    fs::write(&tmp, old + gap + md)?;
+    // A new file of our own, never one planted there (or what it links to).
+    let mut f =
+        fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    std::io::Write::write_all(&mut f, (old + gap + md).as_bytes())?;
+    drop(f);
     Ok(fs::rename(tmp, p)?)
 }
 
@@ -151,5 +178,23 @@ fn messages_and_threads_become_markdown() {
     assert_eq!(list(&dir), ["Lab/Ideas.md"]);
     for bad in ["../x.md", ".siroh/key.md", "/etc/x.md", "x.txt"] {
         assert!(append(&dir, bad, "x").is_err(), "{bad}");
+    }
+    // Others' names and Markdown: text, nothing fetched or run.
+    assert_eq!(plain("a](x)\n![b"), "a\\]\\(x\\) \\!\\[b");
+    assert_eq!(
+        tame("![x](https://t/p.png)\n```dataviewjs"),
+        "\\![x](https://t/p.png)\n\\`\\`\\`dataviewjs"
+    );
+    // A link planted where the note's temporary file was: never written.
+    #[cfg(unix)]
+    {
+        let out = dir.join("outside");
+        fs::write(&out, "mine").unwrap();
+        let lab = dir.join("Lab");
+        std::os::unix::fs::symlink(&out, lab.join(".Ideas.md.irch")).unwrap();
+        std::os::unix::fs::symlink(&lab, lab.join("loop")).unwrap();
+        append(&dir, "Lab/Ideas.md", "c\n").unwrap();
+        assert_eq!(fs::read_to_string(&out).unwrap(), "mine");
+        assert_eq!(list(&dir), ["Lab/Ideas.md"], "links not followed");
     }
 }

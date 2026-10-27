@@ -63,6 +63,19 @@ fun postMessage(ctx: Context, tag: String, title: String, body: String) {
   NotificationManagerCompat.from(ctx).notify(tag, 0, n)
 }
 
+/** Tokens of the Answer buttons on show. */
+val answers: MutableSet<String> = java.util.Collections.synchronizedSet(HashSet())
+
+/** An irch://call link without one of them only rings, asking first. */
+fun answerable(i: Intent?) {
+  if (i == null) return
+  val u = i.data?.takeIf { it.scheme == "irch" } ?: return
+  if (u.host != "call" && u.host != "ring") return
+  val ok = u.host == "call" && answers.remove(u.getQueryParameter("k") ?: "")
+  val verb = if (ok) "call" else u.host
+  i.setData(Uri.parse("irch://$verb${u.path}"))
+}
+
 /**
  * Like a phone call: the ringtone and a long buzz, again and again, full
  * screen when locked, until answered, declined or 45 s pass. Answer joins
@@ -74,7 +87,11 @@ fun postCall(ctx: Context, space: String, room: String, who: String) {
   val tag = space + room
   val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
   val open = { verb: String, code: Int ->
-    val uri = Uri.parse("irch://$verb/$space/$room")
+    // Answering needs this notification's own token: a link from anywhere
+    // else only rings (MainActivity), never opens the microphone.
+    val k = java.util.UUID.randomUUID().toString()
+    if (verb == "call") answers.add(k)
+    val uri = Uri.parse("irch://$verb/$space/$room?k=$k")
     val i = Intent(Intent.ACTION_VIEW, uri, ctx, MainActivity::class.java)
       .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     PendingIntent.getActivity(ctx, tag.hashCode() + code, i, flags)

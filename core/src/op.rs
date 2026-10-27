@@ -62,6 +62,22 @@ impl Op {
     }
 }
 
+/// Unseen, or turning text around: what lets one name pass for another.
+fn hidden(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}' | '\u{feff}')
+}
+
+/// A name as others' ops give it: nothing hidden, at most 64 bytes.
+pub fn name(n: &str) -> String {
+    let mut n: String = n.chars().filter(|c| !hidden(*c)).collect();
+    while n.len() > 64 {
+        n.pop();
+    }
+    n.trim().to_string()
+}
+
 /// An attachment. Its ciphertext lives apart, named by its BLAKE3 hash;
 /// the key travels only inside the sealed post.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -85,12 +101,7 @@ impl File {
     /// direction characters (`photo\u{202e}gnp.exe`), nothing Windows
     /// reserves.
     pub fn safe(mut self) -> Self {
-        let bad = |c: char| {
-            c.is_control()
-                || "<>:\"/\\|?*".contains(c)
-                || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
-                    | '\u{2066}'..='\u{2069}' | '\u{feff}')
-        };
+        let bad = |c: char| hidden(c) || "<>:\"/\\|?*".contains(c);
         let n: String = self.name.chars().filter(|c| !bad(*c)).collect();
         let n = n.trim_matches(|c| c == '.' || c == ' ');
         let stem = n.split('.').next().unwrap_or_default().to_uppercase();
@@ -268,5 +279,7 @@ mod file_tests {
         assert_eq!(f("COM1"), "_COM1");
         assert_eq!(f(" . "), "file");
         assert_eq!(f("notes.md"), "notes.md");
+        assert_eq!(super::name(" a\u{202e}dmin\u{200b} "), "admin");
+        assert_eq!(super::name(&"é".repeat(40)).len(), 64);
     }
 }

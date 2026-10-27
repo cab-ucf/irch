@@ -70,7 +70,11 @@ pub async fn initiate(
 }
 
 /// Serve one session, then let its last bytes land before we go.
+/// Sessions answered at once: past that, refused (a peer retries).
+static SESSIONS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(32);
+
 pub async fn respond(n: &Arc<Node>, c: &Connection) -> Result<()> {
+    let _turn = SESSIONS.try_acquire().map_err(|_| anyhow!("busy"))?;
     session(n, c).await?;
     let _ = tokio::time::timeout(Duration::from_secs(5), c.closed()).await;
     Ok(())
@@ -92,7 +96,10 @@ async fn session(n: &Arc<Node>, c: &Connection) -> Result<()> {
     write(&mut tx, &Some(mine)).await?;
     let keep = n.takes(&sp, &c.remote_id());
     let (mut want, mut have): (Vec<Id>, Vec<Id>) = (vec![], vec![]);
-    for (day, theirs) in read::<BTreeMap<u32, BTreeSet<Id>>>(&mut rx).await? {
+    // What they hold of the days that differ: 500,000 ids at most.
+    let days: BTreeMap<u32, BTreeSet<Id>> =
+        postcard::from_bytes(&unframe(&mut rx, 16 << 20).await?)?;
+    for (day, theirs) in days {
         let ours = sp.ids(day);
         let new = theirs.iter().filter(|i| ours.binary_search(i).is_err());
         want.extend(new.filter(|_| keep));

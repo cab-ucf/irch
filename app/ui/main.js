@@ -66,6 +66,7 @@ const ICONS = {
   userPlus: "M15 20v-1a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v1M9 11a3.5 3.5 0 1 0 " +
     "0-7 3.5 3.5 0 0 0 0 7M19 8v6M16 11h6",
   chat: "M4 5h16v11H8l-4 4z",
+  search: "M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14M21 21l-5-5",
   key: "M15 9a3 3 0 1 0 0-.01M12.5 11.5 4 20M7 17l2 2M9 15l2 2",
   phone: "M8 3h8v18H8zM11 18h2",
   disk: "M4 6h16v5H4zM4 13h16v5H4zM7 8.5h.01M7 15.5h.01",
@@ -125,10 +126,11 @@ const fmtDay = (ts) => {
   }
   return days.get(slot);
 };
-function toast(text, error) {
+function toast(text, error, ms = 3500) {
   const t = h("div", { class: "toast" + (error ? " error" : "") }, text);
   $("toasts").append(t);
-  setTimeout(() => t.remove(), 3500);
+  setTimeout(() => t.remove(), ms);
+  return t;
 }
 
 async function call(cmd, args) {
@@ -331,6 +333,12 @@ const badge = (n) =>
 /** One list, as weechat's: each space and its channels and threads,
  *  then direct messages. A space folds by its name. */
 function renderSidebar() {
+  // A phone in a space now has someone to hear from: Android is asked,
+  // once, to let irch run unrestricted (else, asleep, it cannot ring).
+  if (android && S.spaces.length && !store.get("askedBg")) {
+    store.set("askedBg", "1");
+    quiet(invoke("notify_check", { ask: "background" }));
+  }
   put($("server-header"), h("span", { class: "brand" }, "irch"),
     h("button", { title: "Add a space (create or join)", onclick: addSpace },
       icon("plus")));
@@ -423,7 +431,7 @@ t.id !== S.ch && badge(t.mentions),
 async function updates(quietly) {
   let v;
   try {
-    v = await invoke("update", { install: false });
+    v = await invoke("update");
   } catch (e) {
     return quietly || toast(`Could not check: ${e}`, true);
   }
@@ -437,10 +445,15 @@ async function updates(quietly) {
     foot(cancel(finish),
       h("button", { class: "btn", onclick: () => finish(true) }, "Update"))));
   if (!ok) return;
-  toast(`Downloading irch ${v}…`);
-  await invoke("update", { install: true })
-    .then((said) => said && toast(said))
-    .catch((e) => toast(`Update failed: ${e}`, true));
+  // A percentage, so a slow download never looks like nothing.
+  const t = toast(`Downloading irch ${v}…`, false, 6e5);
+  const progress = new T.core.Channel();
+  progress.onmessage = (p) => t.textContent = p < 100
+    ? `Downloading irch ${v}… ${p}%` : `Installing irch ${v}…`;
+  await invoke("upgrade", { progress })
+    .then((said) => said && toast(said, false, 1e4))
+    .catch((e) => toast(`Update failed: ${e}`, true, 1e4))
+    .finally(() => t.remove());
 }
 
 /** irch://open/SPACE/CHANNEL/MESSAGE, from a note: there, if we can;
@@ -449,7 +462,12 @@ async function updates(quietly) {
 async function openUrl(url) {
   const c = /^irch:\/\/(call|ring)\/([0-9a-f]{64})\/([0-9a-f]{16})$/
     .exec(url);
-  if (c) return c[1] === "call" ? answer(c[2], c[3]) : incoming(c[2], c[3]);
+  // Answering at once: only Android's own Answer button (MainActivity
+  // checks its token); any other link asks first.
+  if (c) {
+    return c[1] === "call" && android
+      ? answer(c[2], c[3]) : incoming(c[2], c[3]);
+  }
   if (!String(url).startsWith("irch://open/")) return;
   const [sid, ch, msg] = url.replace(/^irch:\/\/open\//, "").split("/");
   const s = S.spaces.find((x) => x.id === sid);
@@ -868,7 +886,7 @@ function render(tokens, root) {
 
 // Links are copied, never opened: irch opens nothing on its own.
 const link = (href) => h("span", { class: "link", title: `Copy ${href}`,
-  onclick: () => copy(href, "Link copied") });
+  onclick: () => copy(href, `Copied ${href}`) }); // where it goes, said
 
 function spoiler() {
   const s = h("span", { class: "spoiler", title: "Spoiler" });
@@ -1096,8 +1114,8 @@ async function offerFile(file) {
 
 /** Desktops: files chosen by path stay where they are (any size, no copy). */
 async function offerPaths() {
-  const paths = await T.dialog.open({ multiple: true }).catch(() => null);
-  for (const path of [paths ?? []].flat()) {
+  const paths = await invoke("pick").catch(() => []);
+  for (const path of paths) {
     toast(`Sharing ${path.split(/[\\/]/).pop()} from this device…`);
     const f = await call("offer", { path }).catch(() => null);
     if (f) S.files.push(f);
@@ -1640,12 +1658,7 @@ function settings() {
             onclick: () => copy(S.me.id, "ID copied") }, "Copy")),
         sw("Invisible", "Others see you offline; typing stays private.",
           S.me.invisible, (on) => setInvisible(on)),
-        android && h("p", { class: "note" }, S.me.push
-          ? "Notifications arrive while irch sleeps: whoever writes wakes " +
-            "this phone through your push app (a ping with nothing in it)."
-          : "To be notified while irch sleeps, install a UnifiedPush app " +
-            "(ntfy: on F-Droid, or on Google Play, which uses Google's " +
-            "connection and costs no battery), then reopen irch."),
+        android && notifyCheck(),
         h("label", {}, "Storage node"), storage,
         h("p", { class: "note" }, "Paste the code `irch --serve` prints " +
           "on an always-on machine: it keeps your spaces' ciphertext, " +
@@ -1654,6 +1667,9 @@ function settings() {
           class: "choice", onclick: () => { finish(null); linkDevice(); },
         }, icon("phone"), "Link a device"),
         h("button", {
+          class: "choice", onclick: () => { finish(null); profilesFlow(); },
+        }, icon("users"), "Profiles and signing out"),
+        h("button", {
           class: "choice", onclick: () => { finish(null); updates(false); },
         }, icon("down"), "Check for updates"),
         h("p", { class: "note" }, "Your identity is a key on your devices. " +
@@ -1661,6 +1677,80 @@ function settings() {
       foot(cancel(finish),
         h("button", { class: "btn", onclick: save }, "Save")));
   });
+}
+
+/** Profiles: other people (or other you) on this device, each with its
+ *  own identity, spaces and storage nodes; one at a time. */
+async function profilesFlow() {
+  const p = await invoke("profiles").catch(() => null);
+  if (!p) return;
+  const label = (n) => n || "First profile";
+  const go = await modal((finish) => h("div", {},
+    h("div", { class: "m-body" }, h("h2", {}, "Profiles"),
+      h("p", { class: "sub" }, "Each is someone of its own, as another " +
+        "device would be. Only the one in use is told of messages."),
+      ...p.all.map((n) => h("button", {
+        class: "choice", disabled: n === p.current,
+        onclick: () => finish({ use: n }),
+      }, icon("users"), n === p.current ? `${label(n)} (in use)` : label(n))),
+      h("button", { class: "choice", onclick: () => finish({ make: true }) },
+        icon("plus"), "New profile"),
+      h("button", { class: "choice", onclick: () => finish({ out: true }) },
+        icon("logout"), `Sign out of ${label(p.current)}`)),
+    foot(cancel(finish))));
+  if (!go) return;
+  let name = go.use;
+  if (go.make) {
+    name = await ask({ title: "New profile", label: "Its name",
+      placeholder: "Work", ok: "Create", maxLength: 32 });
+    if (!name) return;
+  }
+  if (go.out) {
+    const ok = await confirmBox({ title: `Sign out of ${label(p.current)}`,
+      sub: "This device forgets who you are here: your key, spaces and " +
+        "files on it. Your other devices keep everything; with none, it " +
+        "is gone for good. Link another device first to keep it.",
+      ok: "Sign out" });
+    if (!ok) return;
+  }
+  toast(go.out ? "Signing out…" : `Opening ${label(name)}…`);
+  try {
+    await (go.out ? invoke("sign_out") : invoke("use_profile", { name }));
+  } catch (e) {
+    return toast(String(e), true);
+  }
+  location.reload();
+}
+
+/** A phone in a pocket is told only if Android lets irch: what it allows
+ *  now, a way to allow the rest, and a test. */
+function notifyCheck() {
+  const box = h("div", { class: "checks" });
+  const draw = async (ask = "") => {
+    const a = await invoke("notify_check", { ask }).catch(() => null);
+    if (!a) return;
+    const row = (ok, text) => h("p", { class: "check" + (ok ? " ok" : "") },
+      ok ? "✓ " : "✗ ", text);
+    put(box, h("label", {}, "Notifications on this phone"),
+      row(a.notify, "irch may show notifications"),
+      row(a.background, "irch may run in the background (else, asleep " +
+        "in a pocket, Android cuts it off and it cannot ring)"),
+      h("p", { class: "note" }, a.push
+        ? `Whoever writes wakes it through ${a.push}: no battery to speak of.`
+        : "It stays connected, shown by a quiet notification. A " +
+          "UnifiedPush app such as ntfy costs less battery."),
+      h("div", { class: "row" },
+        !(a.notify && a.background) && h("button",
+          { class: "btn", onclick: () => draw("fix") }, "Allow"),
+        h("button", { class: "btn grey", onclick: () => draw("test") },
+          "Send a test notification")));
+    // Back from Android's settings: what they allow now.
+    document.addEventListener("visibilitychange", () =>
+      !document.hidden && box.isConnected && draw(),
+    { once: true });
+  };
+  draw();
+  return box;
 }
 
 async function linkDevice() {
@@ -1674,22 +1764,37 @@ async function linkDevice() {
 
 function quickSwitch() {
   const all = S.spaces.flatMap((s) => s.channels.map((ch) => ({ s, ch })));
+  // "@…": everyone in a space with us, to message (a DM, or a new one).
+  const dmWith = new Set(S.spaces.filter((s) => s.dm).map((s) => s.with));
+  let people = [], redraw = () => {};
+  Promise.all(S.spaces.filter((s) => !s.dm).map((s) =>
+    rpc("members", { space: s.id }).then((ms) => ms.map((m) => ({ s, m })),
+      () => []))).then((v) => {
+    const seen = new Set();
+    people = v.flat().filter(({ m }) => !isMe(m.id) &&
+      m.role !== "Banned" && !dmWith.has(m.id) &&
+      !seen.has(m.id) && seen.add(m.id));
+    redraw();
+  });
   modal((finish) => {
     const input = h("input",
       { type: "text", placeholder: "Where would you like to go?" });
     const list = h("div", { class: "qs-list" });
     let sel = 0;
     let hits = [];
-    const label = ({ s, ch }) => s.dm ? `@${s.name}` : ch.name;
+    const label = ({ s, ch, m }) =>
+      m ? `@${m.name}` : s.dm ? `@${s.name}` : ch.name;
     const draw = () => {
       const q = input.value.toLowerCase();
       const hit = (x) => `${label(x)} ${x.s.name}`.toLowerCase().includes(q);
-      hits = all.filter(hit).slice(0, 50);
+      const them = q.startsWith("@") ? people : [];
+      hits = [...all, ...them].filter(hit).slice(0, 50);
       sel = Math.min(sel, Math.max(0, hits.length - 1));
       list.replaceChildren(...hits.map((x, i) => h("button", {
         class: i === sel ? "sel" : "", onclick: () => finish(x),
-      }, icon(x.s.dm ? "chat" : "hash"), h("span", {}, label(x)),
-      h("small", {}, x.s.dm ? "" : x.s.name))));
+      }, x.m ? avatar(x.m.id, x.m.name, "xs", x.m.online)
+        : icon(x.s.dm ? "chat" : "hash"), h("span", {}, label(x)),
+      h("small", {}, x.m ? "message" : x.s.dm ? "" : x.s.name))));
     };
     input.addEventListener("input", () => { sel = 0; draw(); });
     input.addEventListener("keydown", (e) => {
@@ -1700,10 +1805,81 @@ function quickSwitch() {
         draw();
       } else if (e.key === "Enter" && hits[sel]) finish(hits[sel]);
     });
-    draw();
+    (redraw = draw)();
     return h("div", { class: "m-body" },
-      h("h2", {}, "Quick Switcher"), input, list);
-  }).then((x) => x && select(x.s.id, x.ch.id));
+      h("h2", {}, "Quick Switcher"),
+      h("p", { class: "sub" }, "Channels and DMs; @ for anyone to message."),
+      input, list);
+  }).then(async (x) => {
+    if (!x?.m) return x && select(x.s.id, x.ch.id);
+    const id = await call("dm", { space: x.s.id, user: x.m.id })
+      .catch(() => null);
+    if (id) await open(id);
+  });
+}
+
+/** Messages with every word: here (this room or channel, its threads
+ *  too), in this space, or everywhere. On this device: nothing is asked
+ *  of anyone. */
+function searchFlow(scope = inThread() || chan() ? "room" : "space") {
+  const s = cur();
+  modal((finish) => {
+    const input = h("input", { type: "text", placeholder: "Search" });
+    const list = h("div", { class: "qs-list search" });
+    const scopes = [["room", inThread() ? "This thread"
+      : s?.dm ? "This conversation" : "This channel"],
+    ["space", "This space"], ["all", "Everywhere"]]
+      .filter(([k]) => k === "all" || (s && (k !== "room" || S.ch)));
+    const chips = h("div", { class: "chips" });
+    let hits = [], sel = 0, timer;
+    const where = (r) => {
+      const sp = S.spaces.find((x) => x.id === r.space);
+      const ch = sp?.channels.find((c) => c.id === r.channel);
+      const t = sp?.channels.flatMap((c) => c.threads)
+        .find((x) => x.id === r.channel);
+      return sp?.dm ? `@${sp.name}` : `${ch ? "#" + ch.name
+        : t ? "↳ " + t.name : "a thread"} · ${sp?.name ?? ""}`;
+    };
+    const draw = () => {
+      put(chips, scopes.map(([k, t]) => h("button", {
+        class: "chip" + (k === scope ? " on" : ""),
+        onclick: () => { scope = k; run(); input.focus(); },
+      }, t)));
+      list.replaceChildren(...hits.map((r, i) => h("button", {
+        class: i === sel ? "sel" : "", onclick: () => finish(r),
+      }, h("div", {}, h("b", {}, r.message.name), " ",
+        h("small", {}, `${where(r)} · ${fmtDay(r.message.ts)}`),
+        h("p", {}, r.message.text.slice(0, 200) ||
+          r.message.files.map((f) => f.name).join(", "))))));
+      if (input.value.trim() && !hits.length) {
+        list.append(h("p", { class: "note" }, "Nothing found."));
+      }
+    };
+    const run = () => {
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
+        const query = input.value.trim();
+        const args = { query, space: scope === "all" ? null : s?.id,
+          room: scope === "room" ? S.ch : null };
+        hits = query ? await rpc("search", args).catch(() => []) : [];
+        sel = 0;
+        draw();
+      }, 150);
+    };
+    input.addEventListener("input", run);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const d = e.key === "ArrowDown" ? 1 : -1;
+        sel = (sel + d + hits.length) % Math.max(1, hits.length);
+        draw();
+      } else if (e.key === "Enter" && hits[sel]) finish(hits[sel]);
+    });
+    draw();
+    return h("div", { class: "m-body" }, h("h2", {}, "Search"), input,
+      chips, list);
+  }).then((r) => r &&
+    openUrl(`irch://open/${r.space}/${r.channel}/${r.message.id}`));
 }
 
 // ---------- actions ----------
@@ -1841,6 +2017,49 @@ function insert(t, text) {
   autosize(t);
 }
 
+/** "@" in the composer: who is here, by name, as one types; ↑/↓ and Tab
+ *  or Enter pick, Esc closes. */
+function mentionPicker(input) {
+  const pop = h("div", { class: "qs-list mentions hidden" });
+  $("composer").prepend(pop);
+  let picks = [], at = 0;
+  const token = () => /(^|\s)@([^\s@]*)$/
+    .exec(input.value.slice(0, input.selectionStart));
+  const close = () => { picks = []; pop.classList.add("hidden"); };
+  const pick = (m) => {
+    const end = input.selectionStart;
+    input.setRangeText(`@${m.name} `, end - token()[2].length - 1, end, "end");
+    close();
+    autosize(input);
+    input.focus({ preventScroll: true });
+  };
+  const draw = () => {
+    const q = token()?.[2].toLowerCase();
+    picks = q == null ? [] : S.members.filter((m) => !isMe(m.id) &&
+      m.role !== "Banned" && m.name.toLowerCase().startsWith(q)).slice(0, 8);
+    at = Math.min(at, Math.max(0, picks.length - 1));
+    pop.classList.toggle("hidden", !picks.length);
+    put(pop, picks.map((m, i) => h("button", {
+      class: i === at ? "sel" : "",
+      onmousedown: (e) => { e.preventDefault(); pick(m); },
+    }, avatar(m.id, m.name, "xs", m.online), h("span", {}, m.name))));
+  };
+  input.addEventListener("input", () => { at = 0; draw(); });
+  input.addEventListener("blur", close);
+  // Before the composer's own keys: Enter picks here, not sends.
+  input.addEventListener("keydown", (e) => {
+    if (!picks.length) return;
+    const step = { ArrowDown: 1, ArrowUp: -1 }[e.key];
+    if (step) at = (at + step + picks.length) % picks.length;
+    else if (e.key === "Tab" || e.key === "Enter") pick(picks[at]);
+    else if (e.key === "Escape") close();
+    else return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (step) draw();
+  }, true);
+}
+
 /** The composer's commands, as the terminal's: /nick, /join, /dm, ... */
 const SLASH = {
   nick: async (name) => {
@@ -1871,6 +2090,7 @@ const SLASH = {
   leave: () => leaveSpace(),
   notes: () => S.msgs.at(-1) && toNotes(S.msgs.at(-1)),
   help: () => keysHelp(),
+  search: () => searchFlow(),
 };
 
 const say = (text) => {
@@ -1887,7 +2107,8 @@ const KEYS = [
   ["r", "reply"], ["t", "reply in its thread"], ["e", "edit (yours)"],
   ["dd", "delete"], ["y", "copy its text"], ["+", "react"],
   ["n", "add to notes"], ["i, a, Enter", "back to typing"],
-  ["Ctrl+K", "jump to a channel or DM"], ["Alt+↑/↓", "previous / next channel"],
+  ["Ctrl+K", "jump to a channel or DM; @ for anyone to message"],
+  ["Ctrl+F", "search"], ["Alt+↑/↓", "previous / next channel"],
   ["/nick, /join, /dm, /me, /shrug, /thread, /invite, /leave, /notes",
     "in the composer"],
 ];
@@ -1978,6 +2199,8 @@ function wire() {
   $("menu-btn").append(icon("menu"));
   $("menu-btn").onclick = () => document.body.classList.toggle("drawer");
   $("members-btn").append(icon("users"));
+  $("search-btn").append(icon("search"));
+  $("search-btn").onclick = () => searchFlow();
   $("call-btn").onclick = ring;
   av.call.changed = renderCall;
   // Tiles follow who speaks and whose video still arrives.
@@ -2059,6 +2282,7 @@ function wire() {
   };
 
   const input = $("input");
+  mentionPicker(input);
   input.addEventListener("input", () => {
     autosize(input);
     const s = cur();
@@ -2093,6 +2317,9 @@ function wire() {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
       e.preventDefault();
       quickSwitch();
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+      e.preventDefault();
+      searchFlow();
     } else if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
       e.preventDefault();
       stepChannel(e.key === "ArrowDown" ? 1 : -1);

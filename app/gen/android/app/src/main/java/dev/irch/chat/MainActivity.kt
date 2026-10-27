@@ -1,5 +1,6 @@
 package dev.irch.chat
 
+import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
 import android.view.View
@@ -16,6 +17,7 @@ class MainActivity : TauriActivity() {
     val bars = SystemBarStyle.dark(Color.TRANSPARENT)
     enableEdgeToEdge(bars, bars)
     Wake.release() // a push may have started irch without us: our turn
+    answerable(intent)
     super.onCreate(savedInstanceState)
     // Edge to edge, the page would sit under the status and navigation bars,
     // cutouts and the keyboard: inset the web view's frame by all of them.
@@ -29,6 +31,11 @@ class MainActivity : TauriActivity() {
       view.setPadding(i.left, i.top, i.right, i.bottom)
       WindowInsetsCompat.CONSUMED
     }
+  }
+
+  override fun onNewIntent(intent: Intent) {
+    answerable(intent)
+    super.onNewIntent(intent)
   }
 
   // Back closes what the page has open (dialog, menu, drawer). With nothing

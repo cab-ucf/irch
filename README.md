@@ -35,18 +35,31 @@ System Settings → Privacy & Security, never `xattr`.
 
 ### NixOS
 
+A flake (`/etc/nixos/flake.nix`):
+
 ```nix
-imports = [ "${builtins.fetchTarball
-  "https://github.com/cab-ucf/irch/archive/main.tar.gz"}/nixos.nix" ];
+inputs.irch.url = "github:cab-ucf/irch";
+inputs.irch.inputs.nixpkgs.follows = "nixpkgs";
+# outputs: in nixpkgs.lib.nixosSystem { modules = [ … ]; }
+inputs.irch.nixosModules.default
+```
+
+(In a module's `imports` instead, `inputs` must come through
+`specialArgs = { inherit inputs; };`, or Nix recurses forever.)
+
+Without flakes: `imports = [ "${builtins.fetchTarball
+"https://github.com/cab-ucf/irch/archive/main.tar.gz"}/nixos.nix" ];`.
+Then:
+
+```nix
 programs.irch.enable = true;      # the app, and `irch` in a terminal
 services.irch.enable = true;      # a storage node, always on
 services.irch.users = [ "you" ];  # your irch pairs with it in one step
 ```
 
-(Flakes: `irch.nixosModules.default`, and `packages.<system>.irch`.)
 Hourly, a service fetches the newest release's source, checks it against
 irch's signing key, and builds it with Nix as its own user; the app and
-the node switch to that build.
+the node switch to that build (`packages.<system>.irch` is the flake's).
 
 ### From source
 
@@ -100,7 +113,10 @@ disk   : one append-only log of envs per space; nothing else to migrate
   from a 32-byte seed; every device keeps its own network key. A private
   space only you can read records what you joined and left, so linked
   devices follow each other. `/link` (My Account › Link a device) shows
-  the code.
+  the code. Profiles (My Account › Profiles and signing out) are others
+  on the same device, each with its own seed, spaces and storage nodes,
+  one at a time; signing out forgets one's seed here (link another
+  device first, or it is gone).
 - **Storage nodes keep ciphertext, never keys.** `irch --serve` on a NAS
   or a VPS prints a code; give it to irch (`/store CODE`, or My Account)
   and it keeps your private space, so a new device can link while your
@@ -153,8 +169,11 @@ Invites carry your relay address, not your IP, whenever a relay is known.
 
 ## A server
 
-An always-on member's desktop keeps the spaces it is in synced, but it can
-read them and covers only those. A storage node (`irch --serve`) keeps
+The app lives in the tray (where the desktop has one): closing its
+window leaves it there, still told of messages and calls, and it starts
+at login, in the tray (its menu's "Start at login"; on NixOS,
+`programs.irch.autostart`). An always-on member's desktop keeps the
+spaces it is in synced, but it can read them and covers only those. A storage node (`irch --serve`) keeps
 the spaces its users choose, ciphertext only. `irch --install` keeps one
 running as you (systemd for your user, a LaunchAgent, a scheduled task),
 at login, or at boot where Linux allows lingering; `--uninstall` stops
@@ -162,8 +181,8 @@ it. Its code waits in your data directory, so irch on the same computer
 pairs with it in one click: a space's Storage Nodes, "this computer's"
 (`/store local` in the terminal). On NixOS `services.irch.enable` runs
 one as its own user, and its code waits in `/run/irch/code` for the
-users listed in `services.irch.users`; `journalctl -u irch | grep -A1
-'Storage code'` prints the code to hand out.
+users listed in `services.irch.users` (`sudo cat /run/irch/code` shows
+it, to hand out; it is never logged).
 
 ## Updates
 
@@ -181,7 +200,7 @@ Windows and updates an older irch to it.
 ## Using it
 
 Terminal: `/create NAME`, `/join CODE`, `/invite`, `/channel NAME`,
-`/reply TEXT`, `/thread TEXT`, `/room NAME`, `/react EMOJI`, `/edit TEXT`, `/delete`,
+`/reply TEXT`, `/thread TEXT`, `/room NAME`, `/search WORDS`, `/react EMOJI`, `/edit TEXT`, `/delete`,
 `/dm USER`, `/ban USER`, `/rekey`, `/file PATH`, `/share PATH`, `/save`, `/link`,
 `/store CODE|local|here`, `/note [FILE]`, `/todo [FILE]`, `/invisible`,
 `/help`.
@@ -200,7 +219,11 @@ chat, IRC-dense rows (time, nick, text), members on request. `+` creates
 or joins a space; the paperclip, a drop or a paste attaches files, and a
 file's name previews it (images, audio, video, PDFs, highlighted text);
 hover a message to react, reply, edit or delete; click a member to
-message, call, ban or promote them. The arrow on a message replies in
+message, call, ban or promote them; `@` in a message offers who is
+here. The magnifier (Ctrl+F) searches this room or channel (with its
+threads), this space, or everywhere: on this device, which holds the
+history decrypted, so nobody else is asked. Ctrl+K jumps to a channel
+or DM, and `@name` there to anyone to message. The arrow on a message replies in
 its thread, listed under its channel; a channel's `+` opens a named room
 (a thread before anyone replies), and its pencil renames it. The phone
 in a channel's header joins its group call, the one on a DM rings that
@@ -221,21 +244,23 @@ message. On phones, swipe right for channels and left for members; Back
 closes the topmost thing (a thread returns to its channel), then sends
 irch to the background.
 
-Phones sleep: holding iroh connections open would wake the radio every
-few seconds. Instead, whoever writes wakes the others: a phone with a
-UnifiedPush app ([ntfy](https://ntfy.sh): from F-Droid, or from Google
-Play on ntfy.sh, which rides Google's own connection at no battery cost)
-tells its spaces, sealed like any op, where to reach it; the writer's
-device sends that address a ping with nothing in it (at most every 30 s),
-and the phone wakes for a few seconds, fetches from the writer over iroh,
-and notifies. Push servers learn only that a ping went to an address.
-Starting a call wakes the others the same way, and anyone in it says so
-at once to a device that comes back. With no push app, irch stays
-connected instead (a quiet "Connected for messages and calls"
-notification, from boot on): every message and call arrives, at a cost
-in battery that ntfy avoids. With one, out of sight for a minute (and in
-no call), the node stops altogether; phones skip the Mainline DHT
-(relays and n0's DNS find peers for them).
+Phones sleep: an iroh connection held open sends a keepalive every few
+seconds, so out of sight (and in no call) a phone's node stops
+altogether, and whoever writes wakes it. With no push app, nothing to
+install, no server and no router: irch keeps a doorbell, an iroh
+endpoint of its own with no connection open (a quiet "Connected for
+messages and calls" notification, from boot on); iroh's link to its
+relay, a few bytes every 15 s, is all it sends. Its spaces are told,
+sealed like any op, where it is and a secret; a writer's device rings it
+over iroh (at most every 2 s), and it wakes for a few seconds, fetches
+over iroh, and notifies. With a UnifiedPush app
+([ntfy](https://ntfy.sh): from F-Droid, or from Google Play on ntfy.sh,
+which rides Google's own connection at no battery cost) irch keeps no
+doorbell: the writer's device sends that app's address a ping with
+nothing in it (at most every 30 s); push servers learn only that a ping
+went to an address. Starting a call wakes the others the same way, and
+anyone in it says so at once to a device that comes back. Phones skip
+the Mainline DHT (relays and n0's DNS find peers for them).
 
 Notes: the bookmark on a message adds it (or its whole thread) to your
 notes as a task, with an optional due date, or as a quote: plain Markdown

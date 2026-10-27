@@ -19,6 +19,8 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import androidx.activity.result.ActivityResult
+import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
@@ -27,6 +29,11 @@ import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import org.unifiedpush.android.connector.UnifiedPush
+
+@InvokeArg
+class UrlArgs {
+  var url = ""
+}
 
 @InvokeArg
 class WatchArgs {
@@ -61,10 +68,60 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
       ActivityCompat.requestPermissions(activity, arrayOf(POST_NOTIFICATIONS), 1)
     }
     // A push app wakes irch for almost no battery; without one, a service
-    // keeps it running, or messages and calls would wait for it.
+    // keeps irch's doorbell, which whoever writes rings over iroh.
     UnifiedPush.tryUseCurrentOrDefaultDistributor(activity) { ok ->
       if (ok) UnifiedPush.register(activity) else live(activity)
     }
+  }
+
+  /** Doze lets an optimized app neither keep its connection nor start
+   *  from a push: what reaches a phone in a pocket depends on this. */
+  private fun unrestrict() = runCatching {
+    val uri = android.net.Uri.parse("package:" + activity.packageName)
+    activity.startActivity(Intent(
+      android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, uri
+    ))
+  }
+
+  /** What decides whether this phone is told: as My Account shows it. */
+  @Command
+  fun alerts(invoke: Invoke) {
+    val push = UnifiedPush.getAckDistributor(activity)
+    val label = push?.let {
+      runCatching {
+        val pm = activity.packageManager
+        pm.getApplicationLabel(pm.getApplicationInfo(it, 0)).toString()
+      }.getOrDefault(it)
+    }
+    invoke.resolve(JSObject()
+      .put("notify", notificationsAllowed(activity))
+      .put("background", unrestricted(activity))
+      .put("push", label))
+  }
+
+  /** Ask for what is missing: notifications, then running unrestricted. */
+  @Command
+  fun allowAlerts(invoke: Invoke) {
+    if (!notificationsAllowed(activity)) {
+      val i = Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+        .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE,
+          activity.packageName)
+      activity.startActivity(i)
+    } else if (!unrestricted(activity)) unrestrict()
+    invoke.resolve()
+  }
+
+  /** Once there is someone to hear from (the page asks, once). */
+  @Command
+  fun askBackground(invoke: Invoke) {
+    if (!unrestricted(activity)) unrestrict()
+    invoke.resolve()
+  }
+
+  @Command
+  fun testAlert(invoke: Invoke) {
+    postMessage(activity, "test", "irch", "Notifications reach this phone.")
+    invoke.resolve()
   }
 
   /**
@@ -122,20 +179,29 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
 
   /**
    * A newer irch (downloaded by the Rust side) to Android's installer,
-   * which takes it only if signed with the same key as this one.
+   * which takes it only if signed with the same key as this one. The first
+   * time, Android asks whether irch may install apps; allowed, it goes on.
    */
   @Command
   fun install(invoke: Invoke) {
-    val ok = Build.VERSION.SDK_INT < 26 ||
-      activity.packageManager.canRequestPackageInstalls()
-    if (!ok) {
-      val uri = android.net.Uri.parse("package:" + activity.packageName)
-      val allow = Intent(
-        android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, uri
-      )
-      activity.startActivity(allow)
-      return invoke.reject("allow irch to install updates, then try again")
-    }
+    if (Build.VERSION.SDK_INT < 26 || mayInstall()) return installer(invoke)
+    val uri = android.net.Uri.parse("package:" + activity.packageName)
+    val allow = Intent(
+      android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, uri
+    )
+    startActivityForResult(invoke, allow, "allowed")
+  }
+
+  @ActivityCallback
+  fun allowed(invoke: Invoke, result: ActivityResult) {
+    if (mayInstall()) installer(invoke)
+    else invoke.reject("irch was not allowed to install apps")
+  }
+
+  private fun mayInstall() =
+    activity.packageManager.canRequestPackageInstalls()
+
+  private fun installer(invoke: Invoke) {
     val file = java.io.File(invoke.parseArgs(FileArgs::class.java).path)
     val authority = activity.packageName + ".fileprovider"
     val uri = FileProvider.getUriForFile(activity, authority, file)
@@ -143,6 +209,15 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     val i = Intent(Intent.ACTION_VIEW).setDataAndType(uri, apk)
       .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     activity.startActivity(i)
+    invoke.resolve()
+  }
+
+  /** A page in the browser: the APK, when installing it here failed. */
+  @Command
+  fun browse(invoke: Invoke) {
+    val url = invoke.parseArgs(UrlArgs::class.java).url
+    val i = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url))
+    activity.startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     invoke.resolve()
   }
 
@@ -161,6 +236,10 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     invoke.resolve()
   }
 }
+
+fun unrestricted(ctx: Context) =
+  ctx.getSystemService(android.os.PowerManager::class.java)
+    .isIgnoringBatteryOptimizations(ctx.packageName)
 
 fun notificationsAllowed(ctx: Context) = Build.VERSION.SDK_INT < 33 ||
   ContextCompat.checkSelfPermission(ctx, POST_NOTIFICATIONS) ==

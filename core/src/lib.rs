@@ -12,6 +12,7 @@ pub mod release;
 pub mod state;
 mod store;
 mod sync;
+pub mod wake;
 
 pub use node::{Config, Event, Level, Net, Node, Notice, http};
 pub use op::{File, Invite, Op, Role};
@@ -80,13 +81,39 @@ impl Id {
 /// it, or nixos.nix for the local users it names (`IRCH_CODE_FILE`, else
 /// `/run/irch/code`).
 pub fn local_storage() -> Option<String> {
-    let p = std::env::var_os("IRCH_CODE_FILE");
-    let p = p.map_or("/run/irch/code".into(), std::path::PathBuf::from);
+    // /run is root's on Linux; elsewhere (C:\\run) anyone could plant one.
+    let run = cfg!(target_os = "linux").then(|| "/run/irch/code".into());
+    let p = std::env::var_os("IRCH_CODE_FILE").map(Into::into).or(run);
     let mine = dirs::data_dir().map(|d| d.join("irch-serve").join("code"));
     let read = |p| std::fs::read_to_string(p).ok();
-    let code = read(p).or_else(|| mine.and_then(read))?.trim().to_string();
+    let code = p.and_then(read).or_else(|| mine.and_then(read))?;
+    let code = code.trim().to_string();
     (!code.is_empty()).then_some(code)
 }
+
+/// The profile in use under `root`: its own folder, or `root` itself for
+/// the first (all there was before profiles).
+pub fn profile(root: &std::path::Path) -> std::path::PathBuf {
+    let n = std::fs::read_to_string(root.join("profile")).unwrap_or_default();
+    match n.trim() {
+        "" => root.into(),
+        n => root.join("profiles").join(n),
+    }
+}
+
+/// A person's files in a profile's folder: what signing out takes away.
+pub const MINE: [&str; 10] = [
+    "seed",
+    "device",
+    "local",
+    "prefs",
+    "spaces",
+    "files",
+    "blobs",
+    "offered",
+    "wake.json",
+    "irch.log",
+];
 
 /// Unix time in milliseconds.
 pub fn now() -> u64 {

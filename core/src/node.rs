@@ -151,9 +151,17 @@ struct Book {
     parked: usize,
     // Per epoch, the older keys its holders learn through `Back`.
     backs: HashMap<[u8; 8], Vec<[u8; 8]>>,
+    // Keys handed on (`Back`) or boxed to us (`Rekey`), by whom, where,
+    // under which epoch: learned once that is an admin whose op stands
+    // (maybe only after more history opens).
+    offered: Vec<Offered>,
     st: State,
     knocks: Vec<Invite>,
 }
+
+/// A key someone offered: who, where, under which epoch, and whether it
+/// was handed on (`Back`) or boxed to us (`Rekey`).
+type Offered = (Id, (u64, Id), [u8; 8], Key, bool);
 
 /// Where an envelope is: in the log (checked once, or not yet), or only
 /// in memory until it opens and checks out (ours need no check).
@@ -180,7 +188,18 @@ impl Book {
     fn new(log: Log, st: State) -> Self {
         let (idx, at, keys) = (BTreeMap::new(), HashMap::new(), HashMap::new());
         let (pending, backs, knocks) = (HashMap::new(), HashMap::new(), vec![]);
-        Self { log, idx, at, keys, pending, parked: 0, backs, st, knocks }
+        Self {
+            log,
+            idx,
+            at,
+            keys,
+            pending,
+            parked: 0,
+            backs,
+            offered: vec![],
+            st,
+            knocks,
+        }
     }
 
     fn has(&self, i: &Id) -> bool {
@@ -222,62 +241,91 @@ impl Book {
         mut work: Vec<(Id, Env, Src)>,
     ) -> usize {
         let (mut ops, mut kept) = (vec![], 0);
-        while let Some((i, e, src)) = work.pop() {
-            let Some(&key) = self.keys.get(&e.epoch) else {
-                self.park(i, e, src);
-                continue;
-            };
-            let trusted = matches!(src, Src::Log(true) | Src::Net(_, true));
-            let Some(s) = op::open(sp, &key, &e, !trusted) else { continue };
-            if let Src::Net(raw, ours) = &src {
-                if !self.store(i, e.ts, raw, true, *ours) {
+        loop {
+            while let Some((i, e, src)) = work.pop() {
+                let Some(&key) = self.keys.get(&e.epoch) else {
+                    self.park(i, e, src);
+                    continue;
+                };
+                let trusted = matches!(src, Src::Log(true) | Src::Net(_, true));
+                let Some(s) = op::open(sp, &key, &e, !trusted) else {
+                    continue;
+                };
+                // Banned, or under a key they were cut off from: dropped
+                // (it would only be hidden, and fill every member's disk).
+                let at = (s.ts, s.id);
+                if self.st.role(&s.author) == Role::Banned
+                    || self.st.stale(&e.epoch, &at, &s.author)
+                {
                     continue;
                 }
-                kept += 1;
+                if let Src::Net(raw, ours) = &src {
+                    if !self.store(i, e.ts, raw, true, *ours) {
+                        continue;
+                    }
+                    kept += 1;
+                }
+                let key = match &s.op {
+                    Op::Rekey { epoch, boxes } => boxes
+                        .iter()
+                        .find(|b| b.0 == me.id())
+                        .and_then(|b| {
+                            kem_open(&me.kem, &rekey_aad(sp, epoch), &b.1)
+                        })
+                        .and_then(|k| Key::try_from(k).ok())
+                        .filter(|k| tag(k) == *epoch)
+                        .map(|k| (k, false)),
+                    Op::Back { key } => Some((*key, true)),
+                    Op::Knock { .. }
+                        if self.st.role(&s.author) == Role::Banned
+                            || self.st.stale(
+                                &e.epoch,
+                                &(s.ts, s.id),
+                                &s.author,
+                            ) =>
+                    {
+                        None
+                    }
+                    Op::Knock { sealed } => {
+                        let inv = kem_open(&me.kem, &sp.0, sealed);
+                        let inv = inv.and_then(|b| {
+                            postcard::from_bytes::<Invite>(&b).ok()
+                        });
+                        self.knocks.extend(inv.filter(|i| {
+                            i.dm == Some(me.id()) && i.owner == s.author
+                        }));
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some((k, back)) = key {
+                    if self.offered.len() >= 1024 {
+                        self.offered.remove(0);
+                    }
+                    self.offered.push((s.author, at, e.epoch, k, back));
+                }
+                ops.push(s);
             }
-            let key = match &s.op {
-                Op::Rekey { epoch, boxes } => boxes
-                    .iter()
-                    .find(|b| b.0 == me.id())
-                    .and_then(|b| {
-                        kem_open(&me.kem, &rekey_aad(sp, epoch), &b.1)
-                    })
-                    .and_then(|k| Key::try_from(k).ok())
-                    .filter(|k| tag(k) == *epoch),
-                Op::Back { key } => {
-                    self.backs.entry(e.epoch).or_default().push(tag(key));
-                    Some(*key)
+            self.st.extend(std::mem::take(&mut ops));
+            let st = &self.st;
+            let good =
+                |(a, at, ep, ..): &(Id, (u64, Id), [u8; 8], Key, bool)| {
+                    st.role(a) == Role::Admin && !st.stale(ep, at, a)
+                };
+            let good: Vec<_> =
+                self.offered.extract_if(.., |o| good(o)).collect();
+            for (_, _, under, k, back) in good {
+                if back {
+                    self.backs.entry(under).or_default().push(tag(&k));
                 }
-                Op::Knock { .. }
-                    if self.st.role(&s.author) == Role::Banned
-                        || self.st.stale(
-                            &e.epoch,
-                            &(s.ts, s.id),
-                            &s.author,
-                        ) =>
-                {
-                    None
+                if self.keys.insert(tag(&k), k).is_none() {
+                    work.extend(self.unpark(&tag(&k)));
                 }
-                Op::Knock { sealed } => {
-                    let inv = kem_open(&me.kem, &sp.0, sealed);
-                    let inv = inv
-                        .and_then(|b| postcard::from_bytes::<Invite>(&b).ok());
-                    self.knocks.extend(inv.filter(|i| {
-                        i.dm == Some(me.id()) && i.owner == s.author
-                    }));
-                    None
-                }
-                _ => None,
-            };
-            if let Some(k) = key
-                && self.keys.insert(tag(&k), k).is_none()
-            {
-                work.extend(self.unpark(&tag(&k)));
             }
-            ops.push(s);
+            if work.is_empty() {
+                return kept;
+            }
         }
-        self.st.extend(ops);
-        kept
     }
 
     fn park(&mut self, i: Id, e: Env, src: Src) {
@@ -286,7 +334,8 @@ impl Book {
                 self.pending.retain(|_, (_, s)| matches!(s, Src::Log(_)));
                 self.parked = 0;
             }
-            self.parked += raw.len();
+            // What it costs here, not just its size: a map entry too.
+            self.parked += raw.len() + 256;
         }
         self.pending.insert(i, (e, src));
     }
@@ -296,7 +345,7 @@ impl Book {
         let v: Vec<_> = out.map(|(i, (e, s))| (i, e, s)).collect();
         for (_, _, s) in &v {
             if let Src::Net(raw, _) = s {
-                self.parked -= raw.len();
+                self.parked -= raw.len() + 256;
             }
         }
         v
@@ -402,7 +451,7 @@ pub struct Node {
     wake: Mutex<HashMap<String, (Option<Instant>, bool)>>,
     // Calls notified about (space, caller, channel), while they last.
     rang: Mutex<HashSet<(Id, Id, Ch)>>,
-    http: OnceLock<reqwest::Client>,
+    push: OnceLock<reqwest::Client>,
     name: Mutex<String>,
     events: broadcast::Sender<Event>,
     clock: AtomicU64,
@@ -412,6 +461,53 @@ pub struct Node {
     files: Option<FsStore>,
     call: Mutex<Option<Call>>,
     media: call::Media,
+}
+
+/// Public addresses first: a phone tries them in turn.
+/// Reachable from anywhere, as far as its address says (not a LAN's, nor
+/// a carrier's shared 100.64/10).
+fn public(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(a) => {
+            let o = a.octets();
+            !(a.is_private()
+                || a.is_loopback()
+                || a.is_link_local()
+                || a.is_unspecified()
+                || (o[0] == 100 && o[1] & 0xc0 == 64))
+        }
+        std::net::IpAddr::V6(a) => {
+            !(a.is_loopback()
+                || a.is_unspecified()
+                || (a.segments()[0] & 0xfe00) == 0xfc00
+                || (a.segments()[0] & 0xffc0) == 0xfe80)
+        }
+    }
+}
+
+/// An endpoint as `net` says: which relays, and how peers are found.
+pub(crate) fn endpoint(net: &Net) -> iroh::endpoint::Builder {
+    let b = match net {
+        Net::Default => Endpoint::builder(presets::N0).relay_mode(
+            RelayMode::custom(RELAYS.map(|r| r.parse().expect("relay url"))),
+        ),
+        Net::Relay(urls) => Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::custom(urls.clone())),
+        Net::Lan => Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .address_lookup(
+                iroh_mdns_address_lookup::MdnsAddressLookup::builder(),
+            ),
+        Net::Direct => {
+            Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled)
+        }
+    };
+    // Through a network's proxy, if it has one, trusting what the system
+    // trusts (desktops): relays, as any other https.
+    let b = b.proxy_from_env();
+    #[cfg(not(target_os = "android"))]
+    let b = b.ca_tls_config(iroh::tls::CaTlsConfig::system());
+    b
 }
 
 /// Serves sync and blobs; the ALPN says which.
@@ -515,20 +611,8 @@ impl Node {
         local.peers.values().for_each(|a| lookup.add_endpoint_info(a.clone()));
         let bind = async |port: u16| {
             let b = match &cfg.net {
-                Net::Default => dht(Endpoint::builder(presets::N0).relay_mode(
-                    RelayMode::custom(
-                        RELAYS.map(|r| r.parse().expect("relay url")),
-                    ),
-                )),
-                Net::Relay(urls) => dht(Endpoint::builder(presets::Minimal)
-                    .relay_mode(RelayMode::custom(urls.clone()))),
-                Net::Lan => Endpoint::builder(presets::Minimal)
-                    .relay_mode(RelayMode::Disabled)
-                    .address_lookup(
-                        iroh_mdns_address_lookup::MdnsAddressLookup::builder(),
-                    ),
-                Net::Direct => Endpoint::builder(presets::Minimal)
-                    .relay_mode(RelayMode::Disabled),
+                Net::Default | Net::Relay(_) => dht(endpoint(&cfg.net)),
+                _ => endpoint(&cfg.net),
             };
             let v6 = BindOpts::default().set_is_required(false);
             let b = b.secret_key(dev.clone()).address_lookup(lookup.clone());
@@ -576,14 +660,14 @@ impl Node {
             prefs: Mutex::new(prefs),
             wake: Mutex::default(),
             rang: Mutex::default(),
-            http: OnceLock::new(),
+            push: OnceLock::new(),
             name: Mutex::new(cfg.name),
             events: broadcast::channel(1024).0,
             clock: AtomicU64::new(0),
             serve,
             files,
             call: Mutex::new(None),
-            media: broadcast::channel(512).0,
+            media: broadcast::channel(128).0,
         });
         let mut router = Router::builder(n.ep.clone());
         if let Some(f) = &n.files {
@@ -781,19 +865,18 @@ impl Node {
     fn wake(self: &Arc<Self>, id: &Id) {
         let dev = self.ep.id();
         let urls = self.view(id, |s| s.pushes()).unwrap_or_default();
-        // https only (a member names the URL: never our LAN); tests, local.
-        let ok = |u: &String| {
-            u.starts_with("https://")
-                || cfg!(debug_assertions) && u.starts_with("http://127.0.0.1:")
-        };
-        for (_, url) in urls.into_iter().filter(|u| u.0 != dev && ok(&u.1)) {
+        for (_, url) in
+            urls.into_iter().filter(|u| u.0 != dev && pushable(&u.1))
+        {
             let wait = {
                 let mut w = lock(&self.wake);
                 let (last, held) =
                     w.entry(url.clone()).or_insert((None, false));
                 let since =
                     last.map_or(Duration::MAX, |t: Instant| t.elapsed());
-                let wait = Duration::from_secs(30).saturating_sub(since);
+                // A push service is spared; our own servers are not.
+                let gap = if url.starts_with("irch:wake:") { 2 } else { 30 };
+                let wait = Duration::from_secs(gap).saturating_sub(since);
                 match (wait.is_zero(), *held) {
                     (_, true) => continue,
                     (true, _) => *last = Some(Instant::now()),
@@ -809,8 +892,15 @@ impl Node {
                     lock(&n.wake)
                         .insert(url.clone(), (Some(Instant::now()), false));
                 }
-                let http = n.http.get_or_init(http);
-                let r = http.post(&url).header("TTL", "86400");
+                if url.starts_with("irch:wake:") {
+                    if let Err(e) = crate::wake::ring(&n.ep, &url).await {
+                        warn!("wake: {e:#}");
+                    }
+                    return;
+                }
+                let local = url.starts_with("http://").then(http);
+                let c = local.as_ref().unwrap_or(n.push.get_or_init(push_http));
+                let r = c.post(&url).header("TTL", "86400");
                 let r = r.header("Urgency", "high").body("1").send().await;
                 if let Err(e) = r {
                     warn!("push: {e}");
@@ -1067,10 +1157,17 @@ impl Node {
             let fix = admin && b.st.dm.is_none() && (b.st.leaks() || lost);
             (std::mem::take(&mut b.knocks), fix)
         };
+        let me = self.id();
         for inv in knocks {
             let known =
                 self.view(&self.own, |s| s.spaces().contains_key(&inv.id()));
+            // One DM per person: a flood of knocks opens no more.
+            let with = |sp: &Arc<Space>| {
+                self.view(&sp.id, |s| s.peer(&me) == Some(inv.owner))
+                    == Some(true)
+            };
             if known == Some(false)
+                && !self.all().iter().any(with)
                 && let Err(e) = self.enter(inv).await
             {
                 warn!("accepting a DM: {e}");
@@ -1681,6 +1778,22 @@ impl Node {
             let sp = self.get(space)?;
             let mut peers: Vec<EndpointId> = self.bootstrap(&sp);
             peers.extend(sp.nbrs());
+            // Its real size first (the hash proves it): the post's, or
+            // nothing (a post may say 1 byte of a vast file).
+            let mut size = None;
+            for p in &peers {
+                let c = self.ep.connect(*p, iroh_blobs::ALPN);
+                let c = tokio::time::timeout(Duration::from_secs(10), c);
+                if let Ok(Ok(c)) = c.await {
+                    let n =
+                        iroh_blobs::get::request::get_verified_size(&c, &hash);
+                    if let Ok((n, _)) = n.await {
+                        size = Some(n);
+                        break;
+                    }
+                }
+            }
+            ensure!(size == Some(f.size), "not reachable now, or not as said");
             let got = files.downloader(&self.ep).download(hash, peers).await;
             got.ok().context(
                 "not reachable now: ask whoever sent it to open irch",
@@ -1802,9 +1915,17 @@ impl Node {
     /// Answer a blob request.
     async fn give(&self, c: &Connection) -> Result<()> {
         let (mut tx, mut rx) = c.accept_bi().await?;
-        // Only a storage node takes a file; others read a 64-byte ask.
-        let max = if self.serve.is_some() { MAX_FILE + 1024 } else { 64 };
-        match postcard::from_bytes(&rx.read_to_end(max).await?)? {
+        // Its first bytes say what it is (and, to keep a file, the token):
+        // only then is a file's worth read, and only by a storage node.
+        let mut head = [0u8; 17];
+        rx.read_exact(&mut head).await?;
+        let max = match (head[0], self.serve) {
+            (1, Some(t)) if head[1..] == t => MAX_FILE + 16,
+            (1, _) => bail!("not a storage node of yours"),
+            _ => 64,
+        };
+        let rest = rx.read_to_end(max).await?;
+        match postcard::from_bytes(&[&head[..], &rest].concat())? {
             Ask::Get(h) => {
                 tx.write_all(&std::fs::read(self.blob(&h)).unwrap_or_default())
                     .await?
@@ -1893,8 +2014,14 @@ impl Node {
                 peer,
                 info.into_addrs().map(|a| a.into_addr()),
             );
+            // Members' devices only, the latest 512: anyone who knows a
+            // space's id may join its topic, and must not crowd them out.
+            let keep = !a.is_empty() && n.member_device(&peer);
             let mut l = lock(&n.local);
-            if !a.is_empty() && l.peers.len() < 512 {
+            if keep {
+                if l.peers.len() >= 512 && !l.peers.contains_key(&peer) {
+                    l.peers.pop_first();
+                }
                 l.peers.insert(peer, a);
             }
             drop(l);
@@ -2042,13 +2169,55 @@ async fn pump(n: Arc<Node>, sp: Weak<Space>, boot: Vec<EndpointId>) {
 /// For push endpoints and updates: TLS as iroh sets it up, roots compiled
 /// in.
 pub fn http() -> reqwest::Client {
-    let tls = iroh::tls::CaTlsConfig::embedded()
-        .client_config(iroh::tls::default_provider())
-        .expect("TLS roots");
+    client().build().expect("HTTP client")
+}
+
+fn client() -> reqwest::ClientBuilder {
+    #[cfg(not(target_os = "android"))]
+    let ca = iroh::tls::CaTlsConfig::system();
+    #[cfg(target_os = "android")]
+    let ca = iroh::tls::CaTlsConfig::embedded();
+    let tls = ca.client_config(iroh::tls::default_provider()).expect("TLS");
     let b = reqwest::Client::builder().tls_backend_preconfigured(tls);
     // Stalls end a request, not its length: an update can be large.
     let b = b.connect_timeout(Duration::from_secs(20));
-    b.read_timeout(Duration::from_secs(30)).build().expect("HTTP client")
+    b.read_timeout(Duration::from_secs(30))
+}
+
+/// For push URLs, which members name: https to public addresses only,
+/// never redirected.
+fn push_http() -> reqwest::Client {
+    let b = client().redirect(reqwest::redirect::Policy::none());
+    let b = b.https_only(true).dns_resolver(Public);
+    b.build().expect("HTTP client")
+}
+
+/// A push URL worth asking: https, to a public address (a member names
+/// it: never our LAN); tests, local. Or a phone's own servers, over iroh.
+fn pushable(u: &str) -> bool {
+    let ip = || {
+        let u = reqwest::Url::parse(u).ok()?;
+        u.host_str()?.trim_matches(['[', ']']).parse().ok()
+    };
+    u.starts_with("https://") && ip().is_none_or(|a| public(&a))
+        || u.starts_with("irch:wake:")
+        || cfg!(debug_assertions) && u.starts_with("http://127.0.0.1:")
+}
+
+struct Public;
+
+impl reqwest::dns::Resolve for Public {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let all = tokio::net::lookup_host((host, 0)).await?;
+            let v: Vec<_> = all.filter(|a| public(&a.ip())).collect();
+            if v.is_empty() {
+                return Err("no public address".into());
+            }
+            Ok(Box::new(v.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
 }
 
 async fn heartbeat(n: Weak<Node>) {
@@ -2101,6 +2270,68 @@ mod tests {
         }
         assert!(b.parked <= PARKED + (2 << 20) && b.at.is_empty());
         assert_eq!(std::fs::metadata(&p).unwrap().len(), 0);
+        std::fs::remove_file(p).unwrap();
+    }
+
+    #[test]
+    fn pushes_go_out_only_to_public_https() {
+        assert!(pushable("https://ntfy.sh/up1") && pushable("irch:wake:x"));
+        for u in [
+            "http://ntfy.sh/up1",
+            "https://10.0.0.8/up",
+            "https://[::1]:8080/up",
+            "https://[fd00::1]/up",
+            "https://100.64.0.1/up",
+            "https://169.254.169.254/latest",
+            "file:///etc/passwd",
+        ] {
+            assert!(!pushable(u), "{u}");
+        }
+    }
+
+    #[test]
+    fn only_admins_hand_on_keys() {
+        let (o, x) = (Me::new(rand()), Me::new(rand()));
+        let inv = Invite::new(o.id(), "", None);
+        let (sp, k0, dev) = (inv.id(), inv.key, SecretKey::generate().public());
+        let p = std::env::temp_dir().join(format!("irch-keys-{}", now()));
+        let mut b = Book::new(Log::open(&p).unwrap().0, State::new(&inv));
+        b.keys.insert(tag(&k0), k0);
+        let (kb, kx): (Key, Key) = (rand(), rand());
+        let (ch, n) = (Ch([3; 8]), |t: &str| t.to_string());
+        let post = |t| Op::Post {
+            channel: ch,
+            text: n(t),
+            reply: None,
+            files: vec![],
+        };
+        let boxed = kem_seal(&o.pk(), &rekey_aad(&sp, &tag(&kx)), &kx).unwrap();
+        let ops = [
+            (&o, k0, 1, Op::Channel { id: ch, name: Some(n("g")) }),
+            // Someone holding the key, not an admin, mints one of their own.
+            (&x, k0, 2, Op::Back { key: kx }),
+            (
+                &x,
+                k0,
+                3,
+                Op::Rekey { epoch: tag(&kx), boxes: vec![(o.id(), boxed)] },
+            ),
+            (&x, kx, 4, post("x, under its own key")),
+            // The owner hands one on.
+            (&o, k0, 5, Op::Back { key: kb }),
+            (&o, kb, 6, post("o, under a key handed on")),
+        ];
+        let work = ops.into_iter().map(|(who, k, ts, op)| {
+            let (s, raw) = op::seal(&sp, &k, &who.user, dev, ts, op);
+            (s.id, postcard::from_bytes(&raw).unwrap(), Src::Log(false))
+        });
+        b.fold(&sp, &o, work.rev().collect());
+        assert!(
+            b.keys.contains_key(&tag(&kb)) && !b.keys.contains_key(&tag(&kx))
+        );
+        let texts: Vec<_> =
+            b.st.messages(&ch, None, 9).into_iter().map(|m| m.text).collect();
+        assert_eq!(texts, ["o, under a key handed on"]);
         std::fs::remove_file(p).unwrap();
     }
 

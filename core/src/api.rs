@@ -109,6 +109,13 @@ pub enum Call {
         due: Option<String>,
         file: Option<String>,
     },
+    /// Messages with every word of `query`: in `room` of `space`, in
+    /// `space`, or (neither) everywhere.
+    Search {
+        query: String,
+        space: Option<Id>,
+        room: Option<Ch>,
+    },
     Hangup,
     SetLevel {
         space: Id,
@@ -151,6 +158,22 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
             json!(n.view(&space, page).unwrap_or_default())
         }
         // The thread, and the message it hangs off.
+        Call::Search { query, space, room } => {
+            let ids = space.map_or_else(|| n.spaces(), |s| vec![s]);
+            let mut v: Vec<_> = ids
+                .iter()
+                .filter_map(|id| {
+                    let hits =
+                        n.view(id, |s| s.search(&query, room.as_ref(), 50));
+                    Some(hits?.into_iter().map(move |(c, m)| (*id, c, m)))
+                })
+                .flatten()
+                .collect();
+            v.sort_by_key(|(_, _, m)| std::cmp::Reverse(m.ts));
+            v.truncate(50);
+            let row = |(space, channel, message)| json!({ "space": space, "channel": channel, "message": message });
+            json!(v.into_iter().map(row).collect::<Vec<_>>())
+        }
         Call::Thread { space, channel } => json!(
             n.view(&space, |s| s.thread(&channel).map(|t| {
                 let m = s.message(&t.root).map(|m| m.1);

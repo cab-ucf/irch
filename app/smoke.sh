@@ -44,6 +44,8 @@ tap() {
 }
 
 adb install -r -g "$apk"
+# As if Allow was chosen when irch asks to run unrestricted.
+adb shell dumpsys deviceidle whitelist +"$pkg" >/dev/null
 adb logcat -c
 adb shell am start -W -n "$pkg/.MainActivity"
 see 'Welcome to irch' 90 || fail "UI never showed the welcome screen"
@@ -84,7 +86,9 @@ sleep 5
 adb exec-out screencap -p >"$out/5-call.png"
 
 adb logcat -d >"$out/logcat.txt"
-if grep -E 'FATAL EXCEPTION|panicked at' "$out/logcat.txt"; then
+# irch's crashes, not the test tools' (uiautomator's own die at times).
+if grep -A1 'FATAL EXCEPTION' "$out/logcat.txt" | grep "Process: $pkg" ||
+  grep 'panicked at' "$out/logcat.txt"; then
   fail "crash in the device log"
 fi
 echo "smoke test passed"

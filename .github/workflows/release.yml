@@ -16,13 +16,15 @@ on:
         description: The release's tag, vX.Y.Z
         required: true
 permissions:
-  contents: write
+  contents: read
 env:
   CARGO_TERM_COLOR: always
   TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   desktop:
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -45,12 +47,16 @@ jobs:
           key: ${{ matrix.target }}
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y
-          libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev
+          libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev
           libjavascriptcoregtk-4.1-dev librsvg2-dev
       - run: cargo install tauri-cli --version 2.12.4 --locked
+      # A tag is only ever a version, and the one irch says it is: anything
+      # else would reach sed (and the shell), or update forever.
       - name: The tag is the version
         shell: bash
         run: |
+          [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          grep -qx "version = \"${TAG#v}\"" Cargo.toml
           v='"version": "'${TAG#v}'"'
           sed -i.bak "s/\"version\": \"[^\"]*\"/$v/" app/tauri.conf.json
       - name: Apple's notarization, once its secrets exist (else ad hoc)
@@ -100,7 +106,7 @@ jobs:
           cargo build --release --locked -p irch --target $t
           x=$([ "$RUNNER_OS" = Windows ] && echo .exe || true)
           cp target/$t/release/irch$x irch-$t$x
-          cargo tauri signer sign irch-$t$x
+          cargo tauri signer sign --app-version "${TAG#v}" irch-$t$x
           gh release upload "$TAG" irch-$t$x irch-$t$x.sig --clobber
       - name: The source, signed (nixos.nix builds it), and the installers
         if: matrix.target == 'x86_64-unknown-linux-gnu'
@@ -111,11 +117,13 @@ jobs:
             ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           git archive --format=tar.gz -o source.tar.gz HEAD
-          cargo tauri signer sign source.tar.gz
+          cargo tauri signer sign --app-version "${TAG#v}" source.tar.gz
           gh release upload "$TAG" source.tar.gz source.tar.gz.sig \
             install.sh install.ps1 --clobber
 
   android:
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - name: Room for the build
@@ -134,17 +142,24 @@ jobs:
       - run: cargo install tauri-cli --version 2.12.4 --locked
       - name: The tag is the version
         run: |
+          [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          grep -qx "version = \"${TAG#v}\"" Cargo.toml
           v='"version": "'${TAG#v}'"'
           sed -i "s/\"version\": \"[^\"]*\"/$v/" app/tauri.conf.json
       - working-directory: app
         # Phones only: x86_64 is for emulators, which build their own.
         run: NDK_HOME="$ANDROID_NDK_LATEST_HOME" cargo tauri android build
           --ci --apk --target aarch64
-      - name: Sign with irch's key, attach to the release
+      # Android's key for Android; irch's too, which irch checks before
+      # it installs an update.
+      - name: Sign with irch's keys, attach to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           KS: ${{ secrets.ANDROID_KEYSTORE }}
           PW: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+            ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
           echo "$KS" | base64 -d > irch.jks
@@ -153,17 +168,20 @@ jobs:
           "$tools/apksigner" sign --ks irch.jks --ks-pass env:PW \
             --ks-key-alias irch --out irch.apk a.apk
           rm irch.jks
+          cargo tauri signer sign --app-version "${TAG#v}" irch.apk
           gh release view "$TAG" >/dev/null 2>&1 ||
             gh release create "$TAG" --title "irch $TAG" \
               --target "$GITHUB_SHA" ||
             true # made meanwhile by a desktop job
-          gh release upload "$TAG" irch.apk --clobber
+          gh release upload "$TAG" irch.apk irch.apk.sig --clobber
 
   # One latest.json from every signature: jobs that each merged their own
   # into it raced, and the last one's won.
   updater:
     needs: desktop
     if: ${{ !cancelled() }}
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -186,8 +204,9 @@ jobs:
           out = {}
           for sig in sorted(glob.glob("*.sig")):
               name = sig[:-4]
-              # The CLI's and the source's: they update themselves.
-              if re.match(r"irch-(x86_64|aarch64)-|source", name):
+              # The CLI's, the source's and the APK's: they update
+              # themselves.
+              if re.match(r"irch-(x86_64|aarch64)-|source|irch\.apk", name):
                   continue
               a = cpu[re.search("amd64|x86_64|x64|aarch64|arm64", name)[0]]
               o, kind = next((o, k) for e, o, k in kinds if name.endswith(e))

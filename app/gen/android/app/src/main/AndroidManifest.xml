@@ -9,6 +9,9 @@
     <!-- With no push app: stay connected, from boot on, like a messenger. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Doze cuts off apps it optimizes: their network, and starting from a
+         push. A messenger without Google's push asks to be let off. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Calls ring like calls: full screen when locked, with a buzz. -->
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.VIBRATE" />
