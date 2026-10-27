@@ -3,10 +3,11 @@
 //! sheet; and through `Push.kt`, push wakes when no activity is running.
 
 use anyhow::Context;
+use irch_core::wake::{self, News};
 use irch_core::{Node, Notice};
 use jni::JNIEnv;
 use jni::objects::{JClass, JObject, JString};
-use jni::sys::jstring;
+use jni::sys::{jboolean, jstring};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
@@ -38,48 +39,14 @@ struct Text<'a> {
     text: &'a str,
 }
 
-/// The latest release's APK, handed to Android's installer (which asks,
-/// the first time, whether irch may install apps). If that fails, the
-/// browser fetches it, and Android installs it from there.
-pub async fn upgrade(
-    app: &tauri::AppHandle,
-    mut on: impl FnMut(usize, Option<u64>),
-) -> anyhow::Result<Option<String>> {
+/// The latest release's APK, from the browser: Android installs it over
+/// this one only if irch's key signed it. irch itself never fetches or
+/// installs apps (Play Protect takes an app that does for malware).
+pub async fn upgrade(app: &tauri::AppHandle) -> anyhow::Result<String> {
     let url = format!("{}/download/irch.apk", crate::LATEST);
     let bridge = app.try_state::<Bridge>().context("no bridge")?;
-    let get = |u: String| async move {
-        anyhow::Ok(irch_core::http().get(u).send().await?.error_for_status()?)
-    };
-    // irch's own signature first: an APK it did not sign (another
-    // package, say, which Android would take as new) is never offered.
-    let v = irch_core::release::latest().await?;
-    let sig = get(format!("{url}.sig")).await?.bytes().await?;
-    let mut r = get(url.clone()).await?;
-    let (total, mut apk) = (r.content_length(), vec![]);
-    while let Some(c) = r.chunk().await? {
-        on(c.len(), total);
-        apk.extend_from_slice(&c);
-    }
-    irch_core::release::check(&apk, &sig, "irch.apk", &v)?;
-    let got = async {
-        let dir = app.path().app_cache_dir()?.join("shared");
-        std::fs::create_dir_all(&dir)?;
-        let f = dir.join("irch.apk");
-        std::fs::write(&f, &apk)?;
-        let path = &f.to_string_lossy();
-        bridge
-            .0
-            .run_mobile_plugin_async::<()>("install", FilePath { path })
-            .await?;
-        anyhow::Ok(())
-    };
-    match got.await {
-        Ok(()) => Ok(None),
-        Err(e) => {
-            bridge.call("browse", Url { url: &url }).await;
-            Ok(Some(format!("{e:#}. Your browser downloads irch: open it")))
-        }
-    }
+    bridge.call("browse", Url { url: &url }).await;
+    Ok("Your browser downloads irch: open it to install".into())
 }
 
 /// What decides whether this phone is told, after `ask`: "fix" (Android
@@ -168,9 +135,13 @@ impl Bridge {
 static OURS: AtomicBool = AtomicBool::new(false);
 static TAO: AtomicBool = AtomicBool::new(false);
 
-/// `Wake.run`: a push came. Start the node if irch was not running (or
-/// wake it), catch up, and return what to notify about, as JSON; while
-/// the app runs, it notifies itself and this returns `[]`.
+/// What rang, not yet taken in.
+static NEWS: std::sync::Mutex<Vec<News>> = std::sync::Mutex::new(vec![]);
+
+/// `Wake.run`: a push or a ring came. Start the node if irch was not
+/// running (or wake it), take in what rang, and return what to notify
+/// about, as JSON: at once, or (`full`) after catching up. While the app
+/// runs, it notifies itself and this returns `[]`.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_irch_chat_Wake_run<'l>(
     mut env: JNIEnv<'l>,
@@ -178,12 +149,25 @@ pub extern "system" fn Java_dev_irch_chat_Wake_run<'l>(
     ctx: JObject<'l>,
     dir: JString<'l>,
     push: JString<'l>,
+    full: jboolean,
 ) -> jstring {
     let (dir, push) = (text(&mut env, &dir), text(&mut env, &push));
     let dir =
         irch_core::profile(std::path::Path::new(&dir.unwrap_or_default()));
-    let wake = wake(dir, push);
+    let wake = wake(dir, push, full != 0);
     reply(env, ctx, wake)
+}
+
+/// `Wake.moved`: another network. The doorbell (and the node, if up)
+/// find their relay again now, not when a ping fails.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_irch_chat_Wake_moved(_: JNIEnv, _: JClass) {
+    tauri::async_runtime::block_on(async {
+        wake::moved().await;
+        if let Some(n) = crate::running() {
+            n.resume().await;
+        }
+    });
 }
 
 /// `Wake.rung`: no push app to wake irch, so a service waits on its
@@ -246,15 +230,22 @@ pub extern "system" fn Java_dev_irch_chat_Wake_release(_: JNIEnv, _: JClass) {
 async fn wake(
     dir: PathBuf,
     push: Option<String>,
+    full: bool,
 ) -> anyhow::Result<Vec<Notice>> {
     let n = node(dir).await?;
     if let Some(p) = push {
         n.set_push((!p.is_empty()).then_some(p)).await;
     }
-    n.resume().await;
+    let news =
+        std::mem::take(&mut *NEWS.lock().unwrap_or_else(|e| e.into_inner()));
+    news.into_iter().for_each(|x| n.deliver(x));
     if crate::FG.load(SeqCst) {
         return Ok(vec![]); // in sight: the app shows it
     }
+    if !full {
+        return Ok(crate::alerts(&n, false)); // what rang, told now
+    }
+    n.resume().await;
     // Catch up until a few quiet seconds, at most half a minute.
     let (mut rx, end) =
         (n.subscribe(), Instant::now() + Duration::from_secs(30));
@@ -282,12 +273,13 @@ async fn node(dir: PathBuf) -> anyhow::Result<std::sync::Arc<Node>> {
     Ok(n)
 }
 
-/// Until the doorbell rings (wake.rs): out of sight, no node at all, and
+/// Until the doorbell rings (wake.rs), or half an hour passes (in case a
+/// ring was missed: catch up anyway): out of sight, no node at all, and
 /// the doorbell told to our spaces once.
 async fn rung(dir: PathBuf) -> anyhow::Result<()> {
     static TOLD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
     let net = crate::config(dir.clone(), None, None)?.net;
-    let url = irch_core::wake::doorbell(&dir, &net).await?;
+    let url = wake::doorbell(&dir, &net).await?;
     let told = TOLD.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if told.as_ref() != Some(&url) {
         node(dir.clone()).await?.set_push(Some(url.clone())).await;
@@ -298,5 +290,9 @@ async fn rung(dir: PathBuf) -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
     crate::nap().await;
-    irch_core::wake::rung(&dir, &net).await
+    let half = Duration::from_secs(30 * 60);
+    if let Ok(news) = tokio::time::timeout(half, wake::rung(&dir, &net)).await {
+        NEWS.lock().unwrap_or_else(|e| e.into_inner()).extend(news?);
+    }
+    Ok(())
 }

@@ -293,6 +293,58 @@ async fn a_dm_call_rings_once() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_ring_tells_a_sleeping_phone_what_rang() {
+    use irch_core::{state::DM, wake};
+    let db = dir("b");
+    let a = node("a").await;
+    let b = start(&db, "b", None, false).await;
+    let id = a.create("lab").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let keyed = || a.view(&id, |s| s.kem(&b.id()).is_some()) == Some(true);
+    until("b's key", keyed).await;
+    let dm = a.dm(&id, &b.id()).await.unwrap();
+    until("b in the DM", || b.spaces().contains(&dm)).await;
+    let url = wake::doorbell(&db, &Net::Direct).await.unwrap();
+    b.set_push(Some(url.clone())).await;
+    let told = |s: &Id| {
+        a.view(s, |st| st.pushes().iter().any(|p| p.1 == url)) == Some(true)
+    };
+    until("a knows b's doorbell", || told(&id) && told(&dm)).await;
+    b.notices(); // asked once: what comes next is news
+    b.shutdown().await;
+    drop(b);
+
+    let rang = |d: std::path::PathBuf| {
+        tokio::spawn(async move { wake::rung(&d, &Net::Direct).await })
+    };
+    let ten = Duration::from_secs(10);
+    let phone = rang(db.clone());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    say(&a, &dm, DM, "lunch?").await;
+    let said = tokio::time::timeout(ten, phone).await.unwrap().unwrap();
+    let said = said.unwrap().expect("the ring is the message");
+    let phone = rang(db.clone());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    a.call(Some((dm, DM))).await.unwrap();
+    let call = tokio::time::timeout(ten, phone).await.unwrap().unwrap();
+    let call = call.unwrap().expect("the ring is the call");
+
+    // Up again, b tells of both at once: a call is said only every 15 s,
+    // so it can only have come with the ring.
+    let b = start(&db, "b", None, false).await;
+    let rings = |n: &Node| n.notices().into_iter().filter(|n| n.ring).count();
+    assert_eq!(rings(&b), 0, "not yet");
+    b.deliver(said);
+    b.deliver(call);
+    let n = b.notices();
+    assert!(n.iter().any(|n| n.ring), "the call rings: {n:?}");
+    until("the message, told", || {
+        texts(&b, &dm, &DM).contains(&"lunch?".to_string())
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn storage_keeps_only_the_spaces_chosen() {
     let s = start(&dir("s"), "s", None, true).await;
     let a = node("a").await;

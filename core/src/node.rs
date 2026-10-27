@@ -859,29 +859,55 @@ impl Node {
         Ok(())
     }
 
-    /// We wrote in `id`: wake its members' sleeping devices (a ping with
-    /// nothing in it; they fetch from us), each at most every 30 s, a
-    /// held-back one when that is up.
-    fn wake(self: &Arc<Self>, id: &Id) {
-        self.wake_who(id, None);
+    /// We wrote `raw` in `id`: wake its members' sleeping devices. A
+    /// doorbell is handed `raw` itself, every time, until it answers; a
+    /// push service only a ping with nothing in it (they fetch from us),
+    /// at most every 30 s, a held-back one when that is up.
+    fn wake(self: &Arc<Self>, id: &Id, raw: Option<Vec<u8>>) {
+        self.wake_who(id, None, raw);
     }
 
     /// Wake `who`'s sleeping devices (everyone's, with `None`) in `id`.
-    fn wake_who(self: &Arc<Self>, id: &Id, who: Option<&Id>) {
+    fn wake_who(
+        self: &Arc<Self>,
+        id: &Id,
+        who: Option<&Id>,
+        raw: Option<Vec<u8>>,
+    ) {
         let dev = self.ep.id();
         let urls = self.view(id, |s| s.pushes_of(who)).unwrap_or_default();
+        let news = Arc::new(raw.map(|r| (*id, r)));
         for (_, url) in
             urls.into_iter().filter(|u| u.0 != dev && pushable(&u.1))
         {
+            if url.starts_with("irch:wake:") {
+                let (n, news) = (Arc::downgrade(self), news.clone());
+                tokio::spawn(async move {
+                    // Unanswered (a phone between networks, say): again,
+                    // a few times over a minute.
+                    for wait in [0, 3, 10, 45] {
+                        tokio::time::sleep(Duration::from_secs(wait)).await;
+                        let Some(n) = n.upgrade() else { return };
+                        let r = crate::wake::ring(
+                            &n.ep,
+                            &url,
+                            news.as_ref().as_ref(),
+                        );
+                        match r.await {
+                            Ok(()) => return,
+                            Err(e) => warn!("wake: {e:#}"),
+                        }
+                    }
+                });
+                continue;
+            }
             let wait = {
                 let mut w = lock(&self.wake);
                 let (last, held) =
                     w.entry(url.clone()).or_insert((None, false));
                 let since =
                     last.map_or(Duration::MAX, |t: Instant| t.elapsed());
-                // A push service is spared; our own servers are not.
-                let gap = if url.starts_with("irch:wake:") { 2 } else { 30 };
-                let wait = Duration::from_secs(gap).saturating_sub(since);
+                let wait = Duration::from_secs(30).saturating_sub(since);
                 match (wait.is_zero(), *held) {
                     (_, true) => continue,
                     (true, _) => *last = Some(Instant::now()),
@@ -896,12 +922,6 @@ impl Node {
                 if !wait.is_zero() {
                     lock(&n.wake)
                         .insert(url.clone(), (Some(Instant::now()), false));
-                }
-                if url.starts_with("irch:wake:") {
-                    if let Err(e) = crate::wake::ring(&n.ep, &url).await {
-                        warn!("wake: {e:#}");
-                    }
-                    return;
                 }
                 let local = url.starts_with("http://").then(http);
                 let c = local.as_ref().unwrap_or(n.push.get_or_init(push_http));
@@ -1267,6 +1287,15 @@ impl Node {
 
     /// Seal, store, fold and broadcast an op.
     async fn post(self: &Arc<Self>, sp: &Arc<Space>, op: Op) -> Result<Id> {
+        Ok(self.send(sp, op).await?.0)
+    }
+
+    /// `post`, and the sealed op as it went out.
+    async fn send(
+        self: &Arc<Self>,
+        sp: &Arc<Space>,
+        op: Op,
+    ) -> Result<(Id, Vec<u8>)> {
         let inv = sp.inv.as_ref().ok_or_else(|| anyhow!("only hosted here"))?;
         let (key, ts) = {
             let b = lock(&sp.book);
@@ -1281,10 +1310,10 @@ impl Node {
         let (s, raw) = self.seal(sp, &key, ts, op);
         self.ingest(sp, vec![raw.clone()], true);
         match sp.tx().filter(|_| raw.len() <= GOSSIP_MAX) {
-            Some(tx) => drop(tx.broadcast(raw.into()).await),
+            Some(tx) => drop(tx.broadcast(raw.clone().into()).await),
             None => sp.nbrs().into_iter().for_each(|p| self.sync(sp, p)),
         }
-        Ok(s.id)
+        Ok((s.id, raw))
     }
 
     /// Publish a user-level op; the fold enforces who may do what.
@@ -1310,9 +1339,9 @@ impl Node {
         ensure!(*id != self.own, "not a space");
         let role = matches!(op, Op::Role { .. });
         let msg = matches!(op, Op::Post { .. });
-        let r = self.post(&self.get(id)?, op).await?;
+        let (r, raw) = self.send(&self.get(id)?, op).await?;
         if msg {
-            self.wake(id);
+            self.wake(id, Some(raw));
         }
         // Demoting whoever set the current epoch can bring back an older
         // one: replace it now, not after a jittered while.
@@ -1467,9 +1496,9 @@ impl Node {
             .context("bad key")?;
         let (epoch, id) = (tag(&inv.key), self.enter(inv).await?);
         self.post(&self.get(&id)?, Op::Rekey { epoch, boxes: vec![] }).await?;
-        self.post(&self.get(via)?, Op::Knock { sealed }).await?;
+        let knock = self.send(&self.get(via)?, Op::Knock { sealed }).await?;
         // Their sleeping phones: woken to take it, and what follows.
-        self.wake_who(via, Some(user));
+        self.wake_who(via, Some(user), Some(knock.1));
         Ok(id)
     }
 
@@ -1491,16 +1520,25 @@ impl Node {
     }
 
     /// Live ops; invisible, only leaving and calls (joining one shows).
-    async fn signal(&self, sp: &Space, op: Op) {
-        let Some(inv) = &sp.inv else { return };
+    /// The sealed op, as it went out.
+    async fn signal(&self, sp: &Space, op: Op) -> Option<Vec<u8>> {
+        let inv = sp.inv.as_ref()?;
         let (key, locked) = lock(&sp.book).key(inv);
         let quiet = !matches!(op, Op::Call { .. } | Op::Gone);
         if locked || quiet && self.invisible() {
-            return;
+            return None;
         }
+        let raw = self.seal(sp, &key, self.tick(), op).1;
         if let Some(tx) = sp.tx() {
-            let raw = self.seal(sp, &key, self.tick(), op).1;
-            let _ = tx.broadcast(raw.into()).await;
+            let _ = tx.broadcast(raw.clone().into()).await;
+        }
+        Some(raw)
+    }
+
+    /// What a ring brought (wake.rs): taken as if gossiped.
+    pub fn deliver(self: &Arc<Self>, news: crate::wake::News) {
+        if let Ok(sp) = self.get(&news.0) {
+            self.signaled(&sp, &news.1, self.ep.id());
         }
     }
 
@@ -1519,9 +1557,9 @@ impl Node {
         ensure!(!self.locked(&id), LOCKED);
         let run = u64::from_le_bytes(rand());
         *lock(&self.call) = Some(Call::new(id, ch, run));
-        self.signal(&sp, Op::Call { channel: Some(ch) }).await;
+        let raw = self.signal(&sp, Op::Call { channel: Some(ch) }).await;
         self.emit(Event::Call { space: id });
-        self.wake(&id); // sleeping phones: someone is calling
+        self.wake(&id, raw); // sleeping phones: someone is calling
         tokio::spawn(self.clone().ring(run));
         Ok(())
     }
@@ -1601,13 +1639,14 @@ impl Node {
             let Ok(sp) = self.get(&id) else { return };
             let want = self.callers(&sp, Some(ch));
             if i % 15 == 0 {
-                self.signal(&sp, Op::Call { channel: Some(ch) }).await;
+                let raw =
+                    self.signal(&sp, Op::Call { channel: Some(ch) }).await;
                 // A DM ringing, unanswered: its phones woken again, as
                 // long as a call rings (one woken late hears it then).
                 let dm = self.view(&id, |s| s.dm.is_some()) == Some(true);
                 let alone = want.iter().all(|w| w.2 == self.id());
                 if dm && alone && i <= 45 {
-                    self.wake(&id);
+                    self.wake(&id, raw);
                 }
             }
             let dial: HashSet<_> = {

@@ -18,10 +18,11 @@ type Started = Option<Result<Arc<Node>, String>>;
 
 /// The node, whoever started it: the app, or a push wake (android.rs).
 static NODE: std::sync::Mutex<Option<Arc<Node>>> = std::sync::Mutex::new(None);
-/// irch is in sight (phones; desktops always are).
+/// irch is in sight (phones; desktops always are). Only the activity's
+/// app says so: a process Android starts for the service alone is not.
 #[cfg(target_os = "android")]
 static FG: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(true);
+    std::sync::atomic::AtomicBool::new(false);
 
 /// The room on screen: its messages need no notification while in sight.
 static VIEW: std::sync::Mutex<Option<(Id, Ch)>> = std::sync::Mutex::new(None);
@@ -31,7 +32,7 @@ static VIEW: std::sync::Mutex<Option<(Id, Ch)>> = std::sync::Mutex::new(None);
 #[cfg(target_os = "android")]
 async fn seen(app: &AppHandle, fg: bool) {
     use std::sync::atomic::Ordering::SeqCst;
-    // Only a change counts: "in sight" at launch, the app is starting.
+    // Only a change counts: in sight at launch, the app is starting.
     if FG.swap(fg, SeqCst) == fg {
         return;
     }
@@ -469,8 +470,8 @@ async fn update(app: AppHandle) -> Result<Option<String>, String> {
 
 /// The newer irch, installed; then what to tell, if anything. Desktop: in
 /// place, its signature checked against ours, then restart; installed
-/// otherwise (cargo), the release page opens. Android: checked against
-/// irch's key too, then the system installer, which takes only ours.
+/// otherwise (cargo), the release page opens. Android: the browser
+/// downloads it, and the system installer takes only ours.
 #[tauri::command]
 async fn upgrade(
     app: AppHandle,
@@ -489,7 +490,10 @@ async fn upgrade(
         Ok(Some("irch's release page is open: install it from there".into()))
     }
     #[cfg(target_os = "android")]
-    android::upgrade(&app, percent(progress)).await.map_err(err)
+    {
+        let _ = progress;
+        android::upgrade(&app).await.map(Some).map_err(err)
+    }
 }
 
 /// Phones: what decides whether they are told of messages and calls, and
@@ -506,6 +510,7 @@ async fn notify_check(app: AppHandle, ask: String) -> Result<Value, String> {
 }
 
 /// Bytes as they arrive, as a percentage for the page (each once).
+#[cfg(desktop)]
 fn percent(to: Channel<u32>) -> impl FnMut(usize, Option<u64>) {
     let (mut got, mut last) = (0u64, u32::MAX);
     move |n, total| {
@@ -615,6 +620,8 @@ pub fn run() {
         });
     let b = b.setup(|app| {
         app.manage(App(watch::channel(None).0));
+        #[cfg(target_os = "android")]
+        FG.store(true, std::sync::atomic::Ordering::SeqCst);
         #[cfg(desktop)]
         tray(app);
         // WebKitGTK keeps getUserMedia off unless asked.
@@ -818,19 +825,26 @@ async fn notify(app: &AppHandle, x: &Notice) {
     }
 }
 
-/// A desktop's banner, while no irch window is in front (the page sounds
-/// it either way); a call, irch itself.
+/// A desktop's banner, with the system's sound, while no irch window is
+/// in front (the page chimes otherwise); a call, always, and then irch
+/// itself comes to the front, from the tray if need be, ringing (its page
+/// asks to answer), as a phone's would.
 #[cfg(not(target_os = "android"))]
 async fn notify(app: &AppHandle, x: &Notice) {
     use tauri_plugin_notification::NotificationExt;
-    // A call: irch comes to the front, from the tray if need be, ringing
-    // (its page asks to answer), as a phone's would.
+    let sound = match () {
+        _ if cfg!(target_os = "macos") => "NSUserNotificationDefaultSoundName",
+        _ if cfg!(windows) => "IM",
+        _ => "message-new-instant",
+    };
+    if x.ring || !front(app) {
+        let b = app.notification().builder().title(&x.title).body(&x.body);
+        if let Err(e) = b.sound(sound).show() {
+            tracing::warn!("notification: {e}");
+        }
+    }
     if x.ring {
         show(app);
-    }
-    if !front(app) {
-        let b = app.notification().builder().title(&x.title).body(&x.body);
-        let _ = b.show();
     }
 }
 
