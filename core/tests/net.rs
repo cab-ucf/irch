@@ -425,6 +425,15 @@ async fn offered_files_go_from_device_to_members_only() {
     let out = dir("x");
     assert!(x.save(&id, &f, &out).await.is_err(), "no member, no file");
     assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0, "nothing left");
+    // b edits what it saved: what b serves on is still what a shared.
+    std::fs::write(&saved, vec![0; big.len()]).unwrap();
+    let c = node("c").await;
+    c.join(&b.invite(&id).await.unwrap()).await.unwrap();
+    let knows = || b.view(&id, |s| s.kem(&c.id()).is_some()) == Some(true);
+    until("b knows c", knows).await;
+    a.shutdown().await;
+    let got = c.save(&id, &f, &dir("c")).await.unwrap();
+    assert!(std::fs::read(got).unwrap() == big, "from b, as shared");
 }
 
 #[tokio::test(flavor = "multi_thread")]

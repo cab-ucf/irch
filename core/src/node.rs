@@ -1883,13 +1883,12 @@ impl Node {
         Ok(&self.files)
     }
 
+    /// A copy (a reflink where it can): referenced instead, what the user
+    /// later writes there is what members asking for its hash would get.
     async fn export(&self, space: &Id, f: &File, to: &Path) -> Result<()> {
-        use iroh_blobs::api::blobs::{ExportMode, ExportOptions};
         let files = self.pull(space, &f.hash, f.size).await?;
-        let hash = iroh_blobs::Hash::from_bytes(f.hash.0);
-        let (mode, target) = (ExportMode::TryReference, to.to_path_buf());
         std::fs::remove_file(to)?;
-        files.export_with_opts(ExportOptions { hash, mode, target }).await?;
+        files.export(iroh_blobs::Hash::from_bytes(f.hash.0), to).await?;
         Ok(())
     }
 
