@@ -1856,12 +1856,15 @@ impl Node {
     async fn verified(&self, peers: &[EndpointId], h: &Id) -> Option<u64> {
         let hash = iroh_blobs::Hash::from_bytes(h.0);
         for p in peers {
-            let c = self.ep.connect(*p, iroh_blobs::ALPN);
-            if let Ok(Ok(c)) =
-                tokio::time::timeout(Duration::from_secs(10), c).await
-                && let Ok((n, _)) =
-                    iroh_blobs::get::request::get_verified_size(&c, &hash).await
-            {
+            // One that answers slowly, or never, gives way to the next.
+            let size = async {
+                let c = self.ep.connect(*p, iroh_blobs::ALPN).await.ok()?;
+                let got =
+                    iroh_blobs::get::request::get_verified_size(&c, &hash);
+                Some(got.await.ok()?.0)
+            };
+            let ten = Duration::from_secs(10);
+            if let Ok(Some(n)) = tokio::time::timeout(ten, size).await {
                 return Some(n);
             }
         }
