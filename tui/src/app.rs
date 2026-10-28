@@ -22,6 +22,7 @@ J K gt gT next / previous channel       ^w ^u    delete word / to start
 H L       previous / next space         ^a ^e    start / end
 l Enter   open its thread   h  back     ^n ^p    channel, from anywhere
 r reply   t new thread   e edit   dd delete   y copy   p pin   + react
+Y         copy its link (none picked: the channel's), for tydig or notes
 / n N     find here, next, previous     ^k       jump to a channel or DM
 x         close a DM (kept; back with its next message)
 :         a command   ?  this   esc q  close this   ZZ :q  quit
@@ -318,6 +319,7 @@ impl App {
                 osc52(&self.chosen().context("j or k picks one")?.text);
                 self.status = "copied, if your terminal allows".into();
             }
+            (_, Char('Y')) => return self.submit("url").await,
             (_, Char('p')) => {
                 let m = self.chosen().context("j or k picks one")?;
                 self.post(Op::Pin { target: m.id, on: !m.pinned }).await?;
@@ -764,6 +766,12 @@ impl App {
             "dm" => {
                 let user = self.user(&arg)?;
                 self.go(Some((n.dm(&self.space()?, &user).await?, None)));
+            }
+            "url" => {
+                let (s, c) = self.here()?;
+                let m = self.chosen().map(|m| format!("/{}", m.id));
+                osc52(&format!("irch://open/{s}/{c}{}", m.unwrap_or_default()));
+                self.status = "its link, copied if your terminal allows".into();
             }
             "link" => {
                 self.notice = Some(format!(

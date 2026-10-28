@@ -48,8 +48,10 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
 - Several profiles per device, linked devices, invisible mode, themes
   (Neon, Midnight, Nord, UCF, Light).
 - *Add to notes*: a message or thread lands in a
-  [loroh](https://github.com/cab-ucf/siroh) note as a task or quote, with
-  an `irch://` link back.
+  [loroh](https://github.com/cab-ucf/siroh) note as a task, event or quote,
+  with an `irch://` link back; on phones through loroh, which asks first.
+- *Copy Link* on a channel or message (`Y` in the terminal): what a
+  [tydig](https://github.com/cab-ucf/tydig) project or a note points at.
 - `irch --api`: JSON calls on stdin, answers and events on stdout, for bots
   and bridges; a [tydig](https://github.com/cab-ucf/tydig) project's
   Discussion is a channel this way.

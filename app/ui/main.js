@@ -498,6 +498,10 @@ function channelList(s) {
         class: `channel${active ? " active" : ""}` +
           (ch.unread && !active ? " unread" : ""),
         onclick: () => select(s.id, ch.id),
+        oncontextmenu: (e) => {
+          e.preventDefault();
+          menu(e.currentTarget, chanMenu(s, ch));
+        },
         draggable: s.admin,
         ondragstart: (e) => e.dataTransfer.setData("ch", ch.id),
         ondragover: (e) => s.admin && e.preventDefault(),
@@ -515,17 +519,22 @@ function channelList(s) {
         class: "gear", title: "Edit Channel",
         onclick: (e) => {
           e.stopPropagation();
-          menu(e.currentTarget, [
-            ["Rename or Delete", "pencil", () => editChannel(ch)],
-            ["Move Up", "up", () => reorder(s, ch.id, -1)],
-            ["Move Down", "chevron", () => reorder(s, ch.id, 1)],
-          ]);
+          menu(e.currentTarget, chanMenu(s, ch));
         },
       }, icon("gear")), ch.call.length > 0 && icon("speaker"));
     }).flatMap((row, i) => [row, callers(s.channels[i].call),
       ...s.channels[i].threads.map((t) => threadRow(s, t))]),
   ];
 }
+
+// Its link is how tydig, or a note, points here.
+const chanMenu = (s, ch) => [
+  ["Copy Link", "link", () => copy(`irch://open/${s.id}/${ch.id}`,
+    "Copied the channel's link: paste it in tydig's Share › irch")],
+  ...s.admin ? ["-", ["Rename or Delete", "pencil", () => editChannel(ch)],
+    ["Move Up", "up", () => reorder(s, ch.id, -1)],
+    ["Move Down", "chevron", () => reorder(s, ch.id, 1)]] : [],
+];
 
 const threadRow = (s, t) => h("div", {
   class: `channel thread${t.id === S.ch ? " active" : ""}` +
@@ -582,12 +591,13 @@ async function openUrl(url) {
       ? answer(c[2], c[3]) : incoming(c[2], c[3]);
   }
   if (!String(url).startsWith("irch://open/")) return;
+  // A channel's link, or a message's.
   const [sid, ch, msg] = url.replace(/^irch:\/\/open\//, "").split("/");
   const s = S.spaces.find((x) => x.id === sid);
-  if (!s || !/^[0-9a-f]{16}$/.test(ch) || !/^[0-9a-f]{64}$/.test(msg)) {
+  if (!s || !/^[0-9a-f]{16}$/.test(ch) || msg && !/^[0-9a-f]{64}$/.test(msg)) {
     return toast("That link is to a space you are not in", true);
   }
-  S.jump = msg;
+  S.jump = msg ?? null;
   if (s.channels.some((c) => c.id === ch)) return select(sid, ch);
   S.sid = sid;
   await openThread(ch);
@@ -1341,6 +1351,8 @@ function toolbar(m) {
     tool("reply", "Reply", () => startReply(m)),
     !inThread() && tool("thread", "Reply in thread", () => openThread(m.id)),
     tool("note", "Add to notes", () => toNotes(m)),
+    tool("link", "Copy Link", () => copy(`irch://open/${S.sid}/${S.ch}/${m.id}`,
+      "Copied its link: it opens here for anyone in this space")),
     tool("pin", m.pinned ? "Unpin" : "Pin",
       () => publish({ Pin: { target: m.id, on: !m.pinned } })),
     mine && tool("pencil", "Edit", () => startEdit(m)),
@@ -1357,29 +1369,29 @@ async function toNotes(m) {
     h("option", { value: "" }, "A note (quoted)"));
   const whole = (inThread() || m.thread > 0) &&
     h("input", { type: "checkbox", checked: inThread() });
-  const into = files &&
-    h("input", { type: "text", value: last, maxLength: 200 });
+  const into = h("input", { type: "text", value: last, maxLength: 200 });
   into?.setAttribute("list", "notes-list");
   const due = h("input", { type: "date" });
   todo.onchange = () => {
     const ev = todo.value === "event";
     due.parentElement.classList.toggle("hidden", !todo.value);
     due.type = ev ? "datetime-local" : "date";
-    if (into) into.value = ev ? store.get("cal") ?? "Calendar.md" : last;
+    into.value = ev ? store.get("cal") ?? "Calendar.md" : last;
   };
   const add = async (finish) => {
-    let file = into?.value.trim() || null;
-    if (file && !file.endsWith(".md")) file += ".md";
+    let file = into.value.trim() || "Inbox.md";
+    if (!file.endsWith(".md")) file += ".md";
     const ev = todo.value === "event";
     if (ev && !due.value) return toast("An event needs a time", true);
+    // No notes folder here (a phone): loroh takes it, and asks first.
     const md = await call("note", { space: S.sid, message: m.id,
       thread: !!whole?.checked, todo: todo.value === "task",
-      due: todo.value && due.value || null, file });
+      due: todo.value && due.value || null, file: files ? file : null });
     finish(true);
-    if (file) {
-      store.set(ev ? "cal" : "note", file);
-      toast(`Added to ${file}`);
-    } else await copy(md, "Copied as Markdown: paste it into your notes");
+    store.set(ev ? "cal" : "note", file);
+    if (files) return toast(`Added to ${file}`);
+    await invoke("to_loroh", { file, text: md }).catch(() =>
+      copy(md, "No loroh here: copied as Markdown, to paste into your notes"));
   };
   modal((finish) => h("div", {},
     h("div", { class: "m-body" }, h("h2", {}, "Add to notes"),
@@ -1389,10 +1401,10 @@ async function toNotes(m) {
       h("label", {}, "As"), todo,
       h("div", {}, h("label", {}, "When (optional for a task)"), due),
       whole && h("label", { class: "check" }, whole, "The whole thread"),
-      into && [h("label", {}, "Into"), into, h("datalist", { id: "notes-list" },
-        files.map((f) => h("option", { value: f })))]),
+      h("label", {}, "Into"), into, h("datalist", { id: "notes-list" },
+        (files ?? []).map((f) => h("option", { value: f })))),
     foot(cancel(finish), h("button", { class: "btn",
-      onclick: () => quiet(add(finish)) }, files ? "Add" : "Copy"))));
+      onclick: () => quiet(add(finish)) }, files ? "Add" : "Add in loroh"))));
 }
 
 function editBox(m) {

@@ -114,6 +114,12 @@ impl Bridge {
         self.call("shareFile", FilePath { path }).await;
     }
 
+    /// False if no app opens it.
+    pub async fn browse(&self, url: &str) -> bool {
+        let r = self.0.run_mobile_plugin_async::<()>("browse", Url { url });
+        r.await.is_ok()
+    }
+
     async fn call(&self, cmd: &str, args: impl Serialize) {
         if let Err(e) = self.0.run_mobile_plugin_async::<()>(cmd, args).await {
             tracing::warn!("android {cmd}: {e}");
