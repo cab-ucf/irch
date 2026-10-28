@@ -139,7 +139,8 @@ svg.icon {
 #app {
   /* Fixed, so focusing an element can never scroll the page itself. */
   position: fixed;
-  inset: 0;
+  /* iPhones: clear of the notch and the home bar. */
+  inset: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr) auto;
   /* One row exactly the viewport tall; panes scroll inside, never the page. */
@@ -1163,8 +1164,8 @@ dialog .m-foot .spacer { flex: 1; }
   #app { grid-template-columns: minmax(0, 1fr); }
   #sidebar {
     position: fixed;
-    top: 0;
-    bottom: 0;
+    top: env(safe-area-inset-top);
+    bottom: env(safe-area-inset-bottom);
     left: 0;
     width: min(280px, 85vw);
     z-index: 30;
@@ -1182,8 +1183,8 @@ dialog .m-foot .spacer { flex: 1; }
   #members {
     position: fixed;
     right: 0;
-    top: 48px;
-    bottom: 0;
+    top: calc(48px + env(safe-area-inset-top));
+    bottom: env(safe-area-inset-bottom);
     z-index: 25;
     box-shadow: -8px 0 16px rgba(0, 0, 0, 0.3);
   }

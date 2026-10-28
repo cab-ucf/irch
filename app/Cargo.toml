@@ -1,6 +1,6 @@
 [package]
 name = "irch-app"
-description = "irch on the desktop and on Android"
+description = "irch on desktops and phones"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
