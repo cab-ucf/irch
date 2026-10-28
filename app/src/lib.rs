@@ -528,6 +528,28 @@ fn opened(app: AppHandle) -> Option<String> {
     urls.first().map(|u| u.to_string())
 }
 
+/// Into loroh, which shows it and asks first: `loroh://add`.
+#[tauri::command]
+async fn to_loroh(
+    app: AppHandle,
+    file: String,
+    text: String,
+) -> Result<(), String> {
+    let mut u = tauri::Url::parse("loroh://add").map_err(|e| e.to_string())?;
+    u.query_pairs_mut().append_pair("file", &file).append_pair("text", &text);
+    #[cfg(desktop)]
+    {
+        let _ = app;
+        browse(u.as_str()).map_err(err)
+    }
+    #[cfg(target_os = "android")]
+    {
+        let b = app.try_state::<android::Bridge>().ok_or("no bridge")?;
+        let opened = b.browse(u.as_str()).await;
+        opened.then_some(()).ok_or_else(|| "loroh is not installed".into())
+    }
+}
+
 #[tauri::command]
 fn log(msg: String) {
     tracing::warn!("page: {}", msg.chars().take(500).collect::<String>());
@@ -674,7 +696,8 @@ pub fn run() {
         log,
         profiles,
         use_profile,
-        sign_out
+        sign_out,
+        to_loroh
     ]);
     let app = b.build(tauri::generate_context!()).expect("tauri builds");
     app.run(|app, e| {

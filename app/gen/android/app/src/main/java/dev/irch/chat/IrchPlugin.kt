@@ -174,8 +174,12 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
   fun browse(invoke: Invoke) {
     val url = invoke.parseArgs(UrlArgs::class.java).url
     val i = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url))
-    activity.startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-    invoke.resolve()
+    try {
+      activity.startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+      invoke.resolve()
+    } catch (e: android.content.ActivityNotFoundException) {
+      invoke.reject("no app opens it")
+    }
   }
 
   @Command
