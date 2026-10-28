@@ -166,6 +166,16 @@ pub(crate) async fn frame(tx: &mut SendStream, b: &[u8]) -> Result<()> {
     Ok(tx.write_all(b).await?)
 }
 
+/// The rest of a stream, in order, to `max` bytes: noq 1.4's `read_to_end`
+/// reads unordered, which can lose data (n0-computer/noq#867).
+pub(crate) async fn rest(rx: &mut RecvStream, max: usize) -> Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut b = Vec::new();
+    rx.take(max as u64 + 1).read_to_end(&mut b).await?;
+    anyhow::ensure!(b.len() <= max, "over {max} bytes");
+    Ok(b)
+}
+
 pub(crate) async fn unframe(
     rx: &mut RecvStream,
     max: usize,
