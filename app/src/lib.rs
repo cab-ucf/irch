@@ -548,6 +548,12 @@ async fn to_loroh(
         let opened = b.browse(u.as_str()).await;
         opened.then_some(()).ok_or_else(|| "loroh is not installed".into())
     }
+    // No loroh there: the page copies it instead.
+    #[cfg(target_os = "ios")]
+    {
+        let _ = (app, u);
+        Err("no loroh on iPhones".into())
+    }
 }
 
 #[tauri::command]
