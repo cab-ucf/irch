@@ -106,7 +106,7 @@ async fn answer(
     rx.read_exact(&mut got).await?;
     let ok = same(&got, &secret);
     let news = match ok {
-        true => rx.read_to_end(MAX).await?,
+        true => crate::sync::rest(&mut rx, MAX).await?,
         false => vec![],
     };
     tx.write_all(&[ok as u8]).await?;

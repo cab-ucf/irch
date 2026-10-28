@@ -517,6 +517,15 @@ pub(crate) fn endpoint(net: &Net) -> iroh::endpoint::Builder {
             Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled)
         }
     };
+    // BBRv3, as loss is the norm: at 0.1% and 50 ms Cubic moves 1.1 MB/s a
+    // stream, BBRv3 23; a 2 MiB window, 16 MB/s at 130 ms (default: 10).
+    let cc = noq_proto::congestion::Bbr3Config::default();
+    let b = b.transport_config(
+        iroh::endpoint::QuicTransportConfig::builder()
+            .stream_receive_window((2u32 << 20).into())
+            .congestion_controller_factory(Arc::new(cc))
+            .build(),
+    );
     // Desktops: the network's proxy and system roots, as any other https.
     let b = b.proxy_from_env();
     #[cfg(not(target_os = "android"))]
@@ -2146,7 +2155,7 @@ impl Node {
         let (mut tx, mut rx) = c.open_bi().await?;
         tx.write_all(&postcard::to_allocvec(a)?).await?;
         tx.finish()?;
-        let b = rx.read_to_end(PREVIEW + 1024).await?;
+        let b = sync::rest(&mut rx, PREVIEW + 1024).await?;
         c.close(0u32.into(), b"done");
         Ok(b)
     }
@@ -2204,7 +2213,7 @@ impl Node {
             (3, Some(_)) => 128,
             _ => 64,
         };
-        let rest = rx.read_to_end(max).await?;
+        let rest = sync::rest(&mut rx, max).await?;
         match postcard::from_bytes(&[&head[..], &rest].concat())? {
             Ask::Get(h) => {
                 tx.write_all(&std::fs::read(self.blob(&h)).unwrap_or_default())

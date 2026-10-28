@@ -8,6 +8,7 @@ Each of these keeps itself up to date.
 | **macOS, Linux** | In a terminal: `curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh \| sh` |
 | **NixOS** | `programs.irch.enable = true;` with [irch's module](https://github.com/cab-ucf/irch#nixos) |
 | **Android** | On the phone, open [irch.apk](https://github.com/cab-ucf/irch/releases/latest/download/irch.apk) and allow your browser to install it, once. Or add `https://github.com/cab-ucf/irch` to [Obtainium](https://obtainium.imranr.dev). |
+| **iPhone** | Install [irch.ipa](https://github.com/cab-ucf/irch/releases/latest/download/irch.ipa) with [AltStore](https://altstore.io) or [SideStore](https://sidestore.io), which re-sign it weekly; new versions install the same way. |
 
 **An always-on storage node**, so your spaces wait for you while everyone is offline:
 - In the app: a space's menu → Storage Nodes → *Run one on this computer*.

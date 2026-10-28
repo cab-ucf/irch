@@ -165,6 +165,62 @@ jobs:
             true # made meanwhile by a desktop job
           gh release upload "$TAG" irch.apk irch.apk.sig --clobber
 
+  # TestFlight too, given an App Store Connect key: APPLE_API_KEY (its id),
+  # APPLE_API_ISSUER, APPLE_API_KEY_P8 (the .p8's text), and APPLE_TEAM_ID.
+  ios:
+    runs-on: macos-latest
+    env:
+      ASC: ${{ secrets.APPLE_API_KEY_P8 != '' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: cargo install tauri-cli --version 2.12.4 --locked
+      - name: The tag is the version
+        run: |
+          [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          grep -qx "version = \"${TAG#v}\"" Cargo.toml
+          v='"version": "'${TAG#v}'"'
+          sed -i.bak "s/\"version\": \"[^\"]*\"/$v/" app/tauri.conf.json
+      - name: The Xcode project, with irch's icons
+        working-directory: app
+        run: |
+          brew install xcodegen
+          cargo tauri ios init --ci
+          cargo tauri icon icons/icon.png
+      - name: An unsigned IPA, which AltStore or SideStore signs
+        working-directory: app
+        run: cargo tauri ios build --ci --no-sign --target aarch64
+      - run: mv app/gen/apple/build/arm64/irch.ipa irch.ipa
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 ||
+            gh release create "$TAG" --title "irch $TAG" \
+              --target "$GITHUB_SHA" ||
+            true # made meanwhile by another job
+          gh release upload "$TAG" irch.ipa --clobber
+      - name: Signed by Apple, to TestFlight
+        if: env.ASC == 'true'
+        working-directory: app
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+          P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          k=$HOME/.appstoreconnect/private_keys/AuthKey_$APPLE_API_KEY.p8
+          mkdir -p "${k%/*}" && echo "$P8" > "$k"
+          APPLE_API_KEY_PATH=$k cargo tauri ios build --ci --target aarch64 \
+            --export-method app-store-connect
+          xcrun altool --upload-app --type ios \
+            --file gen/apple/build/arm64/irch.ipa \
+            --apiKey "$APPLE_API_KEY" --apiIssuer "$APPLE_API_ISSUER"
+
   # One latest.json, here: jobs merging their own into it raced.
   updater:
     needs: desktop
