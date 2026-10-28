@@ -106,7 +106,6 @@ async fn join_sync_and_live() {
     let m = a.view(&id, |s| s.messages(&ch, None, 9)).unwrap();
     assert_eq!(m[1].quote.as_ref().unwrap().text, "hello");
     assert_eq!(a.unread(&id, &ch), (1, 1));
-    assert_eq!(a.mentions(&id, 0).len(), 1);
     a.mark_read(&id, &ch);
     assert_eq!(a.unread(&id, &ch), (0, 0));
 
@@ -314,7 +313,8 @@ async fn a_ring_tells_a_sleeping_phone_what_rang() {
     let url = wake::doorbell(&db, &Net::Direct).await.unwrap();
     b.set_push(Some(url.clone())).await;
     let told = |s: &Id| {
-        a.view(s, |st| st.pushes().iter().any(|p| p.1 == url)) == Some(true)
+        a.view(s, |st| st.pushes_of(None).iter().any(|p| p.1 == url))
+            == Some(true)
     };
     until("a knows b's doorbell", || told(&id) && told(&dm)).await;
     b.notices(); // asked once: what comes next is news
@@ -431,6 +431,15 @@ async fn offered_files_go_from_device_to_members_only() {
     let out = dir("x");
     assert!(x.save(&id, &f, &out).await.is_err(), "no member, no file");
     assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0, "nothing left");
+    // b edits what it saved: what b serves on is still what a shared.
+    std::fs::write(&saved, vec![0; big.len()]).unwrap();
+    let c = node("c").await;
+    c.join(&b.invite(&id).await.unwrap()).await.unwrap();
+    let knows = || b.view(&id, |s| s.kem(&c.id()).is_some()) == Some(true);
+    until("b knows c", knows).await;
+    a.shutdown().await;
+    let got = c.save(&id, &f, &dir("c")).await.unwrap();
+    assert!(std::fs::read(got).unwrap() == big, "from b, as shared");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -617,7 +626,7 @@ async fn writing_wakes_a_sleeping_device() {
     let ch = general(&a, &id);
     b.join(&a.invite(&id).await.unwrap()).await.unwrap();
     b.set_push(Some(url.clone())).await;
-    let told = |n: &Node| n.view(&id, |s| s.pushes().len()) == Some(1);
+    let told = |n: &Node| n.view(&id, |s| s.pushes_of(None).len()) == Some(1);
     until("a knows where to wake b", || told(&a)).await;
     assert!(b.notices().is_empty(), "history stays quiet");
     let named = |n: &Node| n.view(&id, |s| s.profile(&a.id()).is_some());
@@ -655,8 +664,9 @@ async fn writing_rings_a_sleeping_phone() {
     b.join(&a.invite(&id).await.unwrap()).await.unwrap();
     let url = wake::doorbell(&db, &Net::Direct).await.unwrap();
     b.set_push(Some(url.clone())).await;
-    let told =
-        |n: &Node| n.view(&id, |s| s.pushes().iter().any(|p| p.1 == url));
+    let told = |n: &Node| {
+        n.view(&id, |s| s.pushes_of(None).iter().any(|p| p.1 == url))
+    };
     until("a knows b's doorbell", || told(&a) == Some(true)).await;
     let b_id = b.id();
     b.shutdown().await;

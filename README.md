@@ -40,7 +40,8 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
 - Voice and video calls with screen sharing; a DM call rings like a phone.
 - Notifications on desktops and phones, per space: all, @mentions or none.
 - Search on this device, Ctrl+K switcher, drafts per channel, vim keys
-  (Esc, then `j`/`k`, `r`, `e`, `dd`, `?`), swipe gestures on phones.
+  as in the terminal (Esc, then `j`/`k`, `l`/`h`, `J`/`K`, `r`, `e`, `dd`,
+  `?`; off in Settings), swipe gestures on phones.
 - The terminal client is modal like vim: counts, `gg`/`G`, `/` and `n`,
   `:` commands, `l`/`h` into and out of threads, `J`/`K` channels, `?`.
 - A DM closes (✕) and comes back with its next message; deleting it is
@@ -69,7 +70,7 @@ space = a grow-only set of envs;   state = a deterministic fold of it
 - **Bans change the key**, boxed to each remaining member with X-Wing
   (ML-KEM-768 + X25519); a `Back` op keeps history readable for members.
 - **Authority is a fold** in `(time, id)` order, so every replica agrees in
-  any delivery order; only current admins' keys count.
+  any delivery order; only current admins' rekeys count.
 - **One seed is you** on every device; a private space records what you
   joined, so linked devices follow each other.
 - **Storage nodes keep ciphertext, never keys**, so messages wait while
@@ -93,12 +94,14 @@ space = a grow-only set of envs;   state = a deterministic fold of it
 ## Limits
 
 - No forward secrecy inside an epoch; keys rotate on bans and on request.
+- Authors date their own ops (a day ahead at most): a demoted admin's
+  backdated bans and renames stand until undone.
 - Signatures are Ed25519; stored data is post-quantum, transport is not.
 - Peers see each other's addresses, relays see endpoint ids and traffic,
   storage nodes see sizes, times and devices.
 - Calls are for a handful of people; macOS needs Safari 26's WebKit.
-- Any member, banned ones included, can have the space's storage nodes
-  keep sealed files up to 25 MB each; its owner stops by unhosting it.
+- Any member can have the space's storage nodes keep sealed files up to
+  25 MB each, 4 GB a day for the space; a ban stops them.
 - A storage code is a password. Unaudited.
 
 ## Layout

@@ -1,5 +1,5 @@
 //! An order-free fold of a space's ops. Control re-folds in `(ts, id)`
-//! order; authors pick their times, so only current admins' keys count.
+//! order; authors pick their times, so only current admins' rekeys count.
 
 use crate::op::{File, Invite, Op, Role, Signed};
 use crate::{Ch, Id};
@@ -309,10 +309,6 @@ impl State {
         self.pushes.get(&(*a, *d))?.1.as_deref()
     }
 
-    pub fn pushes(&self) -> Vec<(EndpointId, String)> {
-        self.pushes_of(None)
-    }
-
     pub fn pushes_of(&self, who: Option<&Id>) -> Vec<(EndpointId, String)> {
         let ok = |((a, _), (at, _)): &(&(Id, EndpointId), &(Pos, _))| {
             self.role(a) != Role::Banned && !self.stale_at(at, a)
@@ -562,7 +558,7 @@ impl State {
             .filter(|(_, k, p)| {
                 let Some((t, _)) = self.resolve(&k.1, p) else { return false };
                 let names = p.files.iter().map(|f| f.name.as_str());
-                let all = [t.as_str()].into_iter().chain(names);
+                let all = [t].into_iter().chain(names);
                 let all = all.collect::<Vec<_>>().join(" ").to_lowercase();
                 !words.is_empty() && words.iter().all(|w| all.contains(w))
             })
@@ -572,20 +568,21 @@ impl State {
         hits.into_iter().filter_map(view).take(n).collect()
     }
 
-    fn resolve(&self, id: &Id, p: &Post) -> Option<(String, bool)> {
+    fn resolve<'a>(&'a self, id: &Id, p: &'a Post) -> Option<(&'a str, bool)> {
         if self.role(&p.author) == Role::Banned {
             return None;
         }
-        let edits = self.edits.get(id).into_iter().flat_map(|e| e.iter().rev());
+        let mut edits =
+            self.edits.get(id).into_iter().flat_map(|e| e.iter().rev());
         let ok = |(at, (by, t)): &(&Pos, &(Id, Option<String>))| {
             !self.stale_at(at, by)
                 && (*by == p.author
                     || t.is_none() && self.role(by) == Role::Admin)
         };
-        match edits.clone().find(ok).map(|e| e.1) {
+        match edits.find(ok).map(|e| e.1) {
             Some((_, None)) => None,
-            Some((_, Some(t))) => Some((t.clone(), true)),
-            None => Some((p.text.clone(), false)),
+            Some((_, Some(t))) => Some((t, true)),
+            None => Some((&p.text, false)),
         }
     }
 
@@ -610,7 +607,7 @@ impl State {
             Some(Quote {
                 author: q.author,
                 name: self.display_name(&q.author),
-                text,
+                text: text.into(),
             })
         });
         let mut reactions: BTreeMap<String, Vec<Id>> = BTreeMap::new();
@@ -627,14 +624,16 @@ impl State {
         let pinned = self.pins.get(&id).is_some_and(|(at, by, on)| {
             *on && self.role(by) != Role::Banned && !self.stale_at(at, by)
         });
-        let t = self.posts.get(&id.thread()).and(self.thread(&id.thread()));
+        // Only a thread with replies costs its count.
+        let tc = id.thread();
+        let t = self.posts.get(&tc).and_then(|_| self.thread(&tc));
         let thread = t.map_or(0, |t| t.count);
         Some(Message {
             id,
             author,
             name,
             ts,
-            text,
+            text: text.into(),
             edited,
             reply,
             quote,

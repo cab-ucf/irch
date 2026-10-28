@@ -796,8 +796,15 @@ async fn notify(app: &AppHandle, x: &Notice) {
         _ if cfg!(windows) => "IM",
         _ => "message-new-instant",
     };
+    // Linux's servers read a body as markup: a message's <a> stays text.
+    let esc = |s: &str| {
+        let s = s.replace('&', "&amp;").replace('<', "&lt;");
+        s.replace('>', "&gt;")
+    };
+    let body =
+        if cfg!(target_os = "linux") { esc(&x.body) } else { x.body.clone() };
     if x.ring || !front(app) {
-        let b = app.notification().builder().title(&x.title).body(&x.body);
+        let b = app.notification().builder().title(&x.title).body(body);
         if let Err(e) = b.sound(sound).show() {
             tracing::warn!("notification: {e}");
         }
