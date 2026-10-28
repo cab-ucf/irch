@@ -39,7 +39,7 @@ struct Text<'a> {
 
 /// Via the browser: Play Protect takes apps that install apps for malware.
 pub async fn upgrade(app: &tauri::AppHandle) -> anyhow::Result<String> {
-    let url = format!("{}/download/irch.apk", crate::LATEST);
+    let url = format!("{}/download/irch.apk", irch_core::release::LATEST);
     let bridge = app.try_state::<Bridge>().context("no bridge")?;
     bridge.call("browse", Url { url: &url }).await;
     Ok("Your browser downloads irch: open it to install".into())

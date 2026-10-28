@@ -26,6 +26,7 @@ const randomId = (n) =>
     .map((b) => b.toString(16).padStart(2, "0")).join("");
 const mobile = () => matchMedia("(max-width: 760px)").matches;
 const android = /Android/.test(navigator.userAgent);
+const ios = /iPhone|iPad/.test(navigator.userAgent);
 
 function h(tag, props, ...kids) {
   const e = document.createElement(tag);
@@ -178,9 +179,8 @@ function swatch(k) {
   const t = document.createElement("template");
   t.innerHTML = k === "ucf"
     ? `<svg class="swatch" viewBox="0 0 24 24"><rect width="24" height="24"
-      rx="6" fill="${bg}"/><path d="M3 18h18" stroke="${b}" stroke-width="2"/>
-      <text x="12" y="14" fill="${a}" font-size="8.5" font-weight="900"
-      text-anchor="middle" font-family="system-ui,sans-serif">UCF</text></svg>`
+      rx="6" fill="${bg}"/><image href="ucf.svg" x="5" y="2" width="14"
+      height="20"/></svg>`
     : `<svg class="swatch" viewBox="0 0 24 24"><rect width="24" height="24"
       rx="6" fill="${bg}"/><circle cx="9" cy="12" r="5" fill="${a}"/>
       <circle cx="15" cy="12" r="5" fill="${b}" opacity=".85"/></svg>`;
@@ -262,24 +262,29 @@ const isMe = (id) => id === S.me.id;
 
 // ---------- refresh scheduling ----------
 
+// One refresh at a time; what is asked meanwhile, once, after it.
 const need = new Set();
 let frame = 0;
-let chain = Promise.resolve();
+let busy = false;
 
 function schedule(...what) {
   what.forEach((w) => need.add(w));
-  if (!frame) frame = requestAnimationFrame(flush);
+  if (!frame && !busy) frame = requestAnimationFrame(flush);
 }
 
-function flush() {
-  frame = 0;
+async function flush() {
+  [frame, busy] = [0, true];
   const w = new Set(need);
   need.clear();
-  chain = chain.then(async () => {
+  try {
     if (w.has("side")) await loadSidebar();
     if (w.has("members")) await loadMembers();
     if (w.has("msgs")) await loadMessages();
-  }).catch((e) => console.error(e));
+  } catch (e) {
+    console.error(e);
+  }
+  busy = false;
+  if (need.size) schedule();
 }
 
 async function loadSidebar() {
@@ -311,16 +316,22 @@ async function loadMessages() {
     return renderMessages();
   }
   if (nearBottom() && S.limit > 100) S.limit = 100;
+  // The newest (500 at most, as the core gives) afresh; older pages stay.
+  const limit = Math.min(S.limit, 500);
   const msgs = await rpc("messages",
-    { space: s.id, channel: ch.id, before: null, limit: S.limit });
+    { space: s.id, channel: ch.id, before: null, limit });
   if (s.id !== S.sid || ch.id !== S.ch) return; // selection moved on
-  S.msgs = msgs;
-  S.more = msgs.length >= S.limit;
+  const top = msgs[0];
+  const older = msgs.length < limit ? [] : S.msgs.filter((m) =>
+    m.ts < top.ts || (m.ts === top.ts && m.id < top.id));
+  S.msgs = older.concat(msgs);
+  S.more = msgs.length >= limit && (!older.length || S.more);
   if (S.newFrom === undefined) computeNewFrom();
   const last = msgs.at(-1);
   if (last) S.typing.get(`${S.sid}|${S.ch}`)?.delete(last.author);
   renderMessages();
   renderTyping();
+  if (S.normal && !sel()) pick(S.msgs.at(-1));
   if (S.jump && msgs.some((m) => m.id === S.jump)) jumpTo(S.jump);
   S.jump = null;
   if (document.hasFocus() && nearBottom()) markRead();
@@ -406,7 +417,9 @@ function select(sid, ch) {
   renderHeader();
   renderTyping();
   schedule("members", "msgs");
-  if (!mobile()) setTimeout(() => $("input").focus({ preventScroll: true }));
+  if (!mobile() && !S.normal) {
+    setTimeout(() => $("input").focus({ preventScroll: true }));
+  }
 }
 
 const draft = () => `draft.${S.sid}.${S.ch}`;
@@ -663,7 +676,8 @@ function renderHeader() {
     : "Connected with no one now";
   net.onclick = () => toast(net.title);
   const input = $("input");
-  input.placeholder = parent ? `Reply in ${ch.name}`
+  input.placeholder = S.normal ? "-- NORMAL --  j/k pick, ? keys, i types"
+    : parent ? `Reply in ${ch.name}`
     : s?.dm ? `Message @${s.name}`
     : ch ? `Message #${ch.name}` : "";
   input.disabled = !ch || s.locked;
@@ -1109,10 +1123,11 @@ const size = (n) => {
   const i = Math.min(4, Math.floor(Math.log2(Math.max(1, n)) / 10));
   return `${i ? (n / 2 ** (10 * i)).toFixed(1) : n} ${"BKMGT"[i]}${i ? "B" : ""}`;
 };
-const images = new Map(); // hash -> Promise of a data: URL
+const images = new Map(); // hash -> Promise of a data: URL; the latest 64
 
 function image(f) {
   if (!images.has(f.hash)) {
+    if (images.size >= 64) images.delete(images.keys().next().value);
     images.set(f.hash, rpc("file", { space: S.sid, file: f })
       .then((b64) => `data:${mime(f.name)};base64,${b64}`)
       .catch((e) => (images.delete(f.hash), Promise.reject(e))));
@@ -1120,13 +1135,22 @@ function image(f) {
   return images.get(f.hash);
 }
 
+// A loop: `Uint8Array.from` with a mapper takes seconds for 25 MB.
+const bytes = (f) => rpc("file", { space: S.sid, file: f }).then((b64) => {
+  const s = atob(b64);
+  const b = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i);
+  return b;
+});
+
 function attachments(files) {
   return h("div", { class: "attachments" }, files.map((f) => {
     const type = MEDIA[f.name.split(".").pop().toLowerCase()];
     if (type?.startsWith("audio")) {
       const a = h("audio", { controls: true, preload: "none" });
-      rpc("file", { space: S.sid, file: f })
-        .then((b64) => a.src = `data:${type};base64,${b64}`, () => {});
+      // A blob: the page's policy plays no data: media.
+      bytes(f).then((b) => a.src = URL.createObjectURL(new Blob([b], { type })),
+        () => {});
       return h("div", { class: "voice" }, a, fileChip(f));
     }
     if (type?.startsWith("video") && f.size <= PREVIEW) return video(f, type);
@@ -1157,8 +1181,7 @@ function video(f, type) {
   const box = h("div", { class: "video" }, play);
   play.onclick = () => {
     box.classList.add("loading");
-    rpc("file", { space: S.sid, file: f }).then((b64) => {
-      const b = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    bytes(f).then((b) => {
       const src = URL.createObjectURL(new Blob([b], { type }));
       box.replaceChildren(h("video", { src, controls: true, autoplay: true,
         playsinline: true }));
@@ -1177,13 +1200,14 @@ const fileChip = (f) => h("div", { class: "file-chip" }, icon("file"),
   h("div", { class: "meta", title: "Preview", onclick: () => preview(f) },
     h("b", {}, f.name), h("small", {}, size(f.size),
       offered(f) ? " · from its sender's device, while online" : "")),
-  h("button", { title: android ? "Share" : "Save to Downloads",
+  h("button", { title: android ? "Share" : ios ? "Save to Files"
+    : "Save to Downloads",
     onclick: () => saveFile(f) }, icon("down")));
 
 async function saveFile(f) {
   const at = await invoke("save", { space: S.sid, file: f })
     .catch((e) => toast(String(e), true));
-  if (at && !android) toast(`Saved to ${at}`);
+  if (at && !android) toast(ios ? "Saved: Files › irch" : `Saved to ${at}`);
 }
 
 const MEDIA = { mp3: "audio/mpeg", ogg: "audio/ogg", oga: "audio/ogg",
@@ -1205,8 +1229,7 @@ async function preview(f) {
   const ext = f.name.split(".").pop().toLowerCase();
   let b;
   try {
-    const b64 = await rpc("file", { space: S.sid, file: f });
-    b = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    b = await bytes(f);
   } catch (e) {
     return toast(String(e?.message ?? e), true);
   }
@@ -1580,7 +1603,7 @@ function storageFlow(s) {
     };
     const here = local && !paired && h("button", { class: "btn",
       onclick: pair }, "Keep it on this computer's storage node");
-    const start = !local && !android && h("button", { class: "btn",
+    const start = !local && !android && !ios && h("button", { class: "btn",
       onclick: async (e) => {
         e.target.disabled = true;
         e.target.textContent = "Starting a storage node here…";
@@ -1922,6 +1945,8 @@ function settings() {
             onclick: () => copy(S.me.id, "ID copied") }, "Copy")),
         sw("Invisible", "Others see you offline; typing stays private.",
           S.me.invisible, (on) => setInvisible(on)),
+        sw("Vim keys", "Esc in the composer picks messages: j/k, r, e, dd; " +
+          "? lists them.", vimKeys(), (on) => store.set("vim", on ? "1" : "0")),
         android && notifyCheck(),
         h("label", {}, "Storage node"), storage,
         h("p", { class: "note" }, "Paste the code `irch --serve` prints " +
@@ -2410,11 +2435,14 @@ const say = (text) => {
 // ---------- vim ----------
 
 const KEYS = [
-  ["Esc", "out of the composer: pick messages (normal mode)"],
+  ["Esc", "out of the composer: pick messages (vim keys, in Settings)"],
   ["j / k", "next / previous message"], ["gg / G", "first / last"],
+  ["l, Enter / h", "into its thread / back out"],
+  ["J / K", "next / previous channel"],
   ["r", "reply"], ["t", "reply in its thread"], ["e", "edit (yours)"],
-  ["dd", "delete"], ["y", "copy its text"], ["+", "react"],
-  ["n", "add to notes"], ["i, a, Enter", "back to typing"],
+  ["dd", "delete"], ["y", "copy its text"], ["p", "pin"], ["+", "react"],
+  ["n", "add to notes"], ["x", "close this DM"], ["/", "search"],
+  [":", "a /command"], ["i, a, o", "back to typing"],
   ["Ctrl+K", "jump to a channel or DM; @ for anyone to message"],
   ["Ctrl+F", "search"], ["Alt+↑/↓", "previous / next channel"],
   ["/nick, /join, /dm, /me, /shrug, /thread, /invite, /close, /leave, /notes",
@@ -2455,7 +2483,15 @@ function vim(e) {
     y: () => m && copy(m.text, "Copied"),
     "+": () => m && picker(row(), (em) => react(m, em, true)),
     n: () => m && toNotes(m),
-    i: () => typeMode(), a: () => typeMode(), Enter: () => typeMode(),
+    p: () => m && publish({ Pin: { target: m.id, on: !m.pinned } }),
+    l: () => m?.thread && !inThread() && openThread(m.id),
+    Enter: () => m?.thread && !inThread() ? openThread(m.id) : typeMode(),
+    h: () => inThread() && select(S.sid, S.thread.parent),
+    J: () => stepChannel(1), K: () => stepChannel(-1),
+    x: () => cur()?.dm && closeDm(cur()),
+    "/": () => searchFlow(),
+    ":": () => (typeMode(), !$("input").value && insert($("input"), "/")),
+    i: () => typeMode(), a: () => typeMode(), o: () => typeMode(),
     "?": () => keysHelp(),
   }[k];
   if (!act) return false;
@@ -2463,9 +2499,17 @@ function vim(e) {
   return true;
 }
 
+// Vim keys, unless turned off: Esc in the composer, then j/k and the rest.
+const vimKeys = () => store.get("vim") !== "0";
+
+function normal(on) {
+  S.normal = on;
+  pick(on ? S.msgs.at(-1) : null);
+  renderHeader();
+}
+
 function typeMode() {
-  pick(null);
-  S.normal = false;
+  normal(false);
   $("input").focus({ preventScroll: true });
 }
 
@@ -2556,7 +2600,7 @@ function wire() {
   $("attach-btn").onclick = (e) => menu(e.currentTarget, [
     ["Upload: storage nodes keep it (to 5 GB)", "clip", () => choose(false)],
     ["Share from this device (any size)", "disk",
-      () => (android ? choose(true) : offerPaths())],
+      () => (android || ios ? choose(true) : offerPaths())],
   ]);
   $("picker").onchange = (e) => {
     addFiles([...e.target.files], S.keep);
@@ -2595,6 +2639,7 @@ function wire() {
 
   const input = $("input");
   mentionPicker(input);
+  input.addEventListener("focus", () => S.normal && normal(false));
   input.addEventListener("input", () => {
     autosize(input);
     store.set(draft(), input.value);
@@ -2641,14 +2686,10 @@ function wire() {
     } else if (e.key === "Escape" && !$("modal").open) {
       if (closePop) closePop();
       else if (S.reply) cancelReply();
-      else if (S.normal) {
-        S.normal = false;
-        pick(null);
-      }
-      else if (e.target === input && S.msgs.length) {
+      else if (S.normal) normal(false);
+      else if (e.target === input && S.msgs.length && vimKeys()) {
         input.blur();
-        S.normal = true;
-        pick(S.msgs.at(-1));
+        normal(true);
       } else if (inThread()) select(S.sid, S.thread.parent);
       else {
         sc.scrollTop = sc.scrollHeight;
@@ -2678,9 +2719,6 @@ async function start() {
   }
   wire();
   renderEmpty();
-  if (android && store.get("bg") === "1") {
-    quiet(invoke("background", { on: true }));
-  }
   // Member lists change rarely but can be large: at most every 2 s.
   let membersDue = 0;
   const members = () => {

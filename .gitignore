@@ -9,3 +9,4 @@ target/
 /app/gen/android/buildSrc/.gradle/
 /app/gen/android/app/src/main/jniLibs/
 /app/gen/android/app/src/main/assets/
+/app/gen/apple/

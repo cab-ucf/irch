@@ -29,7 +29,7 @@ pub fn markdown(
     let at = format!("[{who}]({})", link(space, &ch, &m.id));
     let first = |t: &str| {
         let l = t.lines().find(|l| !l.trim().is_empty());
-        l.unwrap_or("(attachment)").trim().to_string()
+        tame(l.unwrap_or("(attachment)").trim())
     };
     let due = due.filter(|d| d.chars().all(|c| "0123456789-T:".contains(c)));
     if todo {
@@ -66,9 +66,42 @@ fn plain(s: &str) -> String {
     o
 }
 
-/// Inert: no images (they load anywhere), no fences (plugins run them).
+/// Inert: no images (they load anywhere), no fences (plugins run them),
+/// no list item or quote of its own (a task, or loroh's event), and no
+/// `due:` or `at:` word (a time loroh would act on).
 fn tame(s: &str) -> String {
-    s.replace("![", "\\![").replace("```", "\\`\\`\\`").replace("~~~", "\\~~~")
+    let line = |l: &str| {
+        let t = l.trim_start();
+        let (ind, l) = (&l[..l.len() - t.len()], t.trim_end());
+        let rest = l.trim_start_matches(|c: char| c.is_ascii_digit());
+        let n = l.len() - rest.len();
+        let mark = match rest.chars().next() {
+            Some('.' | ')') if n > 0 => Some(n),
+            Some('-' | '+' | '*') if n == 0 => Some(0),
+            _ => None,
+        };
+        let spaced = |m: &usize| {
+            l[m + 1..].chars().next().is_none_or(char::is_whitespace)
+        };
+        let l = match mark.filter(spaced) {
+            Some(m) => format!("{}\\{}", &l[..m], &l[m..]),
+            None if l.starts_with('>') => format!("\\{l}"),
+            None => l.into(),
+        };
+        let word = |w: &str| {
+            let marks = |c: &char| !"*_~`\\[(".contains(*c);
+            let bare: String = w.chars().filter(marks).collect();
+            match bare.starts_with("due:") || bare.starts_with("at:") {
+                true => w.replacen(':', " :", 1),
+                false => w.into(),
+            }
+        };
+        let l = l.split_inclusive(char::is_whitespace).map(word);
+        format!("{ind}{}", l.collect::<String>())
+    };
+    let s = s.replace("![", "\\![").replace("```", "\\`\\`\\`");
+    let s = s.replace("~~~", "\\~~~");
+    s.lines().map(line).collect::<Vec<_>>().join("\n")
 }
 
 pub fn list(vault: &Path) -> Vec<String> {
@@ -186,6 +219,11 @@ fn messages_and_threads_become_markdown() {
         tame("![x](https://t/p.png)\n```dataviewjs"),
         "\\![x](https://t/p.png)\n\\`\\`\\`dataviewjs"
     );
+    // No task, event or time of its own for loroh.
+    let t = "- [ ] pay due:2030-01-01\n  > 1. go **at**:2030-01-01\n*ok* 3.";
+    let ok =
+        "\\- [ ] pay due :2030-01-01\n  \\> 1. go **at** :2030-01-01\n*ok* 3.";
+    assert_eq!(tame(t), ok);
     // A link planted where the note's temporary file was: never written.
     #[cfg(unix)]
     {

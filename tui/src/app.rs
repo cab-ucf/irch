@@ -955,15 +955,16 @@ impl App {
         }
     }
 
+    /// Once a row a frame: this room alone, not every thread's.
     fn channel_name(&self, s: &Id, c: &Ch) -> String {
-        let chans = self.n.view(s, |st| st.rooms()).unwrap_or_default();
-        let name = chans.into_iter().find(|x| x.0 == *c).map(|x| x.1);
-        let dm = self.n.view(s, |st| st.dm.is_some()) == Some(true);
-        let thread = self.n.view(s, |st| st.thread(c).is_some());
-        match (thread == Some(true), dm, name) {
-            (true, _, n) => format!("  ↳ {}", n.unwrap_or_default()),
-            (_, true, _) => format!("@{}", self.space_name(s)),
-            (_, _, n) => format!("#{}", n.unwrap_or_default()),
+        let named = |st: &irch_core::State| {
+            let chan = st.channels().into_iter().find(|x| x.0 == *c);
+            (st.thread(c).map(|t| t.name), chan.map(|x| x.1), st.dm.is_some())
+        };
+        match self.n.view(s, named).unwrap_or_default() {
+            (Some(t), ..) => format!("  ↳ {t}"),
+            (_, _, true) => format!("@{}", self.space_name(s)),
+            (_, n, _) => format!("#{}", n.unwrap_or_default()),
         }
     }
 

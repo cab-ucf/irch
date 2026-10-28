@@ -1,9 +1,9 @@
-# irch
+# <img src="app/ui/logo.svg" width="40" align="top"> irch
 
 Private, peer-to-peer community chat shaped like Discord, with no server:
 spaces, channels, threads, DMs, voice and video calls. A small Rust core on
-[iroh](https://iroh.computer), a terminal client, and one app for desktops
-and Android.
+[iroh](https://iroh.computer), a terminal client, and one app for desktops,
+Android and iPhones.
 
 ## Install
 
@@ -16,6 +16,10 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
 
 - **Android**: open [irch.apk](https://github.com/cab-ucf/irch/releases/latest/download/irch.apk)
   on the phone, or track this repo in [Obtainium](https://obtainium.imranr.dev).
+- **iPhone**: [irch.ipa](https://github.com/cab-ucf/irch/releases/latest/download/irch.ipa)
+  in [AltStore](https://altstore.io) or [SideStore](https://sidestore.io)
+  (updated by hand), or TestFlight once releases have an App Store
+  Connect key.
 - **Storage node** (always on): a space's *Storage Nodes → Run one on this
   computer*, or `install.sh … | sh -s -- --server`.
 - **NixOS**: `inputs.irch.url = "github:cab-ucf/irch";`, import
@@ -24,7 +28,8 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
   (a storage node). Updates are checked against irch's key, built by Nix.
 - **From source**: `cargo run --release -p irch` (terminal, `--serve` for a
   storage node); `cd app && cargo tauri dev` or
-  `cargo tauri android build --apk`. Linux needs webkit2gtk-4.1, gtk3,
+  `cargo tauri android build --apk`; on a Mac, `cargo tauri ios init`,
+  then `cargo tauri ios dev`. Linux needs webkit2gtk-4.1, gtk3,
   libsoup3 and, for calls, gstreamer plugins base and good.
 
 ## Features
@@ -40,7 +45,8 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
 - Voice and video calls with screen sharing; a DM call rings like a phone.
 - Notifications on desktops and phones, per space: all, @mentions or none.
 - Search on this device, Ctrl+K switcher, drafts per channel, vim keys
-  (Esc, then `j`/`k`, `r`, `e`, `dd`, `?`), swipe gestures on phones.
+  as in the terminal (Esc, then `j`/`k`, `l`/`h`, `J`/`K`, `r`, `e`, `dd`,
+  `?`; off in Settings), swipe gestures on phones.
 - The terminal client is modal like vim: counts, `gg`/`G`, `/` and `n`,
   `:` commands, `l`/`h` into and out of threads, `J`/`K` channels, `?`.
 - A DM closes (✕) and comes back with its next message; deleting it is
@@ -71,7 +77,7 @@ space = a grow-only set of envs;   state = a deterministic fold of it
 - **Bans change the key**, boxed to each remaining member with X-Wing
   (ML-KEM-768 + X25519); a `Back` op keeps history readable for members.
 - **Authority is a fold** in `(time, id)` order, so every replica agrees in
-  any delivery order; only current admins' keys count.
+  any delivery order; only current admins' rekeys count.
 - **One seed is you** on every device; a private space records what you
   joined, so linked devices follow each other.
 - **Storage nodes keep ciphertext, never keys**, so messages wait while
@@ -84,7 +90,8 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   doorbell (an iroh endpoint with no connections) waits. Whoever writes
   rings it, handing over the sealed message, so the phone notifies at once.
   Android must let irch run unrestricted; irch says so until it does. With
-  a UnifiedPush app such as ntfy, that app wakes irch instead.
+  a UnifiedPush app such as ntfy, that app wakes irch instead. iPhones
+  have no such door: irch catches up when opened, and a call keeps it up.
 
 | network | terminal (app env) | who else is involved |
 |---|---|---|
@@ -95,12 +102,16 @@ space = a grow-only set of envs;   state = a deterministic fold of it
 ## Limits
 
 - No forward secrecy inside an epoch; keys rotate on bans and on request.
+- Authors date their own ops (a day ahead at most): a demoted admin's
+  backdated bans and renames stand until undone.
 - Signatures are Ed25519; stored data is post-quantum, transport is not.
 - Peers see each other's addresses, relays see endpoint ids and traffic,
   storage nodes see sizes, times and devices.
-- Calls are for a handful of people; macOS needs Safari 26's WebKit.
-- Any member, banned ones included, can have the space's storage nodes
-  keep sealed files up to 25 MB each; its owner stops by unhosting it.
+- Calls are for a handful of people; Macs and iPhones need WebKit 26.
+- An iPhone in the background is not told of messages: Apple's push is a
+  server.
+- Any member can have the space's storage nodes keep sealed files up to
+  25 MB each, 4 GB a day for the space; a ban stops them.
 - A storage code is a password. Unaudited.
 
 ## Layout
@@ -109,7 +120,7 @@ space = a grow-only set of envs;   state = a deterministic fold of it
 |---|---|
 | `core/` | ops, crypto, fold, logs, sync, node, the app's JSON API |
 | `tui/` | `irch`: terminal client, `--serve`, `--install` |
-| `app/` | Tauri 2 shell; `ui/` the page; `gen/android` the Android project |
+| `app/` | Tauri 2 shell; `ui/` the page; `gen/android` the Android project; `gen/apple`, generated |
 
 Prior art: Quiet, Keet, Briar, Cwtch, SimpleX, Jami, p2panda;
 calls follow n0's iroh-live. GPL-3.0-or-later.

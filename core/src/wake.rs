@@ -5,6 +5,7 @@
 use crate::Net;
 use crate::op::code;
 use anyhow::{Result, bail, ensure};
+use iroh::endpoint::Incoming;
 use iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -69,33 +70,53 @@ pub async fn doorbell(dir: &Path, net: &Net) -> Result<String> {
 }
 
 /// Until rung with the secret; with news, unless an older irch rang bare.
+/// Ringers are heard at once: one that stalls holds up nobody, and past
+/// 32 at once the rest are refused.
 pub async fn rung(dir: &Path, net: &Net) -> Result<Option<News>> {
     let (ep, secret) = bell(dir, net).await?;
+    let mut rings = tokio::task::JoinSet::new();
     loop {
-        let Some(inc) = ep.accept().await else { bail!("doorbell closed") };
-        let answer = async {
-            let c = inc.await?;
-            let (mut tx, mut rx) = c.accept_bi().await?;
-            let mut got = [0u8; 16];
-            rx.read_exact(&mut got).await?;
-            let ok = same(&got, &secret);
-            let news = match ok {
-                true => rx.read_to_end(MAX).await?,
-                false => vec![],
-            };
-            tx.write_all(&[ok as u8]).await?;
-            tx.finish()?;
-            let _ = timeout(SLOW, c.closed()).await;
-            let news = (news.len() > 32).then(|| {
-                let id = crate::Id(news[..32].try_into().expect("32"));
-                (id, news[32..].to_vec())
-            });
-            anyhow::Ok(ok.then_some(news))
-        };
-        if let Ok(Ok(Some(news))) = timeout(SLOW, answer).await {
-            return Ok(news);
+        tokio::select! {
+            inc = ep.accept() => {
+                let Some(inc) = inc else { bail!("doorbell closed") };
+                if rings.len() >= 32 {
+                    inc.refuse();
+                } else {
+                    rings.spawn(timeout(SLOW, answer(inc, secret)));
+                }
+            }
+            // Matched inside: a wrong ring must not stall the next one.
+            Some(r) = rings.join_next() => {
+                if let Ok(Ok(Ok(Some(news)))) = r {
+                    return Ok(news);
+                }
+            }
         }
     }
+}
+
+/// `Some` if rung with the secret, then its news.
+async fn answer(
+    inc: Incoming,
+    secret: [u8; 16],
+) -> Result<Option<Option<News>>> {
+    let c = inc.await?;
+    let (mut tx, mut rx) = c.accept_bi().await?;
+    let mut got = [0u8; 16];
+    rx.read_exact(&mut got).await?;
+    let ok = same(&got, &secret);
+    let news = match ok {
+        true => crate::sync::rest(&mut rx, MAX).await?,
+        false => vec![],
+    };
+    tx.write_all(&[ok as u8]).await?;
+    tx.finish()?;
+    let _ = timeout(SLOW, c.closed()).await;
+    let news = (news.len() > 32).then(|| {
+        let id = crate::Id(news[..32].try_into().expect("32"));
+        (id, news[32..].to_vec())
+    });
+    Ok(ok.then_some(news))
 }
 
 /// Relays https only: any member names them, so none is trusted.

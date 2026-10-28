@@ -1,4 +1,4 @@
-//! irch on the desktop and on Android: the page in `ui/` over one command.
+//! irch on desktops and phones: the page in `ui/` over one command.
 
 #[cfg(target_os = "android")]
 mod android;
@@ -341,7 +341,9 @@ async fn save(
     let (n, p) = (node(&s).await?, app.path());
     #[cfg(target_os = "android")]
     let dir = p.app_cache_dir().map(|d| d.join("shared"));
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "ios")]
+    let dir = p.document_dir(); // Files › irch
+    #[cfg(desktop)]
     let dir = p.download_dir().or_else(|_| p.home_dir());
     let dir = dir.map_err(|e| e.to_string())?;
     let f = n.save(&space, &file, &dir).await.map_err(err)?;
@@ -413,8 +415,6 @@ async fn tune(s: State<'_, App>, to: Channel<Body>) -> Result<(), String> {
     Ok(())
 }
 
-use irch_core::release::LATEST;
-
 /// Built by package.nix: NixOS keeps it up to date.
 const NIXOS: bool = option_env!("IRCH_NIXOS").is_some();
 
@@ -448,7 +448,8 @@ async fn serve_here(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn update(app: AppHandle) -> Result<Option<String>, String> {
-    if NIXOS {
+    // The App Store, TestFlight or AltStore updates an iPhone's.
+    if NIXOS || cfg!(target_os = "ios") {
         return Ok(None);
     }
     newer(&app).await.map_err(err)
@@ -469,7 +470,7 @@ async fn upgrade(
         {
             app.restart();
         }
-        browse(LATEST).map_err(err)?;
+        browse(irch_core::release::LATEST).map_err(err)?;
         Ok(Some("irch's release page is open: install it from there".into()))
     }
     #[cfg(target_os = "android")]
@@ -477,13 +478,18 @@ async fn upgrade(
         let _ = progress;
         android::upgrade(&app).await.map(Some).map_err(err)
     }
+    #[cfg(target_os = "ios")]
+    {
+        let _ = (app, progress);
+        Ok(None)
+    }
 }
 
 #[tauri::command]
 async fn notify_check(app: AppHandle, ask: String) -> Result<Value, String> {
     #[cfg(target_os = "android")]
     return android::notify_check(&app, &ask).await.map_err(err);
-    #[cfg(desktop)]
+    #[cfg(not(target_os = "android"))]
     {
         let _ = (app, ask);
         Ok(Value::Null)
@@ -660,6 +666,11 @@ pub fn run() {
             if let Some(b) = h.try_state::<android::Bridge>() {
                 b.watch_network(h.clone()).await;
             }
+            #[cfg(target_os = "ios")]
+            {
+                use tauri_plugin_notification::NotificationExt;
+                let _ = h.notification().request_permission();
+            }
             start(&h, None).await
         });
         Ok(())
@@ -819,12 +830,20 @@ async fn notify(app: &AppHandle, x: &Notice) {
         _ if cfg!(windows) => "IM",
         _ => "message-new-instant",
     };
+    // Linux's servers read a body as markup: a message's <a> stays text.
+    let esc = |s: &str| {
+        let s = s.replace('&', "&amp;").replace('<', "&lt;");
+        s.replace('>', "&gt;")
+    };
+    let body =
+        if cfg!(target_os = "linux") { esc(&x.body) } else { x.body.clone() };
     if x.ring || !front(app) {
-        let b = app.notification().builder().title(&x.title).body(&x.body);
+        let b = app.notification().builder().title(&x.title).body(body);
         if let Err(e) = b.sound(sound).show() {
             tracing::warn!("notification: {e}");
         }
     }
+    #[cfg(desktop)]
     if x.ring {
         show(app);
     }
