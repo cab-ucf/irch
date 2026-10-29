@@ -3516,7 +3516,7 @@ checksum = "791930b43c0d5973160d90a8f3894509f2b273430f5c5c73b668636d0287c5c0"
 
 [[package]]
 name = "irch"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3535,7 +3535,7 @@ dependencies = [
 
 [[package]]
 name = "irch-app"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "data-encoding",
@@ -3564,7 +3564,7 @@ dependencies = [
 
 [[package]]
 name = "irch-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3592,7 +3592,7 @@ dependencies = [
 
 [[package]]
 name = "irch-math"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "typst",
  "typst-html",
@@ -4242,9 +4242,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.191"
+version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libdbus-sys"
