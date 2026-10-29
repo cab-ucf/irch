@@ -22,10 +22,10 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
   Connect key.
 - **Storage node** (always on): a space's *Storage Nodes → Run one on this
   computer*, or `install.sh … | sh -s -- --server`.
-- **NixOS**: `inputs.irch.url = "github:cab-ucf/irch";`, import
-  `inputs.irch.nixosModules.default`, then `programs.irch.enable = true;`
-  (the app) and `services.irch = { enable = true; users = [ "you" ]; };`
-  (a storage node). Updates are checked against irch's key, built by Nix.
+- **NixOS**: `inputs.irch.url = "github:cab-ucf/irch";` and
+  `irch.nixosModules.default` among the modules: the app and a storage
+  node, kept up to date (checked against irch's key, built by Nix).
+  `services.irch.enable = false;` leaves the node out.
 - **From source**: `cargo run --release -p irch` (terminal, `--serve` for a
   storage node); `cd app && cargo tauri dev` or
   `cargo tauri android build --apk`; on a Mac, `cargo tauri ios init`,
