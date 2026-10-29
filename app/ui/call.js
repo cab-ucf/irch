@@ -54,15 +54,27 @@ function sayCodecs() {
   const b = new Uint8Array(10 + decodes.length);
   b[0] = CAPS;
   b.set(decodes.map((i) => i + 1), 10);
-  quiet(core.invoke("media", b));
+  media(b);
 }
+
+// Android's bridge turns bytes into JSON arrays of numbers (4x, slow to
+// parse): base64 there, a third larger and quick.
+const android = /Android/.test(navigator.userAgent);
+const b64 = (b) => {
+  let s = "";
+  for (let i = 0; i < b.length; i += 0x8000) {
+    s += String.fromCharCode(...b.subarray(i, i + 0x8000));
+  }
+  return btoa(s);
+};
+const media = (b) => quiet(core.invoke("media", android ? { data: b64(b) } : b));
 
 function send(kind, codec, chunk) {
   const b = new Uint8Array(10 + chunk.byteLength);
   b.set([kind, codec]);
   new DataView(b.buffer).setFloat64(2, chunk.timestamp, true);
   chunk.copyTo(b.subarray(10));
-  quiet(core.invoke("media", b));
+  media(b);
 }
 
 export async function join(space, channel, rpc) {
@@ -90,8 +102,10 @@ export async function join(space, channel, rpc) {
   call.mic = !!mic;
   if (!mic) return call.changed();
   aenc = new AudioEncoder({ output: (c) => send(0, 0, c), error: () => {} });
+  // In-band FEC: a lost packet is rebuilt from the next, not heard as a gap.
   aenc.configure({ codec: "opus", sampleRate: RATE, numberOfChannels: 1,
-    bitrate: 32000 });
+    bitrate: 32000, opus: { frameDuration: 20000, useinbandfec: true,
+      packetlossperc: 10, application: "voip" } });
   const node = new AudioWorkletNode(ctx, "mic");
   node.port.onmessage = ({ data }) => {
     call.level = call.mic ? rms(data) : 0;
@@ -127,12 +141,16 @@ export async function video(kind) {
   if (kind && call.on) {
     const m = navigator.mediaDevices;
     const fps = kind === "screen" ? 10 : 15;
+    // A phone held upright sends a face upright: 3:4, cropped if its
+    // camera gives landscape anyway.
     const tall = matchMedia("(pointer: coarse) and (orientation: portrait)");
-    const [x, y] = tall.matches ? [480, 640] : [640, 480];
+    const upright = () => kind === "cam" && tall.matches;
+    const [x, y] = upright() ? [720, 960] : [640, 480];
     const s = await (kind === "screen"
       ? m.getDisplayMedia({ video: { frameRate: fps } })
       : m.getUserMedia({ video: { facingMode: "user", width: { ideal: x },
-        height: { ideal: y }, frameRate: fps } }));
+        height: { ideal: y }, aspectRatio: { ideal: x / y },
+        frameRate: fps } }));
     const v = document.createElement("video");
     Object.assign(v, { muted: true, playsInline: true, srcObject: s });
     await quiet(v.play());
@@ -167,12 +185,17 @@ export async function video(kind) {
     venc = make();
     // Frames from a canvas, where a video element gives none.
     const canvas = h0("canvas");
+    let sw = 0, sh = 0, crop = false;
     const frame = (t) => {
       try {
+        if (crop) throw 0;
         return new VideoFrame(v, { timestamp: t });
       } catch {
         [canvas.width, canvas.height] = [w, h];
-        canvas.getContext("2d").drawImage(v, 0, 0, w, h);
+        const sx = (sw - w * sh / h) / 2;
+        canvas.getContext("2d")
+          .drawImage(v, Math.max(0, sx), 0, sw - 2 * Math.max(0, sx), sh,
+            0, 0, w, h);
         return new VideoFrame(canvas, { timestamp: t });
       }
     };
@@ -184,8 +207,12 @@ export async function video(kind) {
       if (venc.state === "closed") venc = make();
       if (venc.encodeQueueSize > 2) return;
       try {
-        if (v.videoWidth !== w || v.videoHeight !== h) {
-          [w, h, n, sent] = [v.videoWidth, v.videoHeight, 0, 0];
+        const turn = upright() && v.videoWidth > v.videoHeight;
+        if (v.videoWidth !== sw || v.videoHeight !== sh || turn !== crop ||
+          !w) {
+          [sw, sh, crop, n, sent] = [v.videoWidth, v.videoHeight, turn, 0, 0];
+          const even = (k) => Math.max(2, Math.round(k / 2) * 2);
+          [w, h] = crop ? [even(sh * 3 / 4), even(sh)] : [even(sw), even(sh)];
           venc.configure({ codec: VIDEO[codec], width: w, height: h,
             bitrate: fps === 10 ? 1.5e6 : 6e5, framerate: fps,
             ...can.get(codec), latencyMode: "realtime",
@@ -274,7 +301,8 @@ function heard(buf) {
   }
   if (kind === 2 && p.codec !== codec && VIDEO[codec - 1]) {
     try {
-      p.vdec.configure({ codec: VIDEO[codec - 1] });
+      // Each frame shown as it comes, not held for reordering.
+      p.vdec.configure({ codec: VIDEO[codec - 1], optimizeForLatency: true });
       Object.assign(p, { codec, key: false });
     } catch { return; }
   }

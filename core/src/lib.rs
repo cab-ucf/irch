@@ -4,6 +4,7 @@
 pub mod api;
 mod call;
 pub mod crypto;
+pub mod link;
 mod node;
 pub mod notes;
 pub mod op;
@@ -13,7 +14,7 @@ mod store;
 mod sync;
 pub mod wake;
 
-pub use node::{Config, Event, Level, Net, Node, Notice, http};
+pub use node::{Config, Event, Level, Net, Node, Notice, host_name, http};
 pub use op::{File, Invite, Op, Role};
 pub use state::{Member, Message, State, Thread};
 

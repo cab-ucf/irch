@@ -282,6 +282,59 @@ async function unopus(b) {
 const playable = async (b, type) =>
   (/ogg/.test(type) && await unopus(b)) || new Blob([b], { type });
 
+/** A photo taken here and sent: never in the gallery, and no location
+ * in it (a canvas keeps none). */
+async function snap() {
+  if (!chan() || cur()?.locked) return;
+  let face = "environment", stream;
+  const video = h("video", { class: "scan", autoplay: true, muted: true,
+    playsInline: true });
+  const open = async () => {
+    stream?.getTracks().forEach((t) => t.stop());
+    stream = await navigator.mediaDevices.getUserMedia({ video: {
+      facingMode: face, width: { ideal: 1920 }, height: { ideal: 1920 } } });
+    video.srcObject = stream;
+  };
+  try {
+    await open();
+  } catch (e) {
+    return toast(`No camera: ${e?.message ?? e}`, true);
+  }
+  const shot = await modal((finish) => h("div", {},
+    h("div", { class: "m-body" }, video),
+    foot(cancel(finish), h("button", { class: "btn grey", onclick: () => {
+      face = face === "user" ? "environment" : "user";
+      quiet(open());
+    } }, "Flip"),
+    h("button", { class: "btn", onclick: () => finish(grab(video)) },
+      "Take"))));
+  stream.getTracks().forEach((t) => t.stop());
+  if (!shot) return;
+  const go = await modal((finish) => h("div", {},
+    h("div", { class: "m-body" }, h("img", { class: "attachment",
+      src: shot.url, alt: "The photo" })),
+    foot(h("button", { class: "btn link", onclick: () => finish("again") },
+      "Retake"), h("button", { class: "btn", onclick: () => finish(true) },
+      "Send"))));
+  if (go === "again") return snap();
+  if (!go) return;
+  const ext = shot.blob.type === "image/webp" ? "webp" : "jpg";
+  const at = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-");
+  await addFiles([new File([shot.blob], `photo-${at}.${ext}`,
+    { type: shot.blob.type })]);
+  send();
+}
+
+/** The frame on screen, as WebP where the web view writes it, else JPEG. */
+function grab(v) {
+  const c = h("canvas");
+  [c.width, c.height] = [v.videoWidth, v.videoHeight];
+  c.getContext("2d").drawImage(v, 0, 0);
+  const as = (type) => new Promise((ok) => c.toBlob(ok, type, 0.9));
+  return as("image/webp").then((b) => b?.type === "image/webp" ? b
+    : as("image/jpeg")).then((blob) => ({ blob, url: c.toDataURL("image/jpeg", 0.8) }));
+}
+
 function wav(frames, rate) {
   const n = frames.reduce((k, f) => k + f.length, 0);
   const v = new DataView(new ArrayBuffer(44 + 2 * n));
@@ -348,9 +401,10 @@ async function flush() {
   const w = new Set(need);
   need.clear();
   try {
+    // What is read first: the messages, then the lists around them.
+    if (w.has("msgs") && S.spaces.length) await loadMessages();
     if (w.has("side")) await loadSidebar();
     if (w.has("members")) await loadMembers();
-    if (w.has("msgs")) await loadMessages();
   } catch (e) {
     console.error(e);
   }
@@ -962,7 +1016,7 @@ function tile(id) {
   const [w, ht] = me ? [v?.videoWidth, v?.videoHeight] : [v?.width, v?.height];
   return h("div", {
     class: "tile" + (level > 0.02 ? " speaking" : "") +
-      (me && av.call.cam ? " mirror" : ""),
+      (me && av.call.cam ? " mirror" : "") + (me ? " self" : ""),
     style: w && ht ? `--ar: ${w} / ${ht}` : null,
   }, v || avatar(id, name, "big"),
   h("span", { class: "who" }, name, me && !av.call.mic && icon("micOff")));
@@ -979,6 +1033,9 @@ function renderCall() {
   btn.setAttribute("aria-label", btn.title);
   put(btn, icon(here() ? "hangup" : "ring"));
   $("call").classList.toggle("hidden", !here());
+  // Two on a phone: the other fills the screen, we sit in a corner.
+  const duo = here() && mobile() && (ch?.call.length ?? 0) === 2;
+  $("call").classList.toggle("duo", duo && !S.mini);
   const c = av.call;
   if (here()) {
     put($("call"), S.dial && h("div", { class: "dial", role: "status" },
@@ -990,6 +1047,11 @@ function renderCall() {
           c.cam ? "on" : ""),
         av.canShare() && control("screen", "Share your screen",
           () => camera("screen"), c.screen ? "on" : ""),
+        duo && control(S.mini ? "users" : "chat",
+          S.mini ? "Back to the call" : "Show the chat", () => {
+            S.mini = !S.mini;
+            renderCall();
+          }),
         control("hangup", "Leave call", () => av.leave(rpc), "hangup")));
     renderTiles();
   }
@@ -1036,7 +1098,8 @@ function renderMessages(keepScroll) {
     const authorAdmin = memberOf(m.author)?.role === "Admin";
     const sig = JSON.stringify([m.text, m.edited, called(m.author, m.name),
       m.reactions, m.quote, m.thread, m.pinned, cont, mentioned, editing,
-      admin, authorAdmin, m.pending, m.id === mine && m.delivered]);
+      admin, authorAdmin, m.pending, m.id === mine && m.delivered,
+      m.preview]);
     const last = m.id === mine;
     items.push({ k: m.id, sig, make: () =>
       msgRow(m, { cont, mentioned, editing, authorAdmin, last }) });
@@ -1111,6 +1174,7 @@ function msgRow(m, { cont, mentioned, editing, authorAdmin, last }) {
       ? "Delivered" : "Sent, not on their device yet"));
   }
   if (m.files.length) row.append(attachments(m.files));
+  if (m.preview) row.append(previewCard(m.preview));
   if (m.reactions.length) row.append(reactionsBar(m));
   if (m.thread && !inThread()) {
     row.append(h("div", { class: "thread-link", onclick: () =>
@@ -1175,6 +1239,26 @@ function render(tokens, root) {
 
 const link = (href) => h("span", { class: "link", title: href,
   role: "button", tabindex: 0, onclick: () => openLink(href) });
+
+/** A link's preview, as its sender's device saw the site. Its host is
+ * shown as the link has it, so the title cannot pass for another site. */
+function previewCard(p) {
+  let host = "";
+  try {
+    host = new URL(p.url).host;
+  } catch {}
+  const img = p.image && h("img", { class: "thumb", alt: "" });
+  if (img) image(p.image).then((src) => img.src = src, () => img.remove());
+  return h("div", { class: "preview-card", role: "button", tabindex: 0,
+    title: p.url, onclick: () => openLink(p.url) }, img,
+  h("div", {}, h("small", {}, host), p.title && h("b", {}, p.title),
+    p.text && h("p", {}, p.text)));
+}
+
+const firstLink = (t) => t.split(/\s+/)
+  .map((w) => w.replace(/^[<>()[\]{}"'`,.;:!?*_~|]+|[<>()[\]{}"'`,.;:!?*_~|]+$/g, ""))
+  .find((w) => w.startsWith("https://") && w.length > 8);
+const previews = () => store.get("previews") !== "0";
 
 /** A link, shown in full (its site in punycode) before it opens. */
 async function openLink(href) {
@@ -1766,10 +1850,16 @@ function storageFlow(s) {
   const paired = s.storage.some((x) => x.node === local);
   modal((finish) => {
     const sw = (x) => h("label", { class: "switch" },
-      h("span", {}, short(x.node),
-        h("small", {}, (x.node === local ? "This computer" : "Storage node") +
+      h("span", {}, x.name ?? (x.node === local ? "This computer" : x.short),
+        h("small", {}, `device ${x.short}` +
+          (x.node === local ? " · this computer" : "") +
           " · " + (x.seen ? `synced ${ago(x.seen)}`
-            : "not reached since irch started"))),
+            : "not reached since irch started")),
+        h("button", { class: "gear", title: "Rename", onclick: (e) => {
+          e.preventDefault();
+          finish(null);
+          rename(x.node, x.name, () => storageFlow(s));
+        } }, icon("pencil"))),
       h("input", { type: "checkbox", checked: x.on,
         onchange: (e) => keep(x.node, e.target.checked) }), h("i"));
     const pair = async () => {
@@ -2117,6 +2207,7 @@ function settings() {
     return h("div", {},
       h("div", { class: "m-body" },
         h("h2", {}, "My Account"),
+        h("p", { class: "note" }, `irch ${S.me.version} on ${S.me.device}`),
         h("label", {}, "Display name"), name,
         h("label", {}, "Theme"),
         h("div", { class: "chips" }, ...Object.entries(THEMES).map(([k, v]) =>
@@ -2139,6 +2230,9 @@ function settings() {
         sw("Invisible", "Others see you offline; typing stays private. " +
           "Calls you join still show.", S.me.invisible,
         (on) => setInvisible(on)),
+        sw("Link previews", "Made on this device when you send a link: " +
+          "the site sees your address then. Nobody else asks it.",
+        previews(), (on) => store.set("previews", on ? "1" : "0")),
         sw("Private notifications", "Banners say only that something came, " +
           "not who sent it or what it says.", S.private,
         (on) => invoke("private", { on }).then((v) => S.private = v)),
@@ -2161,7 +2255,7 @@ function settings() {
         }, icon("users"), "Devices, profiles and signing out"),
         h("button", {
           class: "choice", onclick: () => { finish(null); updates(false); },
-        }, icon("down"), "Check for updates"),
+        }, icon("down"), `Check for updates (this is ${S.me.version})`),
         h("p", { class: "note" }, "Your identity is a key on your devices. " +
           "Messages are end-to-end encrypted; read positions stay here.")),
       foot(cancel(finish),
@@ -2234,10 +2328,23 @@ async function devicesFlow() {
     h("div", { class: "m-body" }, h("h2", {}, "Your devices"),
       h("p", { class: "sub" }, "Every device linked to you, by when it " +
         "last wrote. One you do not know means your link code leaked."),
-      ds.map((d) => h("p", { class: "check ok" }, d.device,
-        h("small", {}, ` · ${d.this ? "this device" : ago(d.seen)}`)))),
+      ds.map((d) => h("div", { class: "row shared" },
+        h("span", {}, h("b", {}, d.name ?? "Unnamed"),
+          h("small", {}, ` · ${d.device} · ` +
+            (d.this ? "this device" : `wrote ${ago(d.seen)}`))),
+        h("button", { class: "btn grey", onclick: () => rename(d.id, d.name,
+          () => devicesFlow()) }, "Rename")))),
     foot(h("button", { class: "btn grey", onclick: () => finish(null) },
       "Done"))));
+}
+
+/** Name a device or storage node of ours, on every device of ours. */
+async function rename(id, now, then) {
+  const name = await ask({ title: "Rename", label: "Its name",
+    value: now ?? "", placeholder: "Laptop, Pixel, Basement server" });
+  if (!name) return then?.();
+  await quiet(call("name_device", { device: id, name }));
+  then?.();
 }
 
 /** A device lost: retire the identity everywhere, then start afresh. */
@@ -2842,7 +2949,10 @@ async function send() {
   S.stick = true;
   try {
     const op = { Post: { channel: ch.id, text, reply, files } };
-    await call("publish", { space: s.id, op });
+    const id = await call("publish", { space: s.id, op });
+    // Its link's preview, made here; nobody else asks the site.
+    const url = previews() && firstLink(text);
+    if (url) quiet(rpc("preview", { space: s.id, message: id, url }));
   } catch {
     input.value = text;
     S.files = files;
@@ -2905,6 +3015,9 @@ function wire() {
     store.set("members", on ? "1" : "0");
   };
   $("attach-btn").append(icon("clip"));
+  $("snap-btn").append(icon("cam"));
+  $("snap-btn").onclick = snap;
+  $("snap-btn").classList.toggle("hidden", !navigator.mediaDevices);
   const choose = (keep) => ((S.keep = keep), $("picker").click());
   $("attach-btn").onclick = (e) => menu(e.currentTarget, [
     ["Upload: storage nodes keep it (to 5 GB)", "clip", () => choose(false)],

@@ -152,6 +152,9 @@ async fn main() -> Result<()> {
     let n =
         Node::start(Config { dir, name, net, link, serve, notes, big }).await?;
     if let Some(code) = n.storage_code().await {
+        // Which one it is, as the app lists it: not secret, unlike its code.
+        let (name, id) = (irch_core::host_name(), n.device());
+        println!("Storage node {name}, device {}", id.fmt_short());
         std::fs::write(code_file, &code)?;
         // For nixos.nix; unprinted, so no wider-read journal holds it.
         match std::env::var_os("IRCH_CODE_FILE") {

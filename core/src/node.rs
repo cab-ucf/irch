@@ -824,6 +824,12 @@ impl Node {
                 let (name, kem) = (n.name(), n.me.pk());
                 n.post(&own, Op::Profile { name, kem }).await?;
             }
+            // Named for us at once (renamed in My Account › Your devices).
+            let device = n.ep.id();
+            if n.label(&device).is_none() {
+                let name = host_name();
+                n.post(&own, Op::Label { device, name }).await?;
+            }
             n.reconcile().await;
         }
         tokio::spawn(heartbeat(Arc::downgrade(&n)));
@@ -1154,15 +1160,21 @@ impl Node {
         let Ok(sp) = self.get(id) else { return vec![] };
         let near: Vec<_> = lock(&sp.nbrs).iter().copied().collect();
         let mine = self.view(&self.own, |s| s.storage()).unwrap_or_default();
+        // Our own devices and storage nodes go by the names we gave them.
+        let named: HashMap<_, _> =
+            near.iter().filter_map(|d| Some((*d, self.label(d)?))).collect();
+        let me = self.id();
         let b = lock(&sp.book);
         let host = |d: &EndpointId| {
             b.st.hosts().iter().any(|h| h.id == *d)
                 || mine.iter().any(|(a, _)| a.id == *d)
         };
-        let who = |d: &EndpointId| match b.st.owner_of(d) {
-            Some(u) => b.st.display_name(&u),
-            None if host(d) => "a storage node".into(),
-            None => "a device not known yet".into(),
+        let who = |d: &EndpointId| match (named.get(d), b.st.owner_of(d)) {
+            (Some(n), _) => format!("{n} (yours)"),
+            (_, Some(u)) if u == me => "a device of yours".into(),
+            (_, Some(u)) => b.st.display_name(&u),
+            _ if host(d) => "a storage node".into(),
+            _ => "a device not known yet".into(),
         };
         near.into_iter().map(|d| (d, who(&d))).collect()
     }
@@ -1508,6 +1520,14 @@ impl Node {
                 self.gossiped(sp, ts);
             }
             None => sp.nbrs().into_iter().for_each(|p| self.sync(sp, p)),
+        }
+        // Gossip with nobody in it holds it until the next sync, minutes
+        // away: hand it to the space's devices directly, now.
+        if sp.nbrs().is_empty() {
+            self.bootstrap(sp)
+                .into_iter()
+                .take(4)
+                .for_each(|p| self.sync(sp, p));
         }
         Ok((s.id, raw))
     }
@@ -1938,15 +1958,66 @@ impl Node {
 
     pub async fn storage_code(&self) -> Option<String> {
         let token = self.serve?;
-        Some(code("host", &(self.addr().await, token)))
+        // Its name rides along: older irch reads the first two only.
+        Some(code("host", &(self.addr().await, token, host_name())))
     }
 
     pub async fn add_storage(self: &Arc<Self>, code: &str) -> Result<()> {
-        let (addr, token): (EndpointAddr, [u8; 16]) = uncode("host", code)?;
+        type Named = (EndpointAddr, [u8; 16], String);
+        let (addr, token, name) = match uncode::<Named>("host", code) {
+            Ok((a, t, n)) => (a, t, Some(n)),
+            Err(_) => {
+                let (a, t): (EndpointAddr, [u8; 16]) = uncode("host", code)?;
+                (a, t, None)
+            }
+        };
         let own = self.get(&self.own)?;
         let op = Op::Storage { addr: addr.clone(), token, on: true };
         self.post(&own, op).await?;
+        let named = self.label(&addr.id).is_some();
+        if let Some(name) = name.filter(|n| !named && !n.trim().is_empty()) {
+            let device = addr.id;
+            self.post(&own, Op::Label { device, name }).await?;
+        }
         self.host(&own, addr).await;
+        Ok(())
+    }
+
+    /// What we call one of our devices or storage nodes.
+    pub fn label(&self, d: &EndpointId) -> Option<String> {
+        self.view(&self.own, |s| s.label(d).map(String::from)).flatten()
+    }
+
+    /// Name one of our devices or storage nodes, on every device of ours.
+    pub async fn name_device(
+        self: &Arc<Self>,
+        device: EndpointId,
+        name: &str,
+    ) -> Result<()> {
+        let name = named(name)?.to_string();
+        self.post(&self.get(&self.own)?, Op::Label { device, name }).await?;
+        Ok(())
+    }
+
+    /// A preview of `url` (in our message `message`), from its site, now.
+    pub async fn preview(
+        self: &Arc<Self>,
+        space: &Id,
+        message: &Id,
+        url: &str,
+    ) -> Result<()> {
+        let me = self.id();
+        let ours = self.view(space, |s| s.message(message).map(|m| m.1));
+        let m = ours.flatten().context("no such message")?;
+        ensure!(m.author == me && m.text.contains(url), "not a link of ours");
+        ensure!(open(&reqwest::Url::parse(url)?), "https links only");
+        let (mut link, image) = crate::link::fetch(url).await?;
+        if let Some((b, ext)) = image {
+            link.image =
+                self.attach(space, &format!("preview.{ext}"), &b).await.ok();
+        }
+        let target = *message;
+        self.send(&self.get(space)?, Op::Preview { target, link }).await?;
         Ok(())
     }
 
@@ -2990,7 +3061,12 @@ async fn pump(n: Arc<Node>, sp: Weak<Space>, boot: Vec<EndpointId>) {
         let mut wait = Duration::from_secs(2);
         loop {
             let next = tokio::select! {
-                () = moved.notified() => break,
+                // A rekey goes out on the old topic, to those it cut off:
+                // stay a moment, or our own move outruns it.
+                () = moved.notified() => {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    break;
+                }
                 r = tokio::time::timeout(wait, rx.next()) => r,
             };
             let ev = match next {
@@ -3048,6 +3124,26 @@ fn client() -> reqwest::ClientBuilder {
     b.read_timeout(Duration::from_secs(30))
 }
 
+/// Link previews: https to public addresses, every hop of up to three
+/// redirects too (an address in a URL skips the resolver's check).
+pub(crate) fn web() -> reqwest::Client {
+    use reqwest::redirect::Policy;
+    let hop = Policy::custom(|a| match a.previous().len() {
+        3.. => a.error("too many redirects"),
+        _ if !open(a.url()) => a.error("not a public address"),
+        _ => a.follow(),
+    });
+    let b = client().redirect(hop).https_only(true).dns_resolver(Public);
+    b.user_agent("irch link preview").build().expect("HTTP client")
+}
+
+/// https, and no address of a LAN's or this machine's.
+pub(crate) fn open(u: &reqwest::Url) -> bool {
+    let host = u.host_str().unwrap_or_default().trim_matches(['[', ']']);
+    let ip = host.parse::<std::net::IpAddr>().ok();
+    u.scheme() == "https" && ip.is_none_or(|a| public(&a))
+}
+
 /// Push URLs, which members name: public https only, never redirected.
 fn push_http() -> reqwest::Client {
     let b = client().redirect(reqwest::redirect::Policy::none());
@@ -3101,6 +3197,16 @@ async fn heartbeat(n: Weak<Node>) {
                 (Some(p), _) if i % 2 == 0 => n.sync(&sp, *p),
                 _ => {}
             }
+            // One device we know but gossip does not reach, in turn: two
+            // halves of a split mesh find each other within minutes.
+            let far: Vec<_> = n
+                .bootstrap(&sp)
+                .into_iter()
+                .filter(|p| !nb.contains(p))
+                .collect();
+            if let Some(p) = far.get(i as usize % far.len().max(1)) {
+                n.sync(&sp, *p);
+            }
             n.signal(&sp, Op::Here).await;
             n.emit(Event::Presence { space: sp.id });
             // Pairings from before `Hold`, and admins since made.
@@ -3116,6 +3222,28 @@ async fn heartbeat(n: Weak<Node>) {
             let _ = store::save(&n.dir.join("budget"), &*b);
         }
     }
+}
+
+/// This computer's name, or what kind of device it is.
+pub fn host_name() -> String {
+    let file = std::fs::read_to_string("/etc/hostname").ok();
+    let cmd = || {
+        let o = std::process::Command::new("hostname").output().ok()?;
+        Some(String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    let h = std::env::var("COMPUTERNAME").ok().or(file).or_else(cmd);
+    let h = h.map(|h| h.trim().trim_end_matches(".local").to_string());
+    let h = h.filter(|h| !h.is_empty() && h != "localhost");
+    h.unwrap_or_else(|| {
+        match std::env::consts::OS {
+            "android" => "Android phone",
+            "ios" => "iPhone",
+            "macos" => "Mac",
+            "windows" => "Windows PC",
+            _ => "Linux computer",
+        }
+        .into()
+    })
 }
 
 #[cfg(test)]
@@ -3145,6 +3273,22 @@ mod tests {
         assert!(b.parked <= PARKED + (2 << 20) && b.at.is_empty());
         assert_eq!(std::fs::metadata(&p).unwrap().len(), 0);
         std::fs::remove_file(p).unwrap();
+    }
+
+    #[test]
+    fn previews_fetch_only_public_https() {
+        let ok = |u: &str| open(&reqwest::Url::parse(u).unwrap());
+        assert!(ok("https://example.com/a") && ok("https://1.1.1.1/"));
+        for u in [
+            "http://example.com/",
+            "https://10.0.0.1/",
+            "https://127.0.0.1:8080/",
+            "https://[::ffff:192.168.1.1]/",
+            "https://169.254.169.254/latest",
+        ] {
+            assert!(!ok(u), "{u}");
+        }
+        assert!(!host_name().is_empty());
     }
 
     #[test]

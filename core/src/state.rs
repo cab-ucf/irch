@@ -1,7 +1,7 @@
 //! An order-free fold of a space's ops. Control re-folds in `(ts, id)`
 //! order; authors pick their times, so only current admins' rekeys count.
 
-use crate::op::{File, Invite, Op, Role, Signed};
+use crate::op::{File, Invite, Link, Op, Role, Signed};
 use crate::{Ch, Id};
 use iroh::{EndpointAddr, EndpointId};
 use serde::Serialize;
@@ -33,6 +33,7 @@ pub struct Message {
     pub files: Vec<File>,
     pub pinned: bool,
     pub thread: usize,
+    pub preview: Option<Link>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -92,6 +93,8 @@ pub struct State {
     topics: HashMap<Ch, BTreeMap<Pos, (Id, String)>>,
     reacts: HashMap<Id, Reacts>,
     pins: HashMap<Id, (Pos, Id, bool)>,
+    previews: HashMap<Id, (Pos, Id, Link)>,
+    labels: BTreeMap<EndpointId, String>,
     authors: HashMap<Id, u64>,
     devices: HashMap<(EndpointId, Id), u64>,
     // Derived from `control` by `refold`:
@@ -181,6 +184,19 @@ impl State {
                     (self.pins.insert(target, v) != Some(v), false)
                 }
             },
+            Op::Preview { target, link } => match self.previews.get(&target) {
+                Some((p, ..)) if *p >= at => (false, false),
+                _ => {
+                    let l = Link {
+                        url: link.url,
+                        title: crate::op::clip(&link.title, 200),
+                        text: crate::op::clip(&link.text, 400),
+                        image: link.image.map(File::safe),
+                    };
+                    self.previews.insert(target, (at, s.author, l));
+                    (true, false)
+                }
+            },
             Op::Push { url } => match self.pushes.get(&(s.author, s.device)) {
                 Some((p, _)) if *p >= at => (false, false),
                 _ => {
@@ -212,6 +228,7 @@ impl State {
         self.holds = BTreeMap::new();
         (self.spaces, self.storage) = (BTreeMap::new(), BTreeMap::new());
         self.stored = BTreeMap::new();
+        self.labels = BTreeMap::new();
         (self.head, self.burned) = (self.owner, HashMap::new());
         if self.dm.is_some() {
             self.channels.insert(DM, "dm".into());
@@ -289,6 +306,9 @@ impl State {
                 }
                 Op::Store { node, space, on } if own => {
                     self.stored.insert((*node, *space), *on);
+                }
+                Op::Label { device, name } if own => {
+                    self.labels.insert(*device, crate::op::name(name));
                 }
                 _ => {}
             }
@@ -670,6 +690,12 @@ impl State {
             *on && self.role(by) != Role::Banned && !self.stale_at(at, by)
         });
         // Only a thread with replies costs its count.
+        // Its sender's preview of a link in it, no one else's.
+        let preview = self
+            .previews
+            .get(&id)
+            .filter(|(at, by, _)| *by == p.author && !self.stale_at(at, by));
+        let preview = preview.map(|x| x.2.clone());
         let tc = id.thread();
         let t = self.posts.get(&tc).and_then(|_| self.thread(&tc));
         let thread = t.map_or(0, |t| t.count);
@@ -686,7 +712,13 @@ impl State {
             files,
             pinned,
             thread,
+            preview,
         })
+    }
+
+    /// Own space: what we named a device or storage node.
+    pub fn label(&self, d: &EndpointId) -> Option<&str> {
+        self.labels.get(d).map(String::as_str)
     }
 
     pub fn latest(&self, ch: &Ch) -> Option<u64> {
@@ -1144,6 +1176,34 @@ mod tests {
         assert!(st.horizon() >= 9);
         st.extend([op(12, a, rekey(2, &[o, a]))]);
         assert!(!st.leaks());
+    }
+
+    #[test]
+    fn only_we_name_our_devices_and_previews_are_their_senders() {
+        let [o, a, _] = people();
+        let mut st = State::new(&Invite::new(o, "", None));
+        let d = SecretKey::from_bytes(&[5; 32]).public();
+        let label = |n: &str| Op::Label { device: d, name: n.into() };
+        st.extend([op(1, o, label("Laptop")), op(2, a, label("Mine now"))]);
+        assert_eq!(st.label(&d), Some("Laptop"));
+        let link = |t: &str| Op::Preview {
+            target: Id([4; 32]),
+            link: Link {
+                url: "https://ex.com".into(),
+                title: format!("{t}\u{202e}"),
+                text: "x".into(),
+                image: None,
+            },
+        };
+        st.extend([
+            op(3, o, Op::Channel { id: CH, name: Some("g".into()) }),
+            op(4, a, post("see https://ex.com", None)),
+            op(5, o, link("not a's")),
+        ]);
+        assert!(st.messages(&CH, None, 1)[0].preview.is_none(), "o's, on a's");
+        st.extend([op(6, a, link("Example"))]);
+        let p = st.messages(&CH, None, 1)[0].preview.clone().unwrap();
+        assert_eq!(p.title, "Example", "and nothing hidden in it");
     }
 
     #[test]

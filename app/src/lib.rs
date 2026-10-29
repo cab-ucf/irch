@@ -5,7 +5,6 @@ mod android;
 
 use anyhow::Context;
 use irch_core::{Ch, Config, File, Id, Net, Node, Notice, api};
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
@@ -354,14 +353,16 @@ async fn save(
     Ok(f.display().to_string())
 }
 
-/// Android's IPC carries no bytes: frames come as JSON arrays of numbers.
+/// Android's IPC carries no bytes: frames come as base64 there.
 #[tauri::command]
 async fn media(s: State<'_, App>, req: Request<'_>) -> Result<(), String> {
     let n = node(&s).await?;
     match req.body() {
         InvokeBody::Raw(f) => n.send_media(f),
         InvokeBody::Json(v) => {
-            n.send_media(&Vec::deserialize(v).map_err(|e| e.to_string())?)
+            let b64 = v["data"].as_str().ok_or("no frame")?;
+            let f = data_encoding::BASE64.decode(b64.as_bytes());
+            n.send_media(&f.map_err(|e| e.to_string())?)
         }
     }
     Ok(())

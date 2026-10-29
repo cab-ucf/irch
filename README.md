@@ -60,6 +60,12 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
   identity is retired everywhere (*A device was lost or stolen*).
 - Invites show what they are to before you join; links show where they
   go before they open; a message only on this device says so.
+- A camera button takes a photo and sends it: never in the gallery, no
+  location in it. Link previews are made by the sender's device as it
+  sends (the site sees only the sender; off in My Account).
+- Devices and storage nodes have names (a computer's hostname, at first;
+  renamed in My Account or Storage Nodes); My Account shows the version.
+- On phones, a call of two fills the screen, upright, like FaceTime.
 - *Add to notes*: a message or thread lands in a
   [loroh](https://github.com/cab-ucf/siroh) note as a task, event or quote,
   with an `irch://` link back; on phones through loroh, which asks first.

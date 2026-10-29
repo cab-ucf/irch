@@ -112,6 +112,17 @@ pub enum Call {
     },
     /// This identity's devices.
     Devices,
+    /// Name one of our devices or storage nodes.
+    NameDevice {
+        device: iroh::EndpointId,
+        name: String,
+    },
+    /// A preview of a link in our message, made here as it is sent.
+    Preview {
+        space: Id,
+        message: Id,
+        url: String,
+    },
     /// This identity is lost: retire it everywhere, for good.
     Burn,
     File {
@@ -158,6 +169,7 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
             json!({
                 "id": id, "name": name, "invisible": invisible, "call": call,
                 "push": n.pushed(),
+                "version": env!("CARGO_PKG_VERSION"),
                 "device": n.device().fmt_short().to_string(),
                 "local_storage": crate::local_storage()
                     .and_then(|c| uncode::<(EndpointAddr, [u8; 16])>("host", &c).ok())
@@ -269,12 +281,18 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
         Call::Devices => {
             let me = n.device();
             let row = |(d, at): (iroh::EndpointId, u64)| {
-                json!({ "device": d.fmt_short().to_string(), "seen": at,
-                    "this": d == me })
+                json!({ "id": d, "device": d.fmt_short().to_string(),
+                    "name": n.label(&d), "seen": at, "this": d == me })
             };
             json!(n.devices().into_iter().map(row).collect::<Vec<_>>())
         }
         Call::Burn => json!(n.burn().await?),
+        Call::NameDevice { device, name } => {
+            json!(n.name_device(device, &name).await?)
+        }
+        Call::Preview { space, message, url } => {
+            json!(n.preview(&space, &message, &url).await?)
+        }
         Call::StoreLocal => {
             let code =
                 crate::local_storage().context("none on this computer")?;
@@ -376,7 +394,8 @@ fn space(n: &Node, id: &Id) -> Option<Value> {
         "closed": n.hidden(id),
         "storage": n.stored(id).into_iter()
             .map(|(node, on)| json!({ "node": node, "on": on,
-                "seen": n.synced(&node) }))
+                "seen": n.synced(&node), "name": n.label(&node),
+                "short": node.fmt_short().to_string() }))
             .collect::<Vec<_>>(),
     }))
 }

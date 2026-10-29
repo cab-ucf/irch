@@ -54,6 +54,20 @@ pub enum Op {
     Burn,
     // A call to us is ringing here, heard (live).
     Ringing { channel: Ch },
+    // Own space: what we call one of our devices or storage nodes.
+    Label { device: EndpointId, name: String },
+    // A link in our message, as its site showed it to us when we sent it:
+    // nobody else fetches anything.
+    Preview { target: Id, link: Link },
+}
+
+/// A link's preview, made by its sender.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Link {
+    pub url: String,
+    pub title: String,
+    pub text: String,
+    pub image: Option<File>,
 }
 
 pub const MAX_TEXT: usize = 4000;
@@ -79,6 +93,13 @@ pub fn fits(op: &Op) -> bool {
         Op::Rename { name } | Op::Topic { name, .. } => name.len() <= 256,
         Op::Channel { name, .. } => {
             name.as_ref().is_none_or(|n| n.len() <= 256)
+        }
+        Op::Label { name, .. } => name.len() <= 256,
+        Op::Preview { link: l, .. } => {
+            l.url.len() <= 2048
+                && l.title.len() <= 400
+                && l.text.len() <= 800
+                && l.image.as_ref().is_none_or(file)
         }
         _ => true,
     }
@@ -107,6 +128,16 @@ fn hidden(c: char) -> bool {
             | '\u{2060}'..='\u{206f}' | '\u{3164}' | '\u{fe00}'..='\u{fe0f}'
             | '\u{feff}' | '\u{ffa0}' | '\u{fff0}'..='\u{fff8}'
             | '\u{1d173}'..='\u{1d17a}' | '\u{e0000}'..='\u{e0fff}')
+}
+
+/// Text others wrote, shown as one line: nothing hidden, `max` bytes.
+pub fn clip(t: &str, max: usize) -> String {
+    let t: String = t.chars().filter(|c| !hidden(*c)).collect();
+    let mut t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    while t.len() > max {
+        t.pop();
+    }
+    t
 }
 
 pub fn name(n: &str) -> String {

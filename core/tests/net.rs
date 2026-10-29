@@ -300,8 +300,15 @@ async fn a_dm_call_rings_once() {
     let dmc = irch_core::state::DM;
     until("a knows b has it", || a.reach(&dm, &b.id()).is_some()).await;
     assert!(!a.rings(&dm, &b.id(), &dmc), "not yet said");
-    b.ringing(&dm, dmc).await;
-    until("a hears it ring", || a.rings(&dm, &b.id(), &dmc)).await;
+    // Said again and again, as the app does, until the DM's gossip forms.
+    for _ in 0..80 {
+        b.ringing(&dm, dmc).await;
+        if a.rings(&dm, &b.id(), &dmc) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(a.rings(&dm, &b.id(), &dmc), "a hears it ring");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -678,6 +685,9 @@ async fn writing_rings_a_sleeping_phone() {
     let ring = |p: &(iroh::EndpointId, String)| p.1.starts_with("irch:ring:");
     let told = |n: &Node| n.view(&id, |s| s.pushes_of(None).iter().any(ring));
     until("a knows b's doorbell", || told(&a) == Some(true)).await;
+    // Its key too, which a DM to it needs (it travels apart).
+    let keyed = || a.view(&id, |s| s.kem(&b.id()).is_some()) == Some(true);
+    until("b's key", keyed).await;
     let b_id = b.id();
     b.shutdown().await;
     drop(b);
