@@ -1,8 +1,8 @@
-# The app and a storage node at irch's latest release: its source checked
-# against irch's signing key, then built here, hourly.
-#   programs.irch.enable = true;      # the app, and `irch` in a terminal
-#   services.irch.enable = true;      # a storage node, always on
-#   services.irch.users = [ "you" ];  # their irch pairs with it in one step
+# Imported, the app and a storage node at irch's latest release: its source
+# checked against irch's signing key, then built here, hourly. Everyone with
+# a home in /home pairs their irch with the node in one step. To leave out:
+#   programs.irch.enable = false;     # the app, and `irch` in a terminal
+#   services.irch.enable = false;     # the storage node, always on
 #   sudo cat /run/irch/code           # the storage code, for others
 { config, lib, pkgs, ... }:
 let
@@ -17,31 +17,32 @@ let
     exec "$b" "$@"
   '');
 in {
-  imports = [
-    (lib.mkRemovedOptionModule [ "services" "irch" "signers" ]
-      "irch's releases are checked against its own signing key now. For \
-       the storage node: services.irch.enable = true.")
-  ];
-
   options = {
-    programs.irch.enable =
-      lib.mkEnableOption "irch, the app and terminal client, kept up to date";
+    programs.irch.enable = lib.mkEnableOption
+      "irch, the app and terminal client, kept up to date" // { default = true; };
     # The app at login, in the tray.
     programs.irch.autostart = lib.mkOption {
       type = lib.types.bool;
       default = true;
     };
-    services.irch.enable =
-      lib.mkEnableOption "an always-on irch storage node, kept up to date";
+    services.irch.enable = lib.mkEnableOption
+      "an always-on irch storage node, kept up to date" // { default = true; };
     # Accounts that read the node's code in /run/irch, to pair unasked.
     services.irch.users = lib.mkOption {
       type = lib.types.listOf lib.types.str;
-      default = [ ];
+      default = lib.attrNames (lib.filterAttrs
+        (_: u: u.isNormalUser && lib.hasPrefix "/home/" u.home) config.users.users);
+      defaultText = "everyone with a home in /home";
+    };
+    services.irch.signers = lib.mkOption {
+      type = lib.types.lines; default = ""; visible = false;
     };
   };
 
   config = lib.mkIf (cfg.enable || config.programs.irch.enable) (lib.mkMerge [
     {
+      warnings = lib.optional (cfg.signers != "")
+        "services.irch.signers does nothing now (irch's own key checks releases): delete it";
       users.users.irch = {
         isSystemUser = true; group = "irch"; home = "/var/lib/irch";
       };
