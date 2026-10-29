@@ -1,0 +1,5 @@
+# quick-xml comes with Typst's bibliographies. irch's math gives Typst no
+# files and no code (math/src/lib.rs), so no XML is ever parsed. Drop these
+# once Typst moves past quick-xml 0.38.
+[advisories]
+ignore = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]

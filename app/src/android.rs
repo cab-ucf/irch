@@ -220,6 +220,16 @@ async fn wake(
     push: Option<String>,
     full: bool,
 ) -> anyhow::Result<Vec<Notice>> {
+    let hide = dir.join("private").exists();
+    let v = told(dir, push, full).await?;
+    Ok(v.into_iter().map(|x| crate::veil(x, hide)).collect())
+}
+
+async fn told(
+    dir: PathBuf,
+    push: Option<String>,
+    full: bool,
+) -> anyhow::Result<Vec<Notice>> {
     let n = node(dir).await?;
     if let Some(p) = push {
         n.set_push((!p.is_empty()).then_some(p)).await;

@@ -1,8 +1,12 @@
 # A tag vX.Y.Z (or a run naming one, tagged here) publishes a signed release.
-# Secrets: TAURI_SIGNING_PRIVATE_KEY(_PASSWORD), ANDROID_KEYSTORE (base64),
-# ANDROID_KEYSTORE_PASSWORD; to notarize macOS builds, APPLE_CERTIFICATE
-# (base64 .p12), APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
-# APPLE_ID, APPLE_PASSWORD (app-specific), APPLE_TEAM_ID.
+# Builds hold no secrets and a read-only token: a dependency's build script
+# can steal nothing. Only `publish`, in the `release` Environment (Settings
+# › Environments: required reviewers; tags v* protected), signs and uploads.
+# Its secrets: TAURI_SIGNING_PRIVATE_KEY(_PASSWORD), ANDROID_KEYSTORE
+# (base64), ANDROID_KEYSTORE_PASSWORD. Apple signs while building, so its
+# secrets, once they exist, reach the macOS and TestFlight builds: APPLE_
+# CERTIFICATE (base64 .p12), _CERTIFICATE_PASSWORD, _SIGNING_IDENTITY, _ID,
+# _PASSWORD, _TEAM_ID; APPLE_API_KEY, _API_ISSUER, _API_KEY_P8.
 name: release
 on:
   push:
@@ -13,7 +17,7 @@ on:
         description: The release's tag, vX.Y.Z
         required: true
 permissions:
-  contents: write
+  contents: read
 env:
   CARGO_TERM_COLOR: always
   TAG: ${{ inputs.tag || github.ref_name }}
@@ -26,20 +30,19 @@ jobs:
         include:
           - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
-          - { os: macos-latest, target: aarch64-apple-darwin }
-          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: macos-latest, target: aarch64-apple-darwin, arch: aarch64 }
+          - { os: macos-latest, target: x86_64-apple-darwin, arch: x64 }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
           - { os: windows-latest, target: aarch64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          key: ${{ matrix.target }}
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y
           libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev
@@ -67,27 +70,16 @@ jobs:
             APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
             [ -z "${!v}" ] || echo "$v=${!v}" >> "$GITHUB_ENV"
           done
-      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
-            ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          projectPath: app
-          tauriScript: cargo tauri
-          args: --target ${{ matrix.target }}
-          tagName: ${{ env.TAG }}
-          releaseName: irch ${{ env.TAG }}
-          includeUpdaterJson: false
-      # Static on Linux, for any distribution; signed, as it updates itself.
+      # Unsigned for updates: `publish` signs every file, holding the key.
+      - name: The app
+        working-directory: app
+        shell: bash
+        run: cargo tauri build --target ${{ matrix.target }}
+          --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      # Static on Linux, for any distribution; it updates itself.
       - name: The terminal client and storage node, beside the app
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
-            ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           IRCH_RELEASE: "1"
         run: |
           t=${{ matrix.target }}
@@ -98,21 +90,23 @@ jobs:
           fi
           cargo build --release --locked -p irch --target $t
           x=$([ "$RUNNER_OS" = Windows ] && echo .exe || true)
-          cp target/$t/release/irch$x irch-$t$x
-          cargo tauri signer sign --app-version "${TAG#v}" irch-$t$x
-          gh release upload "$TAG" irch-$t$x irch-$t$x.sig --clobber
-      - name: The source, signed (nixos.nix builds it), and the installers
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
-            ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          mkdir -p out && cp target/$t/release/irch$x out/irch-$t$x
+      - name: Gather what ships
+        shell: bash
         run: |
-          git archive --format=tar.gz -o source.tar.gz HEAD
-          cargo tauri signer sign --app-version "${TAG#v}" source.tar.gz
-          gh release upload "$TAG" source.tar.gz source.tar.gz.sig \
-            install.sh install.ps1 --clobber
+          b=target/${{ matrix.target }}/release/bundle
+          cp $b/appimage/*.AppImage $b/deb/*.deb $b/rpm/*.rpm \
+            $b/dmg/*.dmg $b/nsis/*-setup.exe $b/msi/*.msi out/ 2>/dev/null || true
+          # What macOS updates from: the .app, packed as tauri-action did.
+          if [ -d $b/macos/irch.app ]; then
+            tar -C $b/macos -czf out/irch_${{ matrix.arch }}.app.tar.gz irch.app
+          fi
+          ls -l out
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-${{ matrix.target }}
+          path: out/*
+          retention-days: 3
 
   android:
     runs-on: ubuntu-latest
@@ -121,11 +115,12 @@ jobs:
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup
           /opt/hostedtoolcache/CodeQL /usr/local/share/boost
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
           targets: aarch64-linux-android
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
@@ -141,43 +136,24 @@ jobs:
         # Phones only: x86_64 is for emulators, which build their own.
         run: NDK_HOME="$ANDROID_NDK_LATEST_HOME" cargo tauri android build
           --ci --apk --target aarch64
-      # Android's key, and irch's, which irch checks before updating.
-      - name: Sign with irch's keys, attach to the release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          KS: ${{ secrets.ANDROID_KEYSTORE }}
-          PW: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
-            ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          echo "$KS" | base64 -d > irch.jks
-          apk=$(ls app/gen/android/app/build/outputs/apk/*/release/*.apk)
-          "$tools/zipalign" -f 4 "$apk" a.apk
-          "$tools/apksigner" sign --ks irch.jks --ks-pass env:PW \
-            --ks-key-alias irch --out irch.apk a.apk
-          rm irch.jks
-          cargo tauri signer sign --app-version "${TAG#v}" irch.apk
-          gh release view "$TAG" >/dev/null 2>&1 ||
-            gh release create "$TAG" --title "irch $TAG" \
-              --target "$GITHUB_SHA" ||
-            true # made meanwhile by a desktop job
-          gh release upload "$TAG" irch.apk irch.apk.sig --clobber
+      - run: mkdir out && cp app/gen/android/app/build/outputs/apk/*/release/*.apk
+          out/unsigned.apk
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: android
+          path: out/*
+          retention-days: 3
 
-  # TestFlight too, given an App Store Connect key: APPLE_API_KEY (its id),
-  # APPLE_API_ISSUER, APPLE_API_KEY_P8 (the .p8's text), and APPLE_TEAM_ID.
   ios:
     runs-on: macos-latest
-    env:
-      ASC: ${{ secrets.APPLE_API_KEY_P8 != '' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
           targets: aarch64-apple-ios
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo install tauri-cli --version 2.12.4 --locked
       - name: The tag is the version
         run: |
@@ -194,16 +170,32 @@ jobs:
       - name: An unsigned IPA, which AltStore or SideStore signs
         working-directory: app
         run: cargo tauri ios build --ci --no-sign --target aarch64
-      - run: mv app/gen/apple/build/arm64/irch.ipa irch.ipa
-      - name: Attach to the release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release view "$TAG" >/dev/null 2>&1 ||
-            gh release create "$TAG" --title "irch $TAG" \
-              --target "$GITHUB_SHA" ||
-            true # made meanwhile by another job
-          gh release upload "$TAG" irch.ipa --clobber
+      - run: mkdir out && mv app/gen/apple/build/arm64/irch.ipa out/irch.ipa
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ios
+          path: out/*
+          retention-days: 3
+
+  # TestFlight, given an App Store Connect key: APPLE_API_KEY (its id),
+  # APPLE_API_ISSUER, APPLE_API_KEY_P8 (the .p8's text), APPLE_TEAM_ID.
+  testflight:
+    needs: ios
+    runs-on: macos-latest
+    env:
+      ASC: ${{ secrets.APPLE_API_KEY_P8 != '' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: env.ASC == 'true'
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: env.ASC == 'true'
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios
+      - if: env.ASC == 'true'
+        run: cargo install tauri-cli --version 2.12.4 --locked
       - name: Signed by Apple, to TestFlight
         if: env.ASC == 'true'
         working-directory: app
@@ -213,6 +205,11 @@ jobs:
           APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
           P8: ${{ secrets.APPLE_API_KEY_P8 }}
         run: |
+          v='"version": "'${TAG#v}'"'
+          sed -i.bak "s/\"version\": \"[^\"]*\"/$v/" tauri.conf.json
+          brew install xcodegen
+          cargo tauri ios init --ci
+          cargo tauri icon icons/icon.png
           k=$HOME/.appstoreconnect/private_keys/AuthKey_$APPLE_API_KEY.p8
           mkdir -p "${k%/*}" && echo "$P8" > "$k"
           APPLE_API_KEY_PATH=$k cargo tauri ios build --ci --target aarch64 \
@@ -220,19 +217,63 @@ jobs:
           xcrun altool --upload-app --type ios \
             --file gen/apple/build/arm64/irch.ipa \
             --apiKey "$APPLE_API_KEY" --apiIssuer "$APPLE_API_ISSUER"
+          rm -f "$k"
 
-  # One latest.json, here: jobs merging their own into it raced.
-  updater:
-    needs: desktop
-    if: ${{ !cancelled() }}
+  # The only job with irch's keys and a token that writes. It builds
+  # nothing: tauri's signer is installed before the key is in reach.
+  publish:
+    needs: [desktop, android, ios]
     runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
     steps:
-      - run: gh release download "$TAG" -p '*.sig' -D sig
-      - shell: python3 {0}
-        working-directory: sig
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: cargo install tauri-cli --version 2.12.4 --locked
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: art
+          merge-multiple: true
+      - name: Android's key on the APK
+        env:
+          KS: ${{ secrets.ANDROID_KEYSTORE }}
+          PW: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          echo "$KS" | base64 -d > "$RUNNER_TEMP/irch.jks"
+          "$tools/zipalign" -f 4 art/unsigned.apk a.apk
+          "$tools/apksigner" sign --ks "$RUNNER_TEMP/irch.jks" \
+            --ks-pass env:PW --ks-key-alias irch --out art/irch.apk a.apk
+          rm "$RUNNER_TEMP/irch.jks" art/unsigned.apk a.apk
+      - name: The source (nixos.nix builds it), the installers, the icon
+        run: |
+          git archive --format=tar.gz -o art/source.tar.gz HEAD
+          cp install.sh install.ps1 art/
+          cp app/icons/icon.png art/irch.png
+      - name: irch's key on every file an update or nixos.nix checks
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+            ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          cd art
+          for f in *; do
+            case $f in *.dmg | *.ipa | *.sh | *.ps1 | *.png) continue ;; esac
+            cargo tauri signer sign --app-version "${TAG#v}" "$f"
+          done
+      - name: The release
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 ||
+            gh release create "$TAG" --title "irch $TAG" --target "$GITHUB_SHA"
+          gh release upload "$TAG" art/* --clobber
+      - name: latest.json, which the app's updater reads
+        shell: python3 {0}
+        working-directory: art
         run: |
           import glob, json, os, re, time
           tag, repo = os.environ["TAG"], os.environ["GH_REPO"]
@@ -260,13 +301,12 @@ jobs:
           json.dump(dict(version=tag.lstrip("v"), platforms=out,
                          pub_date=time.strftime("%Y-%m-%dT%H:%M:%SZ")),
                     open("latest.json", "w"), indent=2)
-      - run: gh release upload "$TAG" sig/latest.json --clobber
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: gh release upload "$TAG" art/latest.json --clobber
       - run: gh release edit "$TAG" --notes-file .github/release.md
 
   # The release as people get it: installed, run, and updating itself.
   check:
-    needs: [updater, android]
+    needs: publish
     permissions:
       contents: read
     strategy:

@@ -97,9 +97,23 @@ pub enum Call {
         password: Option<String>,
     },
     Offer {
+        space: Id,
         path: String,
         name: Option<String>,
     },
+    /// Files served from here, and stopping one.
+    Sharing,
+    Unshare {
+        hash: Id,
+    },
+    /// What an invite is to, before joining.
+    Peek {
+        code: String,
+    },
+    /// This identity's devices.
+    Devices,
+    /// This identity is lost: retire it everywhere, for good.
+    Burn,
     File {
         space: Id,
         file: File,
@@ -139,6 +153,7 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
             json!({
                 "id": id, "name": name, "invisible": invisible, "call": call,
                 "push": n.pushed(),
+                "device": n.device().fmt_short().to_string(),
                 "local_storage": crate::local_storage()
                     .and_then(|c| uncode::<(EndpointAddr, [u8; 16])>("host", &c).ok())
                     .map(|(a, _)| a.id),
@@ -162,7 +177,14 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
         Call::Messages { space, channel, before, limit } => {
             let page =
                 |s: &crate::State| s.messages(&channel, before, limit.min(500));
-            json!(n.view(&space, page).unwrap_or_default())
+            let held = n.undelivered(&space);
+            let row = |m: crate::Message| {
+                let mut v = json!(m);
+                v["pending"] = held.contains(&m.id).into();
+                v
+            };
+            let page = n.view(&space, page).unwrap_or_default();
+            json!(page.into_iter().map(row).collect::<Vec<_>>())
         }
         Call::Search { query, space, room } => {
             let ids = space.map_or_else(|| n.spaces(), |s| vec![s]);
@@ -214,9 +236,33 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
             let p = std::path::Path::new(&path);
             json!(n.seal_file(&space, p, &name, password.as_deref()).await?)
         }
-        Call::Offer { path, name } => {
-            json!(n.offer(std::path::Path::new(&path), name.as_deref()).await?)
+        Call::Offer { space, path, name } => {
+            let p = std::path::Path::new(&path);
+            json!(n.offer(&space, p, name.as_deref()).await?)
         }
+        Call::Sharing => {
+            let row = |(hash, space, name, size)| json!({ "hash": hash, "space": space, "name": name, "size": size });
+            json!(n.sharing().into_iter().map(row).collect::<Vec<_>>())
+        }
+        Call::Unshare { hash } => json!(n.unshare(&hash).await?),
+        Call::Peek { code } => {
+            let i = crate::Invite::decode(&code)?;
+            let who = n.spaces().iter().find_map(|s| {
+                n.view(s, |s| s.profile(&i.owner).map(str::to_string))?
+            });
+            json!({ "space": i.id(), "name": i.name, "owner": i.owner,
+                "who": who, "dm": i.dm.is_some(),
+                "joined": n.spaces().contains(&i.id()) })
+        }
+        Call::Devices => {
+            let me = n.device();
+            let row = |(d, at): (iroh::EndpointId, u64)| {
+                json!({ "device": d.fmt_short().to_string(), "seen": at,
+                    "this": d == me })
+            };
+            json!(n.devices().into_iter().map(row).collect::<Vec<_>>())
+        }
+        Call::Burn => json!(n.burn().await?),
         Call::StoreLocal => {
             let code =
                 crate::local_storage().context("none on this computer")?;
@@ -267,7 +313,7 @@ fn space(n: &Node, id: &Id) -> Option<Value> {
         (
             name,
             with.is_some(),
-            s.owner,
+            s.head(),
             s.role(&me) == Role::Admin,
             s.channels(),
             with,
@@ -282,7 +328,7 @@ fn space(n: &Node, id: &Id) -> Option<Value> {
         (fresh || mentions > 0).then(|| {
             json!({
                 "id": t.id, "name": t.name, "root": t.root, "count": t.count,
-                "by": t.by,
+                "by": t.by, "alone": t.alone,
                 "unread": unread, "mentions": mentions,
             })
         })
@@ -309,7 +355,8 @@ fn space(n: &Node, id: &Id) -> Option<Value> {
         "level": n.level(id),
         "closed": n.hidden(id),
         "storage": n.stored(id).into_iter()
-            .map(|(node, on)| json!({ "node": node, "on": on }))
+            .map(|(node, on)| json!({ "node": node, "on": on,
+                "seen": n.synced(&node) }))
             .collect::<Vec<_>>(),
     }))
 }

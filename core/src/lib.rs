@@ -97,7 +97,7 @@ pub fn profile(root: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// What signing out takes away.
-pub const MINE: [&str; 11] = [
+pub const MINE: [&str; 15] = [
     "seed",
     "device",
     "local",
@@ -109,6 +109,11 @@ pub const MINE: [&str; 11] = [
     "offered",
     "wake.json",
     "irch.log",
+    // The doorbell: kept, it would tie the next identity here to this one.
+    "bell",
+    "bells",
+    "sealed",
+    "shared",
 ];
 
 /// Unix time in milliseconds.

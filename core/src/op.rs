@@ -48,6 +48,38 @@ pub enum Op {
     // What any member hands a storage node listed by `Host` to keep the
     // space's small files: derived from its token, opening nothing else.
     Hold { node: EndpointId, token: [u8; 16] },
+    // The owner hands the space on.
+    Owner { user: Id },
+    // This identity is lost: nothing it signs from now on counts.
+    Burn,
+}
+
+pub const MAX_TEXT: usize = 4000;
+pub const MAX_NAME: usize = 64;
+
+/// What anyone may send, checked again on arrival: a member's 4 MB post
+/// would stall everyone's screen.
+pub fn fits(op: &Op) -> bool {
+    let file = |f: &File| f.name.len() <= 255;
+    match op {
+        Op::Post { text, files, .. } => {
+            text.len() <= MAX_TEXT
+                && files.len() <= 10
+                && files.iter().all(file)
+        }
+        Op::Edit { text, .. } => {
+            text.as_ref().is_none_or(|t| t.len() <= MAX_TEXT)
+        }
+        Op::React { emoji, .. } => emoji.len() <= 32,
+        Op::Order { channels } => channels.len() <= 500,
+        Op::Push { url } => url.as_ref().is_none_or(|u| u.len() <= 2048),
+        Op::Profile { name, kem } => name.len() <= 256 && kem.len() <= 1216,
+        Op::Rename { name } | Op::Topic { name, .. } => name.len() <= 256,
+        Op::Channel { name, .. } => {
+            name.as_ref().is_none_or(|n| n.len() <= 256)
+        }
+        _ => true,
+    }
 }
 
 impl Op {
@@ -63,8 +95,12 @@ impl Op {
 /// Unseen, or turning text around: what lets one name pass for another.
 fn hidden(c: char) -> bool {
     c.is_control()
-        || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
-            | '\u{2066}'..='\u{2069}' | '\u{feff}')
+        || matches!(c, '\u{ad}' | '\u{34f}' | '\u{61c}' | '\u{115f}'
+            | '\u{1160}' | '\u{17b4}' | '\u{17b5}' | '\u{180b}'..='\u{180f}'
+            | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}' | '\u{3164}' | '\u{fe00}'..='\u{fe0f}'
+            | '\u{feff}' | '\u{ffa0}' | '\u{fff0}'..='\u{fff8}'
+            | '\u{1d173}'..='\u{1d17a}' | '\u{e0000}'..='\u{e0fff}')
 }
 
 pub fn name(n: &str) -> String {
@@ -97,11 +133,15 @@ impl File {
         let bad = |c: char| hidden(c) || "<>:\"/\\|?*".contains(c);
         let n: String = self.name.chars().filter(|c| !bad(*c)).collect();
         let n = n.trim_matches(|c| c == '.' || c == ' ');
-        let stem = n.split('.').next().unwrap_or_default().to_uppercase();
+        // Windows ignores spaces before the dot, and counts ¹²³ as digits.
+        let stem = n.split('.').next().unwrap_or_default().trim_end();
+        let stem = stem.to_uppercase();
+        let num = |c: char| c.is_ascii_digit() || "¹²³".contains(c);
         let dev = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-            || stem.len() == 4
-                && ["COM", "LPT"].iter().any(|p| stem.starts_with(p))
-                && stem.as_bytes()[3].is_ascii_digit();
+            || ["COM", "LPT"].iter().any(|p| {
+                let mut r = stem.strip_prefix(p).unwrap_or("..").chars();
+                r.next().is_some_and(num) && r.next().is_none()
+            });
         self.name = match n {
             "" => "file".into(),
             n if dev => format!("_{n}"),
@@ -191,8 +231,23 @@ pub fn tag(key: &Key) -> [u8; 8] {
     kdf("irch epoch", &[key])[..8].try_into().expect("8 bytes")
 }
 
-fn tbs(space: &Id, ts: u64, device: &EndpointId, op: &Op) -> Vec<u8> {
-    postcard::to_allocvec(&("irch op", space, ts, device, op)).expect("op")
+/// Before this, ops signed without their epoch (v1) still count: history.
+pub const CUTOVER: u64 = 1_794_700_800_000;
+
+/// v2 signs the epoch too, so nobody re-seals an op under another key.
+fn tbs(
+    v: u8,
+    space: &Id,
+    e: &[u8; 8],
+    ts: u64,
+    d: &EndpointId,
+    op: &Op,
+) -> Vec<u8> {
+    let b = match v {
+        1 => postcard::to_allocvec(&("irch op", space, ts, d, op)),
+        _ => postcard::to_allocvec(&("irch op 2", space, e, ts, d, op)),
+    };
+    b.expect("op")
 }
 
 fn aad(space: &Id, e: &Env) -> Vec<u8> {
@@ -211,9 +266,10 @@ pub fn seal(
     ts: u64,
     op: Op,
 ) -> (Signed, Vec<u8>) {
-    let msg = tbs(space, ts, &device, &op);
+    let epoch = tag(key);
+    let msg = tbs(2, space, &epoch, ts, &device, &op);
     let author = Id(*user.public().as_bytes());
-    let mut e = Env { epoch: tag(key), ts, live: op.live(), ct: vec![] };
+    let mut e = Env { epoch, ts, live: op.live(), ct: vec![] };
     let inner = Inner { author, device, sig: user.sign(&msg), op };
     let pt = postcard::to_allocvec(&inner).expect("op");
     e.ct = crypto::seal(key, &aad(space, &e), &pt);
@@ -222,18 +278,27 @@ pub fn seal(
     (s, postcard::to_allocvec(&e).expect("env"))
 }
 
-/// Decrypt and, unless re-reading what we already checked, verify.
-pub fn open(space: &Id, key: &Key, e: &Env, verify: bool) -> Option<Signed> {
+/// Decrypt and verify, or with `known`, re-read one checked as that
+/// version. Returns the version its signature has.
+pub fn open(
+    space: &Id,
+    key: &Key,
+    e: &Env,
+    known: Option<u8>,
+) -> Option<(Signed, u8)> {
     let pt = crypto::open(key, &aad(space, e), &e.ct)?;
     let i: Inner = postcard::from_bytes(&pt).ok()?;
-    let msg = tbs(space, e.ts, &i.device, &i.op);
     let pk = PublicKey::from_bytes(&i.author.0).ok()?;
-    if i.op.live() != e.live || verify && pk.verify(&msg, &i.sig).is_err() {
+    let msg = |v| tbs(v, space, &e.epoch, e.ts, &i.device, &i.op);
+    let ok = |v: &u8| known.is_some() || pk.verify(&msg(*v), &i.sig).is_ok();
+    let old = known.is_some() || e.ts < CUTOVER;
+    let v = known.into_iter().chain([2]).chain(old.then_some(1)).find(ok)?;
+    if i.op.live() != e.live || !fits(&i.op) {
         return None;
     }
     let (id, author, device, op) =
-        (op_id(&i.author, &msg), i.author, i.device, i.op);
-    Some(Signed { id, author, device, ts: e.ts, op, epoch: e.epoch })
+        (op_id(&i.author, &msg(v)), i.author, i.device, i.op);
+    Some((Signed { id, author, device, ts: e.ts, op, epoch: e.epoch }, v))
 }
 
 #[test]
@@ -246,10 +311,47 @@ fn sealed() {
     let op = Op::Post { channel, text, reply: None, files: vec![] };
     let (s, raw) = seal(&sp, &key, &sk, dev, 7, op);
     let e: Env = postcard::from_bytes(&raw).unwrap();
-    assert_eq!(open(&sp, &key, &e, true), Some(s));
-    assert!(open(&Id([9; 32]), &key, &e, true).is_none());
-    assert!(open(&sp, &crypto::rand(), &e, true).is_none());
-    assert!(open(&sp, &key, &Env { ts: 8, ..e }, true).is_none());
+    assert_eq!(open(&sp, &key, &e, None), Some((s, 2)));
+    assert!(open(&Id([9; 32]), &key, &e, None).is_none());
+    assert!(open(&sp, &crypto::rand(), &e, None).is_none());
+    assert!(open(&sp, &key, &Env { ts: 8, ..e.clone() }, None).is_none());
+    // Sealed again under another key: its signature names the first.
+    let (k2, i) = (crypto::rand(), crypto::open(&key, &aad(&sp, &e), &e.ct));
+    let mut e2 = Env { epoch: tag(&k2), ..e };
+    e2.ct = crypto::seal(&k2, &aad(&sp, &e2), &i.unwrap());
+    assert!(open(&sp, &k2, &e2, None).is_none(), "re-sealed");
+}
+
+#[test]
+fn old_signatures_count_only_before_the_cutover() {
+    let (sk, dev) = (SecretKey::generate(), SecretKey::generate().public());
+    let (sp, key) = (Id([1; 32]), crypto::rand());
+    let v1 = |ts| {
+        let op = Op::Here;
+        let sig = sk.sign(&tbs(1, &sp, &tag(&key), ts, &dev, &op));
+        let author = Id(*sk.public().as_bytes());
+        let i = Inner { author, device: dev, sig, op };
+        let mut e = Env { epoch: tag(&key), ts, live: true, ct: vec![] };
+        e.ct = crypto::seal(
+            &key,
+            &aad(&sp, &e),
+            &postcard::to_allocvec(&i).unwrap(),
+        );
+        e
+    };
+    assert_eq!(open(&sp, &key, &v1(CUTOVER - 1), None).map(|s| s.1), Some(1));
+    assert!(open(&sp, &key, &v1(CUTOVER), None).is_none());
+    // Too big to show anyone: dropped wherever it lands.
+    let big = Op::Post {
+        channel: Ch([1; 8]),
+        text: "x".repeat(MAX_TEXT + 1),
+        reply: None,
+        files: vec![],
+    };
+    let (_, raw) = seal(&sp, &key, &sk, dev, 1, big);
+    assert!(
+        open(&sp, &key, &postcard::from_bytes(&raw).unwrap(), None).is_none()
+    );
 }
 
 #[cfg(test)]
@@ -266,9 +368,13 @@ mod file_tests {
         assert_eq!(f("../../.ssh/a:b|c\n"), "sshabc");
         assert_eq!(f("con.txt"), "_con.txt");
         assert_eq!(f("COM1"), "_COM1");
+        assert_eq!(f("con .txt"), "_con .txt");
+        assert_eq!(f("LPT¹.log"), "_LPT¹.log");
+        assert_eq!(f("COM10"), "COM10");
         assert_eq!(f(" . "), "file");
         assert_eq!(f("notes.md"), "notes.md");
         assert_eq!(super::name(" a\u{202e}dmin\u{200b} "), "admin");
+        assert_eq!(super::name("admin\u{2060}\u{3164}\u{e0041}"), "admin");
         assert_eq!(super::name(&"é".repeat(40)).len(), 64);
     }
 }

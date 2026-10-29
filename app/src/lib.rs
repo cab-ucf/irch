@@ -556,6 +556,46 @@ async fn to_loroh(
     }
 }
 
+/// A web link, opened only after the page showed it in full.
+#[tauri::command]
+async fn open_link(app: AppHandle, url: String) -> Result<(), String> {
+    let u = tauri::Url::parse(&url).map_err(|e| e.to_string())?;
+    if !matches!(u.scheme(), "https" | "http" | "mailto") {
+        return Err("only web and mail links open".into());
+    }
+    #[cfg(desktop)]
+    {
+        let _ = app;
+        browse(u.as_str()).map_err(err)
+    }
+    #[cfg(target_os = "android")]
+    {
+        let b = app.try_state::<android::Bridge>().ok_or("no bridge")?;
+        b.browse(u.as_str()).await.then_some(()).ok_or("no app opens it".into())
+    }
+    #[cfg(target_os = "ios")]
+    {
+        let _ = (app, u);
+        Err("no browser to hand it to here: it is copied".into())
+    }
+}
+
+/// Banners that say only that something came: on, off, or as it is.
+#[tauri::command]
+fn private(app: AppHandle, on: Option<bool>) -> Result<bool, String> {
+    let f = home(&app).map_err(err)?.join("private");
+    let _ = match on {
+        Some(true) => std::fs::write(&f, ""),
+        Some(false) => std::fs::remove_file(&f),
+        None => Ok(()),
+    };
+    Ok(f.exists())
+}
+
+fn hidden(app: &AppHandle) -> bool {
+    home(app).is_ok_and(|d| d.join("private").exists())
+}
+
 #[tauri::command]
 fn log(msg: String) {
     tracing::warn!("page: {}", msg.chars().take(500).collect::<String>());
@@ -703,7 +743,9 @@ pub fn run() {
         profiles,
         use_profile,
         sign_out,
-        to_loroh
+        to_loroh,
+        open_link,
+        private
     ]);
     let app = b.build(tauri::generate_context!()).expect("tauri builds");
     app.run(|app, e| {
@@ -820,10 +862,23 @@ fn front(app: &AppHandle) -> bool {
     app.webview_windows().values().any(|w| w.is_focused().unwrap_or(false))
 }
 
+/// With private banners, who and what stay in the app.
+fn veiled(app: &AppHandle, x: &Notice) -> Notice {
+    veil(x.clone(), hidden(app))
+}
+
+fn veil(mut x: Notice, hide: bool) -> Notice {
+    if hide {
+        x.title = "irch".into();
+        x.body = if x.ring { "Incoming call" } else { "New message" }.into();
+    }
+    x
+}
+
 #[cfg(target_os = "android")]
 async fn notify(app: &AppHandle, x: &Notice) {
     if let Some(b) = app.try_state::<android::Bridge>() {
-        b.alert(x).await;
+        b.alert(&veiled(app, x)).await;
     }
 }
 
@@ -831,6 +886,7 @@ async fn notify(app: &AppHandle, x: &Notice) {
 #[cfg(not(target_os = "android"))]
 async fn notify(app: &AppHandle, x: &Notice) {
     use tauri_plugin_notification::NotificationExt;
+    let x = &veiled(app, x);
     let sound = match () {
         _ if cfg!(target_os = "macos") => "NSUserNotificationDefaultSoundName",
         _ if cfg!(windows) => "IM",

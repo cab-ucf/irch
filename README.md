@@ -51,8 +51,13 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
   `:` commands, `l`/`h` into and out of threads, `J`/`K` channels, `?`.
 - A DM closes (✕) and comes back with its next message; deleting it is
   separate (its menu, or `:leave`).
-- Several profiles per device, linked devices, invisible mode, themes
-  (Neon, Midnight, Nord, UCF, Light).
+- Several profiles per device, linked devices (listed, with when each
+  last wrote), invisible mode, private notifications, themes (Neon,
+  Midnight, Nord, UCF, Light).
+- Owners hand a space on (*Make Owner*); a lost or stolen device's
+  identity is retired everywhere (*A device was lost or stolen*).
+- Invites show what they are to before you join; links show where they
+  go before they open; a message only on this device says so.
 - *Add to notes*: a message or thread lands in a
   [loroh](https://github.com/cab-ucf/siroh) note as a task, event or quote,
   with an `irch://` link back; on phones through loroh, which asks first.
@@ -76,12 +81,18 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   an epoch tag, a time and bytes.
 - **Bans change the key**, boxed to each remaining member with X-Wing
   (ML-KEM-768 + X25519); a `Back` op keeps history readable for members.
+  Ops sign their epoch, so none is sealed again under another.
+- **A key is a room.** The gossip topic and each sync's proof derive from
+  the current key: a rekey leaves whoever it cut off outside, unable to
+  hear or fetch even ciphertext. Syncs are signed for the device asked.
 - **Authority is a fold** in `(time, id)` order, so every replica agrees in
   any delivery order; only current admins' rekeys count.
 - **One seed is you** on every device; a private space records what you
   joined, so linked devices follow each other.
 - **Storage nodes keep ciphertext, never keys**, so messages wait while
-  everyone is offline.
+  everyone is offline. They answer their owners, the devices their owners
+  vouch for, and holders of the current key; they keep only the epochs
+  their owners name, within a daily budget.
 - **Threads are channels** named by a message's id: no extra protocol.
 - **Calls are a mesh** over QUIC: Opus datagrams, VP8/H.264 one stream per
   group of pictures, so a slow peer skips to the newest keyframe.
@@ -102,17 +113,25 @@ space = a grow-only set of envs;   state = a deterministic fold of it
 ## Limits
 
 - No forward secrecy inside an epoch; keys rotate on bans and on request.
-- Authors date their own ops (a day ahead at most): a demoted admin's
-  backdated bans and renames stand until undone.
+- Authors date their own ops (ten minutes ahead at most): a demoted
+  admin's backdated bans and renames stand until undone.
+- A linked device is you: lost, it can only be retired with the whole
+  identity, not alone; you then start a new one and rejoin.
 - Signatures are Ed25519; stored data is post-quantum, transport is not.
 - Peers see each other's addresses, relays see endpoint ids and traffic,
-  storage nodes see sizes, times and devices.
+  storage nodes see sizes, times and devices. The Mainline DHT says an
+  endpoint id is online, to anyone.
+- A member's UnifiedPush server learns when each member writes, and from
+  where. Doorbell codes are per space and die with a rekey.
+- Call frames reach the system web view's video decoders.
 - Calls are for a handful of people; Macs and iPhones need WebKit 26.
 - An iPhone in the background is not told of messages: Apple's push is a
   server.
 - Any member can have the space's storage nodes keep sealed files up to
   25 MB each, 4 GB a day for the space; a ban stops them.
-- A storage code is a password. Unaudited.
+- A storage code is a password. A first install trusts GitHub's TLS
+  (checked against irch's key where `minisign` exists); every update is
+  checked. Unaudited.
 
 ## Layout
 

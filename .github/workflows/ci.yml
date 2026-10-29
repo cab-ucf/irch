@@ -1,7 +1,10 @@
-# By hand only: each release tests itself (release.yml's check).
+# By hand: each release tests itself (release.yml's check). Weekly, the
+# dependencies are checked against RustSec's advisories.
 name: ci
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * 1"
 permissions:
   contents: read
 concurrency:
@@ -14,10 +17,22 @@ env:
     libjavascriptcoregtk-4.1-dev librsvg2-dev
 
 jobs:
-  test:
+  audit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: cargo install cargo-audit --version 0.22.2 --locked
+      - run: cargo audit
+
+  test:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
@@ -31,6 +46,7 @@ jobs:
       - run: shellcheck -S warning install.sh
 
   build:
+    if: github.event_name != 'schedule'
     strategy:
       fail-fast: false
       matrix:
@@ -38,6 +54,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
@@ -55,6 +73,7 @@ jobs:
           retention-days: 14
 
   android:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -105,9 +124,12 @@ jobs:
           if-no-files-found: ignore
 
   ios:
+    if: github.event_name != 'schedule'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable

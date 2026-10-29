@@ -38,6 +38,8 @@ function h(tag, props, ...kids) {
     else e.setAttribute(k, v);
   }
   e.append(...kids.flat(Infinity).filter((x) => x != null && x !== false));
+  // Icon buttons say what they do to screen readers too.
+  if (props?.title && tag === "button") e.setAttribute("aria-label", props.title);
   return e;
 }
 
@@ -257,7 +259,15 @@ const chan = () => inThread() ? S.thread
 // A closed DM is out of the list until its next message, or opened.
 const dms = () => S.spaces.filter((s) => s.dm && (!s.closed || s.id === S.sid));
 const memberOf = (id) => S.members.find((m) => m.id === id);
-const nameOf = (id) => memberOf(id)?.name ?? short(id);
+// Two members of one name: each also shows the start of their id.
+const called = (id, name) =>
+  S.twins?.has(name.toLowerCase()) ? `${name} #${id.slice(0, 4)}` : name;
+const nameOf = (id) => called(id, memberOf(id)?.name ?? short(id));
+const ago = (ts) => {
+  const m = Math.round((Date.now() - ts) / 6e4);
+  return m < 1 ? "just now" : m < 60 ? `${m} min ago`
+    : m < 1440 ? `${Math.round(m / 60)} h ago` : fmtDay(ts);
+};
 const isMe = (id) => id === S.me.id;
 
 // ---------- refresh scheduling ----------
@@ -305,6 +315,13 @@ async function loadSidebar() {
 async function loadMembers() {
   const s = cur();
   S.members = s ? await rpc("members", { space: s.id }) : [];
+  const seen = new Set();
+  S.twins = new Set();
+  for (const m of S.members) {
+    const k = m.name.toLowerCase();
+    if (seen.has(k)) S.twins.add(k);
+    seen.add(k);
+  }
   renderMembers();
 }
 
@@ -471,7 +488,7 @@ function spaceTree(s) {
   return [h("div", {
     class: "space" + (s.id === S.sid ? " here" : "") + (open ? " open" : "") +
       (!open && unread(s) ? " unread" : ""),
-    onclick: fold,
+    onclick: fold, role: "button", tabindex: 0, "aria-expanded": `${open}`,
   }, icon("chevron"), h("span", { class: "name" }, s.name),
   !open && badge(mentions(s)),
   h("button", { class: "gear", title: "Space menu", onclick: menu },
@@ -483,7 +500,7 @@ function dmList() {
   return dms().map((d) => h("div", {
     class: `channel dm${d.id === S.sid ? " active" : ""}` +
       (unread(d) && d.id !== S.sid ? " unread" : ""),
-    onclick: () => select(d.id),
+    onclick: () => select(d.id), role: "button", tabindex: 0,
     oncontextmenu: (e) => {
       e.preventDefault();
       select(d.id);
@@ -510,7 +527,7 @@ function channelList(s) {
       return h("div", {
         class: `channel${active ? " active" : ""}` +
           (ch.unread && !active ? " unread" : ""),
-        onclick: () => select(s.id, ch.id),
+        onclick: () => select(s.id, ch.id), role: "button", tabindex: 0,
         oncontextmenu: (e) => {
           e.preventDefault();
           menu(e.currentTarget, chanMenu(s, ch));
@@ -556,13 +573,15 @@ const threadRow = (s, t) => h("div", {
     S.sid = s.id;
     openThread(t.root);
   },
+  role: "button", tabindex: 0,
 }, icon("thread"), h("span", { class: "name" }, t.name),
 t.id !== S.ch && badge(t.mentions),
 (isMe(t.by) || s.admin) && h("button", {
   class: "gear", title: "Rename",
   onclick: (e) => { e.stopPropagation(); renameRoom(s, t); },
 }, icon("pencil")),
-(isMe(t.by) || s.admin) && h("button", {
+// Its starter deletes it only while the replies are all theirs.
+(s.admin || isMe(t.by) && t.alone) && h("button", {
   class: "gear", title: "Delete",
   onclick: (e) => { e.stopPropagation(); deleteRoom(s, t); },
 }, icon("trash")));
@@ -600,8 +619,10 @@ async function openUrl(url) {
     .exec(url);
   // Only Android's Answer button (its token checked) answers unasked.
   if (c) {
-    return c[1] === "call" && android
-      ? answer(c[2], c[3]) : incoming(c[2], c[3]);
+    if (c[1] === "call" && android) return answer(c[2], c[3]);
+    // A link rings only for a call the space says is on: no web page
+    // fakes one.
+    return callOf(c[2], c[3])?.call.length ? incoming(c[2], c[3]) : null;
   }
   if (!String(url).startsWith("irch://open/")) return;
   // A channel's link, or a message's.
@@ -682,6 +703,8 @@ function renderHeader() {
     : ch ? `Message #${ch.name}` : "";
   input.disabled = !ch || s.locked;
   $("locked").classList.toggle("hidden", !s?.locked);
+  put($("locked"), "This space moved to a new key without you. ",
+    h("button", { class: "btn", onclick: askAdmin }, "Ask an admin"));
   for (const id of ["scroller", "composer", "members"]) {
     $(id).classList.toggle("hidden", !s || (id === "members" && s.dm));
   }
@@ -850,6 +873,7 @@ function renderCall() {
   btn.classList.toggle("hidden", !chan() || inThread());
   btn.classList.toggle("live", here());
   btn.title = here() ? "Leave call" : "Join call";
+  btn.setAttribute("aria-label", btn.title);
   put(btn, icon(here() ? "hangup" : "ring"));
   $("call").classList.toggle("hidden", !here());
   const c = av.call;
@@ -905,8 +929,9 @@ function renderMessages(keepScroll) {
     const mentioned = mentionsMe(m);
     const editing = S.editing === m.id;
     const authorAdmin = memberOf(m.author)?.role === "Admin";
-    const sig = JSON.stringify([m.text, m.edited, m.name, m.reactions, m.quote,
-      m.thread, m.pinned, cont, mentioned, editing, admin, authorAdmin]);
+    const sig = JSON.stringify([m.text, m.edited, called(m.author, m.name),
+      m.reactions, m.quote, m.thread, m.pinned, cont, mentioned, editing,
+      admin, authorAdmin, m.pending]);
     items.push({ k: m.id, sig,
       make: () => msgRow(m, { cont, mentioned, editing, authorAdmin }) });
     prev = m;
@@ -959,16 +984,22 @@ function msgRow(m, { cont, mentioned, editing, authorAdmin }) {
       fmtTime(m.ts)));
   } else {
     const card = (e) => memberCard(m.author, e.currentTarget, "right");
+    const name = called(m.author, m.name);
     const nick = h("span", {
       class: "author" + (authorAdmin ? " admin" : ""), onclick: card,
-      title: authorAdmin ? `${m.name} (admin)` : m.name,
-    }, m.name);
+      title: authorAdmin ? `${name} (admin)` : name,
+      role: "button", tabindex: 0,
+    }, name);
     if (!authorAdmin) nick.style.color = color(m.author);
     row.append(h("div", { class: "head" },
       h("span", { class: "time", title: at }, fmtTime(m.ts)), nick));
   }
   if (editing) row.append(editBox(m));
   else if (m.text || m.edited) row.append(content(m.text, m.edited));
+  if (m.pending) {
+    row.append(h("div", { class: "pending-note" },
+      "Only on this device: it goes out once someone is reachable"));
+  }
   if (m.files.length) row.append(attachments(m.files));
   if (m.reactions.length) row.append(reactionsBar(m));
   if (m.thread && !inThread()) {
@@ -1032,8 +1063,33 @@ function render(tokens, root) {
   return root;
 }
 
-const link = (href) => h("span", { class: "link", title: `Copy ${href}`,
-  onclick: () => copy(href, `Copied ${href}`) });
+const link = (href) => h("span", { class: "link", title: href,
+  role: "button", tabindex: 0, onclick: () => openLink(href) });
+
+/** A link, shown in full (its site in punycode) before it opens. */
+async function openLink(href) {
+  let u;
+  try {
+    u = new URL(href);
+  } catch {
+    return copy(href, `Copied ${href}`);
+  }
+  const web = /^(https?|mailto):$/.test(u.protocol);
+  const go = await modal((finish) => h("div", {},
+    h("div", { class: "m-body" }, h("h2", {}, "Open this link?"),
+      h("p", { class: "sub" }, "It leaves irch. Check where it really goes."),
+      h("p", { class: "url" }, u.href),
+      web && u.host && h("p", { class: "note" }, "Site: ", h("b", {}, u.host))),
+    foot(cancel(finish), h("button", { class: "btn grey",
+      onclick: () => finish("copy") }, "Copy"),
+    web && h("button", { class: "btn", onclick: () => finish("open") },
+      "Open"))));
+  if (go === "copy") copy(u.href, "Copied");
+  if (go === "open") {
+    await invoke("open_link", { url: u.href })
+      .catch((e) => copy(u.href, `${e}`));
+  }
+}
 
 function spoiler() {
   const s = h("span", { class: "spoiler", title: "Spoiler" });
@@ -1041,15 +1097,21 @@ function spoiler() {
   return s;
 }
 
+// Text that reverses what follows (Trojan Source) shows as a mark instead.
+const BIDI = /[\u202A-\u202E\u2066-\u2069]/g;
+const unbent = (t) => t.replace(BIDI, "\uFFFD");
 const AT = /((?<![\p{L}\p{N}_])@[\p{L}\p{N}_.-]*[\p{L}\p{N}_])/u;
-const tagged = (text) => text.split(AT)
+const tagged = (text) => unbent(text).split(AT)
   .map((x, i) => i % 2 ? h("span", { class: "mention" }, x) : x);
 
 /** Prism's token tree as spans; its HTML is never used. */
 function code(src, lang) {
   const P = window.Prism;
+  src = unbent(src);
   const name = LANG[lang?.toLowerCase()] ?? lang?.toLowerCase();
-  const g = name && P?.languages[name];
+  // Highlighting has slow corners: only code of a sensible size.
+  const ok = name && src.length < 20000 && Object.hasOwn(P?.languages ?? {}, name);
+  const g = ok && P.languages[name];
   const spans = (ts) => ts.map((t) => typeof t === "string" ? t
     : h("span", { class: ["tok", t.type, ...[t.alias ?? []].flat()].join(" ") },
       spans([t.content].flat())));
@@ -1303,7 +1365,7 @@ const sealFile = async (file, password) => call("seal", { space: S.sid,
   path: await upload(file), name: file.name, password });
 
 const offerFile = async (file) =>
-  call("offer", { path: await upload(file), name: file.name });
+  call("offer", { space: S.sid, path: await upload(file), name: file.name });
 
 // Into irch's folder in parts (a page knows no paths).
 async function upload(file) {
@@ -1331,7 +1393,7 @@ async function offerPaths() {
   const paths = await invoke("pick").catch(() => []);
   for (const path of paths) {
     toast(`Sharing ${path.split(/[\\/]/).pop()} from this device…`);
-    const f = await call("offer", { path }).catch(() => null);
+    const f = await call("offer", { space: S.sid, path }).catch(() => null);
     if (f) S.files.push(f);
     renderFilesBar();
   }
@@ -1491,8 +1553,9 @@ function renderMembers() {
     ...list.map((m) => h("div", {
       class: `member ${m.online ? "on" : "off"} ${m.role.toLowerCase()}`,
       onclick: (e) => memberCard(m.id, e.currentTarget, "left"),
+      role: "button", tabindex: 0,
     }, avatar(m.id, m.name, "sm", m.online),
-    h("span", { class: "name" }, m.name))),
+    h("span", { class: "name" }, called(m.id, m.name)))),
   ]));
   // Names and admin colours in messages depend on members.
   if (S.msgs.length) renderMessages(true);
@@ -1594,7 +1657,9 @@ function storageFlow(s) {
   modal((finish) => {
     const sw = (x) => h("label", { class: "switch" },
       h("span", {}, short(x.node),
-        h("small", {}, x.node === local ? "This computer" : "Storage node")),
+        h("small", {}, (x.node === local ? "This computer" : "Storage node") +
+          " · " + (x.seen ? `synced ${ago(x.seen)}`
+            : "not reached since irch started"))),
       h("input", { type: "checkbox", checked: x.on,
         onchange: (e) => keep(x.node, e.target.checked) }), h("i"));
     const pair = async () => {
@@ -1648,6 +1713,7 @@ function memberCard(id, anchor, align) {
       actions.push(m.role === "Admin"
         ? act("Remove Admin", role("Member"), "grey")
         : act("Make Admin", role("Admin")));
+      actions.push(act("Make Owner", () => ownerFlow(m), "grey"));
     }
   }
   const banner = h("div", { class: "banner" });
@@ -1655,7 +1721,7 @@ function memberCard(id, anchor, align) {
   close = popover(anchor, h("div", { class: "card" }, banner,
     h("div", { class: "body" },
       avatar(id, m.name, "", m.online),
-      h("h2", {}, m.name),
+      h("h2", {}, called(id, m.name)),
       h("div", { class: "id", title: "Copy full ID",
         onclick: () => copy(id, "ID copied") }, short(id)),
       h("span", { class: "role" }, id === s?.owner ? "Owner" : m.role),
@@ -1833,7 +1899,24 @@ async function joinFlow() {
     sub: "Paste an invite someone shared with you.", label: "Invite",
     placeholder: "irch:join:…", ok: "Join", maxLength: 8192, scan: true });
   if (code === SCAN) code = await scanQR();
-  if (!code) return;
+  if (code) await joinCode(code);
+}
+
+/** What the invite is to, and from whom, before anything is sent. */
+async function joinCode(code) {
+  const p = await rpc("peek", { code }).catch(() => null);
+  if (!p) return toast("That is not an irch invite", true);
+  if (!p.joined) {
+    const ok = await modal((finish) => h("div", {},
+      h("div", { class: "m-body" }, h("h2", {}, `Join ${p.name || "a space"}?`),
+        h("p", { class: "sub" }, p.who ? `Its owner is ${p.who}.`
+          : `Its owner (${short(p.owner)}) shares no space with you yet.`),
+        h("p", { class: "note" }, "Anyone holding this invite can read the " +
+          "space. Join only invites you expected.")),
+      foot(cancel(finish), h("button", { class: "btn",
+        onclick: () => finish(true) }, "Join"))));
+    if (!ok) return;
+  }
   const id = await call("join", { code }).catch(() => null);
   if (id) {
     await open(id);
@@ -1943,21 +2026,29 @@ function settings() {
             readOnly: true }),
           h("button", { class: "btn grey",
             onclick: () => copy(S.me.id, "ID copied") }, "Copy")),
-        sw("Invisible", "Others see you offline; typing stays private.",
-          S.me.invisible, (on) => setInvisible(on)),
+        sw("Invisible", "Others see you offline; typing stays private. " +
+          "Calls you join still show.", S.me.invisible,
+        (on) => setInvisible(on)),
+        sw("Private notifications", "Banners say only that something came, " +
+          "not who sent it or what it says.", S.private,
+        (on) => invoke("private", { on }).then((v) => S.private = v)),
         sw("Vim keys", "Esc in the composer picks messages: j/k, r, e, dd; " +
           "? lists them.", vimKeys(), (on) => store.set("vim", on ? "1" : "0")),
         android && notifyCheck(),
         h("label", {}, "Storage node"), storage,
-        h("p", { class: "note" }, "Paste the code `irch --serve` prints " +
-          "on an always-on machine: it keeps your spaces' ciphertext, " +
-          "never the keys, so messages wait there while everyone is offline."),
+        h("p", { class: "note" }, "A storage node keeps your spaces' " +
+          "ciphertext, never the keys, so messages wait while everyone is " +
+          "offline. Easiest: a space's menu › Storage Nodes › Run one on " +
+          "this computer. Or paste the code another one shows."),
         h("button", {
           class: "choice", onclick: () => { finish(null); linkDevice(); },
         }, icon("phone"), "Link a device"),
         h("button", {
+          class: "choice", onclick: () => { finish(null); sharedFlow(); },
+        }, icon("disk"), "Files shared from this device"),
+        h("button", {
           class: "choice", onclick: () => { finish(null); profilesFlow(); },
-        }, icon("users"), "Profiles and signing out"),
+        }, icon("users"), "Devices, profiles and signing out"),
         h("button", {
           class: "choice", onclick: () => { finish(null); updates(false); },
         }, icon("down"), "Check for updates"),
@@ -1983,9 +2074,15 @@ async function profilesFlow() {
       h("button", { class: "choice", onclick: () => finish({ make: true }) },
         icon("plus"), "New profile"),
       h("button", { class: "choice", onclick: () => finish({ out: true }) },
-        icon("logout"), `Sign out of ${label(p.current)}`)),
+        icon("logout"), `Sign out of ${label(p.current)}`),
+      h("button", { class: "choice", onclick: () => finish({ devices: 1 }) },
+        icon("phone"), "Your devices"),
+      h("button", { class: "choice danger", onclick: () => finish({ burn: 1 }) },
+        icon("trash"), "A device was lost or stolen")),
     foot(cancel(finish))));
   if (!go) return;
+  if (go.devices) return devicesFlow();
+  if (go.burn) return retireFlow();
   let name = go.use;
   if (go.make) {
     name = await ask({ title: "New profile", label: "Its name",
@@ -2006,7 +2103,99 @@ async function profilesFlow() {
   } catch (e) {
     return toast(String(e), true);
   }
+  if (go.out) forgetPage();
   location.reload();
+}
+
+/** Drafts and places, gone with the identity; the theme stays. */
+function forgetPage() {
+  const t = store.get("theme");
+  try {
+    for (const k of Object.keys(localStorage)) {
+      if (k.startsWith("irch.")) localStorage.removeItem(k);
+    }
+  } catch {}
+  theme(t);
+}
+
+async function devicesFlow() {
+  const ds = await rpc("devices").catch(() => []);
+  modal((finish) => h("div", {},
+    h("div", { class: "m-body" }, h("h2", {}, "Your devices"),
+      h("p", { class: "sub" }, "Every device linked to you, by when it " +
+        "last wrote. One you do not know means your link code leaked."),
+      ds.map((d) => h("p", { class: "check ok" }, d.device,
+        h("small", {}, ` · ${d.this ? "this device" : ago(d.seen)}`)))),
+    foot(h("button", { class: "btn grey", onclick: () => finish(null) },
+      "Done"))));
+}
+
+/** A device lost: retire the identity everywhere, then start afresh. */
+async function retireFlow() {
+  const ok = await confirmBox({ title: "Retire this identity?",
+    sub: "Whoever has the lost device holds your key. This tells every " +
+      "space you are in that nothing signed as you from now on counts, " +
+      "and admins move them to new keys without it. It cannot be undone: " +
+      "you start a new identity and ask for new invites.", ok: "Retire" });
+  if (!ok) return;
+  try {
+    await call("burn");
+    await invoke("sign_out");
+  } catch {
+    return;
+  }
+  forgetPage();
+  location.reload();
+}
+
+async function sharedFlow() {
+  const files = await rpc("sharing").catch(() => []);
+  const where = (id) => S.spaces.find((x) => x.id === id)?.name ?? "a space";
+  modal((finish) => h("div", {},
+    h("div", { class: "m-body" }, h("h2", {}, "Shared from this device"),
+      h("p", { class: "sub" }, "Members of each file's space can fetch it " +
+        "from here while irch runs: ones you shared, and ones you opened."),
+      files.length ? files.map((f) => h("div", { class: "row shared" },
+        h("span", {}, f.name, h("small", {},
+          ` · ${size(f.size)} · ${where(f.space)}`)),
+        h("button", { class: "btn grey", onclick: async (e) => {
+          const row = e.currentTarget.closest(".row");
+          await call("unshare", { hash: f.hash }).then(() => row.remove(),
+            () => {});
+        } }, "Stop sharing")))
+        : h("p", { class: "note" }, "Nothing is shared from here.")),
+    foot(h("button", { class: "btn grey", onclick: () => finish(null) },
+      "Done"))));
+}
+
+/** Locked out: ask an admin, in a DM we can still write in. */
+async function askAdmin() {
+  const s = cur();
+  const admins = S.members.filter((m) => m.role === "Admin" && !isMe(m.id));
+  const text = `Hi! ${s.name} moved to a new key without me. Could you ` +
+    "send me a new invite?";
+  for (const a of admins) {
+    const dm = S.spaces.find((x) => x.dm && x.with === a.id && !x.locked);
+    const via = S.spaces.filter((x) => !x.dm && !x.locked);
+    let id = dm?.id;
+    for (const v of dm ? [] : via) {
+      id = await rpc("dm", { space: v.id, user: a.id }).catch(() => null);
+      if (id) break;
+    }
+    if (!id) continue;
+    await open(id);
+    insert($("input"), text);
+    return;
+  }
+  toast("No admin to write to from here: ask a member for a new invite " +
+    "in person.", true, 8000);
+}
+
+async function ownerFlow(m) {
+  const ok = await confirmBox({ title: `Make ${m.name} the owner?`,
+    sub: "They can then make and remove admins, and hand it on again. " +
+      "You stay an admin until they change that.", ok: "Make Owner" });
+  if (ok) publish({ Owner: { user: m.id } });
 }
 
 async function health(ask = "") {
@@ -2116,6 +2305,16 @@ function quickSwitch(start = "") {
   });
 }
 
+/** `text` with the words of `q` marked. */
+function marked(text, q) {
+  const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return text;
+  const esc = words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const re = new RegExp(`(${esc.join("|")})`, "gi");
+  return unbent(text).split(re)
+    .map((x, i) => i % 2 ? h("mark", {}, x) : x);
+}
+
 /** Searched on this device: nothing is asked of anyone. */
 function searchFlow(scope = inThread() || chan() ? "room" : "space") {
   const s = cur();
@@ -2145,8 +2344,8 @@ function searchFlow(scope = inThread() || chan() ? "room" : "space") {
         class: i === sel ? "sel" : "", onclick: () => finish(r),
       }, h("div", {}, h("b", {}, r.message.name), " ",
         h("small", {}, `${where(r)} · ${fmtDay(r.message.ts)}`),
-        h("p", {}, r.message.text.slice(0, 200) ||
-          r.message.files.map((f) => f.name).join(", "))))));
+        h("p", {}, marked(r.message.text.slice(0, 200) ||
+          r.message.files.map((f) => f.name).join(", "), input.value))))));
       if (input.value.trim() && !hits.length) {
         list.append(h("p", { class: "note" }, "Nothing found."));
       }
@@ -2402,11 +2601,7 @@ const SLASH = {
     renderUserPanel();
     schedule("members", "msgs");
   },
-  join: async (code) => {
-    if (!code) return joinFlow();
-    const id = await call("join", { code });
-    if (id) await open(id);
-  },
+  join: (code) => code ? joinCode(code) : joinFlow(),
   dm: (who) => {
     const q = who.replace(/^@/, "").toLowerCase();
     const m = S.members.find((x) => x.name.toLowerCase() === q && !isMe(x.id));
@@ -2548,6 +2743,9 @@ async function send() {
 // ---------- wiring ----------
 
 function wire() {
+  for (const b of document.querySelectorAll("button[title]")) {
+    b.setAttribute("aria-label", b.title);
+  }
   $("menu-btn").append(icon("menu"));
   $("menu-btn").onclick = () => document.body.classList.toggle("drawer");
   $("members-btn").append(icon("users"));
@@ -2673,6 +2871,12 @@ function wire() {
   addEventListener("focus", () => nearBottom() && markRead());
 
   document.addEventListener("keydown", (e) => {
+    // Rows that act as buttons answer Enter and Space, as buttons do.
+    if ((e.key === "Enter" || e.key === " ") &&
+      e.target.getAttribute?.("role") === "button") {
+      e.preventDefault();
+      return e.target.click();
+    }
     const typing = /^(INPUT|TEXTAREA)$/.test(e.target.tagName);
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
       e.preventDefault();
@@ -2717,6 +2921,7 @@ async function start() {
       h("div", { class: "err" }, String(e))));
     return;
   }
+  S.private = await invoke("private", { on: null }).catch(() => false);
   wire();
   renderEmpty();
   // Member lists change rarely but can be large: at most every 2 s.

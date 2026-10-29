@@ -1,5 +1,6 @@
 //! An append-only envelope log per space, and small files replaced whole.
 //! Records: `len u32 ‖ checked u8 ‖ bytes`; a torn tail is cut on open.
+//! `checked`: 0 not yet, else the signature's version (1 or 2).
 
 use anyhow::Result;
 use serde::{Serialize, de::DeserializeOwned};
@@ -12,7 +13,7 @@ pub struct Log {
     end: u64,
 }
 
-pub type Rec = (u64, bool, Vec<u8>);
+pub type Rec = (u64, u8, Vec<u8>);
 
 impl Log {
     pub fn open(path: &Path) -> Result<(Self, Vec<Rec>)> {
@@ -32,23 +33,18 @@ impl Log {
             if r.read_exact(&mut b).is_err() {
                 break;
             }
-            recs.push((end, head[4] == 1, b));
+            recs.push((end, head[4], b));
             end = r.stream_position()?;
         }
         f.set_len(end)?;
         Ok((Self { f, end }, recs))
     }
 
-    pub fn append(
-        &mut self,
-        checked: bool,
-        b: &[u8],
-        sync: bool,
-    ) -> Result<u64> {
+    pub fn append(&mut self, checked: u8, b: &[u8], sync: bool) -> Result<u64> {
         let at = self.end;
         let len = (b.len() as u32).to_le_bytes();
         self.f.seek(SeekFrom::Start(at))?;
-        self.f.write_all(&[&len[..], &[checked as u8], b].concat())?;
+        self.f.write_all(&[&len[..], &[checked], b].concat())?;
         if sync {
             self.f.sync_data()?;
         }
@@ -90,8 +86,8 @@ pub fn write(path: &Path, b: &[u8]) -> Result<()> {
 fn torn_tail() {
     let p = std::env::temp_dir().join(format!("irch-{}.log", crate::now()));
     let (mut l, _) = Log::open(&p).unwrap();
-    l.append(false, b"one", false).unwrap();
-    l.append(true, b"two", true).unwrap();
+    l.append(0, b"one", false).unwrap();
+    l.append(2, b"two", true).unwrap();
     drop(l);
     let len = fs::metadata(&p).unwrap().len();
     OpenOptions::new()
@@ -101,10 +97,7 @@ fn torn_tail() {
         .write_all(&[9, 0, 0])
         .unwrap();
     let (mut l, recs) = Log::open(&p).unwrap();
-    assert_eq!(
-        recs,
-        vec![(0, false, b"one".to_vec()), (8, true, b"two".to_vec())]
-    );
+    assert_eq!(recs, vec![(0, 0, b"one".to_vec()), (8, 2, b"two".to_vec())]);
     assert_eq!(fs::metadata(&p).unwrap().len(), len);
     assert_eq!(l.read(8, 3).unwrap(), b"two");
     fs::remove_file(p).unwrap();
