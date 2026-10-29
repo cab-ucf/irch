@@ -39,6 +39,7 @@ const DAY: u64 = 86_400_000;
 const SKEW: u64 = 600_000;
 const GOSSIP_MAX: usize = 128 << 10;
 const BEAT: Duration = Duration::from_secs(60);
+const ALONE: Duration = Duration::from_secs(8);
 const ONLINE: Duration = Duration::from_secs(150);
 // Someone in a call says so every 15 s.
 const CALLER: Duration = Duration::from_secs(45);
@@ -2779,6 +2780,10 @@ impl Node {
     /// A sync with `peer` went through: what we wrote reached someone.
     pub(crate) fn reached(&self, sp: &Space, peer: EndpointId) {
         lock(&self.synced).insert(peer, now());
+        // Reachable, proven: gossip with nobody joins it at once.
+        if let Some(tx) = sp.tx().filter(|_| sp.nbrs().is_empty()) {
+            tokio::spawn(async move { drop(tx.join_peers(vec![peer]).await) });
+        }
         self.reach_device(&sp.id, &peer, now());
         if !std::mem::take(&mut *lock(&sp.undelivered)).is_empty() {
             self.emit(Event::Changed { space: sp.id });
@@ -3077,7 +3082,8 @@ async fn pump(n: Arc<Node>, sp: Weak<Space>, boot: Vec<EndpointId>) {
                     if s.nbrs().is_empty() {
                         let _ = tx.join_peers(n.bootstrap(&s)).await;
                     }
-                    wait = (wait * 2).min(BEAT);
+                    // Alone, a peer coming back is found within seconds.
+                    wait = (wait * 2).min(ALONE);
                     continue;
                 }
             };
