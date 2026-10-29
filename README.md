@@ -144,6 +144,18 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   (checked against irch's key where `minisign` exists); every update is
   checked. Unaudited.
 
+## Later, maybe
+
+Optional, and only if they stay simple:
+
+- Route through Tor or Nym, so members and relays never see an address
+  (relays over TCP; direct QUIC would be off then).
+- Rekey on a schedule, and per-sender key chains within an epoch: a
+  leaked key would then reveal little before or after it.
+- Safety numbers to compare in person; per-device keys, so one lost
+  phone can be removed alone.
+- An outside audit.
+
 ## Layout
 
 | | |
