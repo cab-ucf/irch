@@ -16,7 +16,7 @@ blake3 = "1"
 chacha20poly1305 = "0.11"
 data-encoding = "2"
 getrandom = "0.4"
-dirs = "6"
+dirs = "7"
 iroh = { version = "1.4", default-features = false, features = ["tls-ring"] }
 iroh-gossip = { version = "0.101", default-features = false, features = ["net"] }
 noq-proto = { version = "1.4", default-features = false }

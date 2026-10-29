@@ -171,7 +171,7 @@ fn tray(app: &tauri::App) {
     #[cfg(target_os = "linux")]
     let lib = ["libayatana-appindicator3.so.1", "libappindicator3.so.1"]
         .iter()
-        .any(|l| unsafe { libloading::Library::new(l) }.is_ok());
+        .any(|l| unsafe { libloading::Library::new(*l) }.is_ok());
     #[cfg(not(target_os = "linux"))]
     let lib = true;
     let built = lib.then(|| {

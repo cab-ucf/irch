@@ -14,9 +14,11 @@ use tokio::sync::{broadcast, mpsc};
 pub const ALPN: &[u8] = b"irch/av/1";
 // A screen's keyframe fits; 128 held for a slow page stay within 128 MiB.
 const MAX_FRAME: usize = 1 << 20;
-// A frame's first byte: audio, video, or a keyframe opening a group.
+// A frame's first byte: audio, video, a keyframe opening a group, or the
+// codecs its sender decodes (a datagram, like audio).
 const AUDIO: u8 = 0;
 const KEY: u8 = 2;
+const CODECS: u8 = 3;
 
 pub type Media = broadcast::Sender<(Id, Vec<u8>)>;
 
@@ -68,7 +70,9 @@ impl Call {
         for p in self.peers.values_mut() {
             match f.first() {
                 None => {}
-                Some(&AUDIO) => drop(p.conn.send_datagram(f.to_vec().into())),
+                Some(&(AUDIO | CODECS)) => {
+                    drop(p.conn.send_datagram(f.to_vec().into()))
+                }
                 Some(&k) => {
                     p.skip &= k != KEY;
                     p.skip = p.skip || p.video.try_send(f.to_vec()).is_err();

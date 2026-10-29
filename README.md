@@ -94,8 +94,11 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   vouch for, and holders of the current key; they keep only the epochs
   their owners name, within a daily budget.
 - **Threads are channels** named by a message's id: no extra protocol.
-- **Calls are a mesh** over QUIC: Opus datagrams, VP8/H.264 one stream per
-  group of pictures, so a slow peer skips to the newest keyframe.
+- **Calls are a mesh** over QUIC: Opus datagrams; video in the newest
+  codec every listener decodes (AV1, VP9, then VP8 or H.264), one stream
+  per group of pictures, so a slow peer skips to the newest keyframe.
+- **Voice messages are Opus in Ogg**, played by decoding them in the app:
+  the same in every web view, seekable, the right length.
 - **Sync** compares per-day fingerprints, then sends only missing envs.
 - **Phones sleep**: out of sight for a minute, the node stops and a
   doorbell (an iroh endpoint with no connections) waits. Whoever writes

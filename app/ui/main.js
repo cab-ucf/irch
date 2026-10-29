@@ -3,6 +3,7 @@
 
 import { inline, markdown } from "./markdown.js";
 import * as av from "./call.js";
+import { ogg, unogg } from "./ogg.js";
 
 let troubled = new Set();
 av.call.trouble = (why) => {
@@ -189,23 +190,43 @@ function swatch(k) {
   return t.content.firstChild;
 }
 
-/** Voice messages as WAV, which every system plays. */
+/** Voice messages in Opus (as calls are), in Ogg; WAV only where a web
+ * view encodes no Opus. */
+const OPUS = { codec: "opus", sampleRate: 48000, numberOfChannels: 1,
+  bitrate: 32000, opus: { frameDuration: 20000, application: "voip" } };
 let rec = null;
 async function voice() {
   if (rec) return rec();
   if (!chan()) return;
+  const opus = typeof AudioEncoder === "function" &&
+    (await AudioEncoder.isConfigSupported(OPUS).catch(() => ({}))).supported;
+  const rate = opus ? 48000 : 16000;
   let mic, ctx;
   try {
-    mic = await navigator.mediaDevices.getUserMedia({ audio: true });
-    ctx = new AudioContext({ sampleRate: 16000 });
+    mic = await navigator.mediaDevices.getUserMedia({ audio: {
+      echoCancellation: true, noiseSuppression: true, autoGainControl: true,
+    } });
+    ctx = new AudioContext({ sampleRate: rate });
     await ctx.audioWorklet.addModule("audio.js");
   } catch (e) {
     mic?.getTracks().forEach((t) => t.stop());
     return toast(`No microphone: ${e?.message ?? e}`, true);
   }
-  const frames = [];
+  const frames = [], packets = [];
+  const enc = opus && new AudioEncoder({ error: () => {}, output: (c) => {
+    const b = new Uint8Array(c.byteLength);
+    c.copyTo(b);
+    packets.push(b);
+  } });
+  enc?.configure(OPUS);
+  let t = 0;
   const node = new AudioWorkletNode(ctx, "mic");
-  node.port.onmessage = ({ data }) => frames.push(data);
+  node.port.onmessage = ({ data }) => {
+    if (!enc) return frames.push(data);
+    enc.encode(new AudioData({ format: "f32-planar", sampleRate: rate,
+      numberOfChannels: 1, numberOfFrames: data.length, data, timestamp: t }));
+    t += 1e6 * data.length / rate;
+  };
   ctx.createMediaStreamSource(mic).connect(node)
     .connect(new GainNode(ctx, { gain: 0 })).connect(ctx.destination);
   quiet(ctx.resume());
@@ -215,11 +236,51 @@ async function voice() {
     $("mic-btn").classList.remove("live");
     mic.getTracks().forEach((t) => t.stop());
     await ctx.close();
+    await enc?.flush().catch(() => {});
+    enc?.close();
     const at = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-");
-    await addFiles([new File([wav(frames, 16000)], `voice-${at}.wav`)]);
+    const file = enc ? new File([ogg(packets)], `voice-${at}.ogg`)
+      : new File([wav(frames, 16000)], `voice-${at}.wav`);
+    await addFiles([file]);
     send();
   };
 }
+
+/** Ogg Opus decoded here, as WAV: every web view then plays it, seeks it
+ * and knows how long it is (WebKit's own Ogg is unreliable). */
+async function unopus(b) {
+  const o = unogg(b);
+  if (!o || typeof AudioDecoder !== "function") return null;
+  const out = [];
+  const dec = new AudioDecoder({ error: () => {}, output: (d) => {
+    const s = new Float32Array(d.numberOfFrames);
+    d.copyTo(s, { planeIndex: 0, format: "f32-planar" });
+    d.close();
+    out.push(s);
+  } });
+  try {
+    dec.configure({ codec: "opus", sampleRate: 48000,
+      numberOfChannels: o.channels });
+    let t = 0;
+    for (const data of o.packets) {
+      dec.decode(new EncodedAudioChunk({ type: "key", timestamp: t, data }));
+      t += 20000;
+    }
+    await dec.flush();
+  } catch {
+    return null;
+  } finally {
+    if (dec.state !== "closed") dec.close();
+  }
+  // Its first samples warm the encoder up (pre-skip): not sound.
+  const all = new Float32Array(out.reduce((n, x) => n + x.length, 0));
+  out.reduce((n, x) => (all.set(x, n), n + x.length), 0);
+  return new Blob([wav([all.subarray(o.skip)], 48000)], { type: "audio/wav" });
+}
+
+/** A blob the web view plays: Ogg Opus through `unopus`, else as it is. */
+const playable = async (b, type) =>
+  (/ogg/.test(type) && await unopus(b)) || new Blob([b], { type });
 
 function wav(frames, rate) {
   const n = frames.reduce((k, f) => k + f.length, 0);
@@ -1211,8 +1272,8 @@ function attachments(files) {
     if (type?.startsWith("audio")) {
       const a = h("audio", { controls: true, preload: "none" });
       // A blob: the page's policy plays no data: media.
-      bytes(f).then((b) => a.src = URL.createObjectURL(new Blob([b], { type })),
-        () => {});
+      bytes(f).then(async (b) => a.src =
+        URL.createObjectURL(await playable(b, type)), () => {});
       return h("div", { class: "voice" }, a, fileChip(f));
     }
     if (type?.startsWith("video") && f.size <= PREVIEW) return video(f, type);
@@ -1297,7 +1358,7 @@ async function preview(f) {
   }
   let body, url;
   if (MEDIA[ext]) {
-    url = URL.createObjectURL(new Blob([b], { type: MEDIA[ext] }));
+    url = URL.createObjectURL(await playable(b, MEDIA[ext]));
     const tag = MEDIA[ext].startsWith("audio") ? "audio" : "video";
     body = h(tag, { src: url, controls: true, autoplay: true });
   } else {
