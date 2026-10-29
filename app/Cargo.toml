@@ -44,7 +44,7 @@ tauri-plugin-autostart = "2"
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = "2"
 # Whether the tray's library is there (without it, the tray panics).
-libloading = "0.7"
+libloading = "0.9"
 
 # A push wake with no activity running (android.rs, Push.kt).
 [target.'cfg(target_os = "android")'.dependencies]
