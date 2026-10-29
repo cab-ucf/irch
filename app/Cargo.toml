@@ -48,7 +48,7 @@ libloading = "0.7"
 
 # A push wake with no activity running (android.rs, Push.kt).
 [target.'cfg(target_os = "android")'.dependencies]
-jni = "0.21"
+jni = "0.22"
 ndk-context = "0.1"
 
 [features]
