@@ -43,6 +43,8 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
 - Photos, voice and short videos (to 25 MB) wait on the space's storage
   nodes whoever sent them, so everyone sees them inline, sender away.
 - Voice and video calls with screen sharing; a DM call rings like a phone.
+  The caller hears ringback only once the other device rings, and sees
+  when it is not getting through; a DM shows when it reached their device.
 - Notifications on desktops and phones, per space: all, @mentions or none.
 - Search on this device, Ctrl+K switcher, drafts per channel, vim keys
   as in the terminal (Esc, then `j`/`k`, `l`/`h`, `J`/`K`, `r`, `e`, `dd`,

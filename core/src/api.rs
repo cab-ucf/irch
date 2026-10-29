@@ -138,6 +138,11 @@ pub enum Call {
         room: Option<Ch>,
     },
     Hangup,
+    /// A call to us rings here.
+    Ringing {
+        space: Id,
+        channel: Ch,
+    },
     SetLevel {
         space: Id,
         level: crate::Level,
@@ -178,9 +183,16 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
             let page =
                 |s: &crate::State| s.messages(&channel, before, limit.min(500));
             let held = n.undelivered(&space);
+            // A DM's: on the other's device yet?
+            let me = n.id();
+            let peer = n.view(&space, |s| s.peer(&me)).flatten();
+            let reach = peer.and_then(|p| n.reach(&space, &p));
             let row = |m: crate::Message| {
                 let mut v = json!(m);
                 v["pending"] = held.contains(&m.id).into();
+                if m.author == me && peer.is_some() {
+                    v["delivered"] = reach.is_some_and(|r| m.ts <= r).into();
+                }
                 v
             };
             let page = n.view(&space, page).unwrap_or_default();
@@ -275,6 +287,9 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
             json!(n.call(Some((space, channel))).await?)
         }
         Call::Hangup => json!(n.call(None).await?),
+        Call::Ringing { space, channel } => {
+            json!(n.ringing(&space, channel).await)
+        }
         Call::SetLevel { space, level } => json!(n.set_level(&space, level)),
         // Null where there is no notes folder (Android).
         Call::Notes => json!(n.notes()),
@@ -345,6 +360,10 @@ fn space(n: &Node, id: &Id) -> Option<Value> {
     };
     let channels: Vec<_> = chans.into_iter().map(chan).collect();
     let (peers, locked) = (n.peers(id), n.locked(id));
+    // A DM call of ours: has their device got it, and does it ring?
+    let call = n.in_call().filter(|c| c.0 == *id).map(|c| c.1);
+    let rings = with.zip(call).is_some_and(|(w, c)| n.rings(id, &w, &c));
+    let reach = with.and_then(|w| n.reach(id, &w));
     Some(json!({
         "id": id, "name": name, "dm": dm, "with": with, "owner": owner,
         "admin": admin, "peers": peers, "locked": locked, "channels": channels,
@@ -353,6 +372,7 @@ fn space(n: &Node, id: &Id) -> Option<Value> {
             .map(|(device, who)| json!({ "device": device, "who": who }))
             .collect::<Vec<_>>(),
         "level": n.level(id),
+        "reach": reach, "ringing": rings,
         "closed": n.hidden(id),
         "storage": n.stored(id).into_iter()
             .map(|(node, on)| json!({ "node": node, "on": on,

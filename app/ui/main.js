@@ -848,8 +848,42 @@ function tone(notes, gain) {
   }
 }
 const chime = () => tone([[880, 0, 0.12], [1320, 0.13, 0.25]], 0.15);
-// A phone's ring: 440 and 480 Hz, 2 s in every 6.
+// A phone's ring: 440 and 480 Hz, 2 s in every 6; the caller's ringback,
+// the same, softer, once the other side is ringing.
 const ringing = () => tone([[440, 0, 2], [480, 0, 2]], 0.07);
+const ringback = () => tone([[440, 0, 2], [480, 0, 2]], 0.025);
+
+/** A DM call of ours, alone in it: is it reaching them, ringing there,
+ * or not getting through? Ringback only once it rings; a minute, then
+ * no answer. */
+let back = 0;
+function dial() {
+  const on = av.call.on;
+  const s = on && S.spaces.find((x) => x.id === on.space);
+  const alone = s?.dm && (callOf(on.space, on.channel)?.call ?? [])
+    .every(isMe);
+  const was = S.dial;
+  S.dial = null;
+  if (s?.dm && !alone) av.call.met = true;
+  if (!alone) return was && renderCall();
+  // They answered, then hung up: the call is over.
+  if (av.call.met) {
+    toast("Call ended");
+    return av.leave(rpc);
+  }
+  const t = Date.now() - av.call.since;
+  const rings = s.ringing || (s.reach ?? 0) >= av.call.since - 2000;
+  if (t > 60e3) {
+    toast(`No answer from ${s.name}`);
+    return av.leave(rpc);
+  }
+  S.dial = rings ? "Ringing…" : t > 20e3
+    ? `Not getting through: ${s.name}'s devices can't be reached now`
+    : "Calling…";
+  back = rings ? back + 1 : 0;
+  if (rings && back % 6 === 1) ringback();
+  if (S.dial !== was) renderCall();
+}
 
 let calling = null;
 
@@ -857,8 +891,16 @@ function incoming(sid, ch, who) {
   if (calling) return;
   const ids = callOf(sid, ch)?.call ?? [];
   who ??= ids.length ? nameOf(ids[0]) : "Someone";
-  const rings = android ? 0 : setInterval(ringing, 6000);
-  if (!android) ringing();
+  // On screen, the page rings (Android's own ring put away, not doubled),
+  // and the caller hears that it rings here.
+  const ring = () => {
+    quiet(rpc("ringing", { space: sid, channel: ch }));
+    if (document.visibilityState !== "visible") return;
+    if (android) quiet(invoke("hush"));
+    ringing();
+  };
+  const rings = setInterval(ring, 6000);
+  ring();
   const late = setTimeout(() => $("modal").close(), 45e3);
   let seen = false;
   const gone = setInterval(() => {
@@ -939,7 +981,8 @@ function renderCall() {
   $("call").classList.toggle("hidden", !here());
   const c = av.call;
   if (here()) {
-    put($("call"), h("div", { class: "tiles" }),
+    put($("call"), S.dial && h("div", { class: "dial", role: "status" },
+      S.dial), h("div", { class: "tiles" }),
       h("div", { class: "controls" },
         control(c.mic ? "mic" : "micOff", c.mic ? "Mute" : "Unmute", mute,
           c.mic ? "" : "off"),
@@ -953,7 +996,7 @@ function renderCall() {
   const s = on && S.spaces.find((x) => x.id === on.space);
   put($("voice"), on && h("div", { class: "voice" },
     h("div", { class: "names", onclick: () => select(on.space, on.channel) },
-      h("b", {}, "Voice connected"),
+      h("b", {}, S.dial ?? "Voice connected"),
       h("small", {}, s?.dm ? s.name : `#${ch?.name ?? "…"} · ${s?.name}`)),
     control(c.mic ? "mic" : "micOff", c.mic ? "Mute" : "Unmute", mute,
       "panel-btn" + (c.mic ? "" : " off")),
@@ -976,6 +1019,7 @@ function renderMessages(keepScroll) {
   S.stick = false;
   const items = [];
   const admin = !!cur()?.admin;
+  const mine = S.msgs.findLast((m) => isMe(m.author))?.id;
   let prev = null;
   for (const m of S.msgs) {
     const day = fmtDay(m.ts);
@@ -992,9 +1036,10 @@ function renderMessages(keepScroll) {
     const authorAdmin = memberOf(m.author)?.role === "Admin";
     const sig = JSON.stringify([m.text, m.edited, called(m.author, m.name),
       m.reactions, m.quote, m.thread, m.pinned, cont, mentioned, editing,
-      admin, authorAdmin, m.pending]);
-    items.push({ k: m.id, sig,
-      make: () => msgRow(m, { cont, mentioned, editing, authorAdmin }) });
+      admin, authorAdmin, m.pending, m.id === mine && m.delivered]);
+    const last = m.id === mine;
+    items.push({ k: m.id, sig, make: () =>
+      msgRow(m, { cont, mentioned, editing, authorAdmin, last }) });
     prev = m;
   }
   reconcile($("list"), items);
@@ -1032,7 +1077,7 @@ function mentionsMe(m) {
     (m.quote && isMe(m.quote.author));
 }
 
-function msgRow(m, { cont, mentioned, editing, authorAdmin }) {
+function msgRow(m, { cont, mentioned, editing, authorAdmin, last }) {
   const row = h("div", {
     class: `msg${cont ? " cont" : ""}${mentioned ? " mentioned" : ""}` +
       (m.reply ? " has-reply" : "") + (m.pinned ? " pinned" : ""),
@@ -1060,6 +1105,10 @@ function msgRow(m, { cont, mentioned, editing, authorAdmin }) {
   if (m.pending) {
     row.append(h("div", { class: "pending-note" },
       "Only on this device: it goes out once someone is reachable"));
+  } else if (last && m.delivered !== undefined) {
+    // A DM's last of ours: on their device, or not yet (a phone asleep).
+    row.append(h("div", { class: "pending-note" }, m.delivered
+      ? "Delivered" : "Sent, not on their device yet"));
   }
   if (m.files.length) row.append(attachments(m.files));
   if (m.reactions.length) row.append(reactionsBar(m));
@@ -2822,6 +2871,7 @@ function wire() {
   $("call-btn").onclick = ring;
   av.call.changed = renderCall;
   setInterval(renderTiles, 400);
+  setInterval(dial, 1000);
   const showMembers = (on) => {
     $("members").classList.toggle("hidden-panel", !on);
     $("members-btn").classList.toggle("on", on);

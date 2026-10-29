@@ -174,6 +174,11 @@ pub struct Space {
     moved: Arc<Notify>,
     // Our ops written while nobody else was reachable.
     undelivered: Mutex<HashSet<Id>>,
+    // Per member, our ops up to this time are on one of their devices:
+    // they synced, gossiped, or a doorbell took them.
+    reach: Mutex<HashMap<Id, u64>>,
+    // Members whose device says our call is ringing there, and when.
+    ringing: Mutex<HashMap<(Id, Ch), Instant>>,
     task: OnceLock<AbortOnDropHandle<()>>,
 }
 
@@ -992,12 +997,12 @@ impl Node {
 
     /// Our UnifiedPush endpoint, or none: sealed to every space we are in.
     pub async fn set_push(self: &Arc<Self>, url: Option<String>) {
-        let old = std::mem::replace(&mut lock(&self.prefs).push, url.clone());
+        lock(&self.prefs).push = url;
         self.save_prefs();
-        if old != url {
-            for id in self.spaces() {
-                let _ = self.tell_push(&id).await;
-            }
+        // Every time, not only when it changed: each space's code must be
+        // the one a sender accepts now (0.1.0 changed its form).
+        for id in self.spaces() {
+            let _ = self.tell_push(&id).await;
         }
     }
 
@@ -1038,8 +1043,11 @@ impl Node {
     ) {
         let dev = self.ep.id();
         let urls = self.view(id, |s| s.pushes_of(who)).unwrap_or_default();
+        let ts =
+            raw.as_deref().and_then(|r| postcard::from_bytes::<Env>(r).ok());
+        let ts = ts.map_or_else(now, |e| e.ts);
         let (news, id) = (Arc::new(raw), *id);
-        for (_, url) in
+        for (d, url) in
             urls.into_iter().filter(|u| u.0 != dev && pushable(&u.1))
         {
             if url.starts_with("irch:ring:") {
@@ -1052,7 +1060,8 @@ impl Node {
                         let raw = news.as_deref();
                         let r = crate::wake::ring(&n.ep, &url, &id, raw);
                         match r.await {
-                            Ok(()) => return,
+                            // Their phone has it: woken, it tells or rings.
+                            Ok(()) => return n.reach_device(&id, &d, ts),
                             Err(e) => warn!("wake: {e:#}"),
                         }
                     }
@@ -1255,6 +1264,8 @@ impl Node {
             room: Mutex::new([0; 32]),
             moved: Arc::default(),
             undelivered: Mutex::default(),
+            reach: Mutex::default(),
+            ringing: Mutex::default(),
             task: OnceLock::new(),
         });
         {
@@ -1492,7 +1503,10 @@ impl Node {
             lock(&sp.undelivered).insert(s.id);
         }
         match sp.tx().filter(|_| raw.len() <= GOSSIP_MAX) {
-            Some(tx) => drop(tx.broadcast(raw.clone().into()).await),
+            Some(tx) => {
+                drop(tx.broadcast(raw.clone().into()).await);
+                self.gossiped(sp, ts);
+            }
             None => sp.nbrs().into_iter().for_each(|p| self.sync(sp, p)),
         }
         Ok((s.id, raw))
@@ -1735,13 +1749,16 @@ impl Node {
     async fn signal(&self, sp: &Space, op: Op) -> Option<Vec<u8>> {
         let inv = sp.inv.as_ref()?;
         let (key, locked) = lock(&sp.book).key(inv);
-        let quiet = !matches!(op, Op::Call { .. } | Op::Gone);
+        let quiet =
+            !matches!(op, Op::Call { .. } | Op::Gone | Op::Ringing { .. });
         if locked || quiet && self.invisible() {
             return None;
         }
-        let raw = self.seal(sp, &key, self.tick(), op).1;
+        let ts = self.tick();
+        let raw = self.seal(sp, &key, ts, op).1;
         if let Some(tx) = sp.tx() {
             let _ = tx.broadcast(raw.clone().into()).await;
+            self.gossiped(sp, ts);
         }
         Some(raw)
     }
@@ -2691,8 +2708,49 @@ impl Node {
     /// A sync with `peer` went through: what we wrote reached someone.
     pub(crate) fn reached(&self, sp: &Space, peer: EndpointId) {
         lock(&self.synced).insert(peer, now());
+        self.reach_device(&sp.id, &peer, now());
         if !std::mem::take(&mut *lock(&sp.undelivered)).is_empty() {
             self.emit(Event::Changed { space: sp.id });
+        }
+    }
+
+    /// Gossiped: the devices next to us have it, so their owners do.
+    fn gossiped(&self, sp: &Space, ts: u64) {
+        sp.nbrs().iter().for_each(|d| self.reach_device(&sp.id, d, ts));
+    }
+
+    /// A device of someone's has our ops here up to `ts`.
+    fn reach_device(&self, id: &Id, d: &EndpointId, ts: u64) {
+        let Ok(sp) = self.get(id) else { return };
+        let proven = lock(&self.verified).get(d).copied();
+        let Some(u) = proven.or_else(|| lock(&sp.book).st.owner_of(d)) else {
+            return;
+        };
+        let mut r = lock(&sp.reach);
+        let at = r.entry(u).or_default();
+        if *at < ts {
+            *at = ts;
+            drop(r);
+            self.emit(Event::Changed { space: *id });
+        }
+    }
+
+    /// Up to when `user`'s devices have our ops here.
+    pub fn reach(&self, id: &Id, user: &Id) -> Option<u64> {
+        lock(&self.get(id).ok()?.reach).get(user).copied()
+    }
+
+    /// `user`'s device says our call in `ch` rings there, lately.
+    pub fn rings(&self, id: &Id, user: &Id, ch: &Ch) -> bool {
+        let Ok(sp) = self.get(id) else { return false };
+        let r = lock(&sp.ringing);
+        r.get(&(*user, *ch)).is_some_and(|t| t.elapsed() < CALLER)
+    }
+
+    /// A call to us rings here: its caller hears so, and hears ringback.
+    pub async fn ringing(&self, id: &Id, channel: Ch) {
+        if let Ok(sp) = self.get(id) {
+            self.signal(&sp, Op::Ringing { channel }).await;
         }
     }
 
@@ -2847,6 +2905,13 @@ impl Node {
                     let (n, sp) = (self.clone(), sp.clone());
                     let call = Op::Call { channel: Some(ch) };
                     tokio::spawn(async move { n.signal(&sp, call).await });
+                }
+            }
+            Op::Ringing { channel } => {
+                if self.in_call() == Some((sp.id, channel)) {
+                    lock(&sp.ringing)
+                        .insert((s.author, channel), Instant::now());
+                    self.emit(Event::Call { space: sp.id });
                 }
             }
             Op::Call { channel } => {

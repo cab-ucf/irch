@@ -52,6 +52,8 @@ pub enum Op {
     Owner { user: Id },
     // This identity is lost: nothing it signs from now on counts.
     Burn,
+    // A call to us is ringing here, heard (live).
+    Ringing { channel: Ch },
 }
 
 pub const MAX_TEXT: usize = 4000;
@@ -87,7 +89,11 @@ impl Op {
     pub fn live(&self) -> bool {
         matches!(
             self,
-            Op::Typing { .. } | Op::Here | Op::Call { .. } | Op::Gone
+            Op::Typing { .. }
+                | Op::Here
+                | Op::Call { .. }
+                | Op::Gone
+                | Op::Ringing { .. }
         )
     }
 }

@@ -296,6 +296,12 @@ async fn a_dm_call_rings_once() {
     assert_eq!(rings(&b), 1, "a DM call rings");
     assert_eq!(rings(&b), 0, "once");
     assert_eq!(rings(&a), 0, "not the caller");
+    // The caller hears that b's device has it, and that it rings there.
+    let dmc = irch_core::state::DM;
+    until("a knows b has it", || a.reach(&dm, &b.id()).is_some()).await;
+    assert!(!a.rings(&dm, &b.id(), &dmc), "not yet said");
+    b.ringing(&dm, dmc).await;
+    until("a hears it ring", || a.rings(&dm, &b.id(), &dmc)).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

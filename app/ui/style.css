@@ -1462,3 +1462,9 @@ video.scan {
 #locked .btn { margin-left: 8px; }
 .choice.danger { color: var(--red); }
 mark { background: var(--mention-bg); color: var(--text-strong); }
+.dial {
+  text-align: center;
+  color: var(--muted);
+  padding: 8px;
+  font-weight: 600;
+}

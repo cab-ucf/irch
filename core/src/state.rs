@@ -193,6 +193,7 @@ impl State {
             | Op::Typing { .. }
             | Op::Here
             | Op::Call { .. }
+            | Op::Ringing { .. }
             | Op::Gone => (false, false),
             op => {
                 let new = self.control.insert(at, (s.author, op)).is_none();

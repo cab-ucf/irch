@@ -78,6 +78,8 @@ export async function join(space, channel, rpc) {
   }
   await rpc("ring", { space, channel });
   call.on = { space, channel };
+  call.since = Date.now();
+  call.met = false;
   call.changed();
   decodes ??= await decodable();
   sayCodecs();
