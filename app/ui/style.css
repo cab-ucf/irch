@@ -1515,3 +1515,18 @@ mark { background: var(--mention-bg); color: var(--text-strong); }
   }
   #call.duo .tile.self video { object-fit: cover; }
 }
+/* A channel's threads, folded or not. */
+.channel .fold {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  padding: 0 4px;
+  color: var(--dim);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+.channel .fold svg.icon { width: 14px; height: 14px; transform: rotate(-90deg); }
+.channel .fold.open svg.icon { transform: none; }
+.channel .fold small { font-size: 11px; }

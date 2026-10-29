@@ -30,7 +30,7 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
   storage node); `cd app && cargo tauri dev` or
   `cargo tauri android build --apk`; on a Mac, `cargo tauri ios init`,
   then `cargo tauri ios dev`. Linux needs webkit2gtk-4.1, gtk3,
-  libsoup3 and, for calls, gstreamer plugins base and good.
+  libsoup3 and, for calls, gstreamer plugins base, good, bad and libav.
 
 ## Features
 

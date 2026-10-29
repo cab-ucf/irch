@@ -373,10 +373,8 @@ const chan = () => inThread() ? S.thread
 // A closed DM is out of the list until its next message, or opened.
 const dms = () => S.spaces.filter((s) => s.dm && (!s.closed || s.id === S.sid));
 const memberOf = (id) => S.members.find((m) => m.id === id);
-// Two members of one name: each also shows the start of their id.
-const called = (id, name) =>
-  S.twins?.has(name.toLowerCase()) ? `${name} #${id.slice(0, 4)}` : name;
-const nameOf = (id) => called(id, memberOf(id)?.name ?? short(id));
+// Two of one name: their cards show their ids.
+const nameOf = (id) => memberOf(id)?.name ?? short(id);
 const ago = (ts) => {
   const m = Math.round((Date.now() - ts) / 6e4);
   return m < 1 ? "just now" : m < 60 ? `${m} min ago`
@@ -430,13 +428,6 @@ async function loadSidebar() {
 async function loadMembers() {
   const s = cur();
   S.members = s ? await rpc("members", { space: s.id }) : [];
-  const seen = new Set();
-  S.twins = new Set();
-  for (const m of S.members) {
-    const k = m.name.toLowerCase();
-    if (seen.has(k)) S.twins.add(k);
-    seen.add(k);
-  }
   renderMembers();
 }
 
@@ -635,13 +626,32 @@ function dmList() {
     } }, icon("x"))));
 }
 
+// A channel's threads, folded unless opened (remembered per channel).
+const threadsOpen = (ch) => store.get("threads." + ch.id) === "1";
+
 function channelList(s) {
   return [
     ...s.channels.map((ch) => {
       const active = s.id === S.sid && ch.id === S.ch;
+      const open = threadsOpen(ch);
+      // Folded, its threads' news shows on the channel.
+      const folded = open ? [] : ch.threads;
+      const unread = ch.unread || folded.some((t) => t.unread);
+      const marks = ch.mentions + folded.reduce((n, t) => n + t.mentions, 0);
+      const n = ch.threads.length;
+      const fold = n > 0 && h("button", {
+        class: "fold" + (open ? " open" : ""),
+        title: open ? "Hide threads" : `Show ${n} thread${n > 1 ? "s" : ""}`,
+        "aria-expanded": `${open}`,
+        onclick: (e) => {
+          e.stopPropagation();
+          store.set("threads." + ch.id, open ? "0" : "1");
+          renderSidebar();
+        },
+      }, icon("chevron"), h("small", {}, String(n)));
       return h("div", {
         class: `channel${active ? " active" : ""}` +
-          (ch.unread && !active ? " unread" : ""),
+          (unread && !active ? " unread" : ""),
         onclick: () => select(s.id, ch.id), role: "button", tabindex: 0,
         oncontextmenu: (e) => {
           e.preventDefault();
@@ -655,7 +665,7 @@ function channelList(s) {
           reorder(s, e.dataTransfer.getData("ch"), ch.id);
         },
       }, icon("hash"), h("span", { class: "name" }, ch.name),
-      !active && badge(ch.mentions),
+      !active && badge(marks), fold,
       h("button", {
         class: "gear", title: "New room (a thread here)",
         onclick: (e) => { e.stopPropagation(); newRoom(s, ch); },
@@ -667,8 +677,13 @@ function channelList(s) {
           menu(e.currentTarget, chanMenu(s, ch));
         },
       }, icon("gear")), ch.call.length > 0 && icon("speaker"));
-    }).flatMap((row, i) => [row, callers(s.channels[i].call),
-      ...s.channels[i].threads.map((t) => threadRow(s, t))]),
+    }).flatMap((row, i) => {
+      const ch = s.channels[i];
+      // Folded, only the thread being read stays in view.
+      const shown = threadsOpen(ch) ? ch.threads
+        : ch.threads.filter((t) => t.id === S.ch);
+      return [row, callers(ch.call), ...shown.map((t) => threadRow(s, t))];
+    }),
   ];
 }
 
@@ -1096,7 +1111,7 @@ function renderMessages(keepScroll) {
     const mentioned = mentionsMe(m);
     const editing = S.editing === m.id;
     const authorAdmin = memberOf(m.author)?.role === "Admin";
-    const sig = JSON.stringify([m.text, m.edited, called(m.author, m.name),
+    const sig = JSON.stringify([m.text, m.edited, m.name,
       m.reactions, m.quote, m.thread, m.pinned, cont, mentioned, editing,
       admin, authorAdmin, m.pending, m.id === mine && m.delivered,
       m.preview]);
@@ -1153,7 +1168,7 @@ function msgRow(m, { cont, mentioned, editing, authorAdmin, last }) {
       fmtTime(m.ts)));
   } else {
     const card = (e) => memberCard(m.author, e.currentTarget, "right");
-    const name = called(m.author, m.name);
+    const name = m.name;
     const nick = h("span", {
       class: "author" + (authorAdmin ? " admin" : ""), onclick: card,
       title: authorAdmin ? `${name} (admin)` : name,
@@ -1749,7 +1764,7 @@ function renderMembers() {
       onclick: (e) => memberCard(m.id, e.currentTarget, "left"),
       role: "button", tabindex: 0,
     }, avatar(m.id, m.name, "sm", m.online),
-    h("span", { class: "name" }, called(m.id, m.name)))),
+    h("span", { class: "name" }, m.name))),
   ]));
   // Names and admin colours in messages depend on members.
   if (S.msgs.length) renderMessages(true);
@@ -1921,7 +1936,7 @@ function memberCard(id, anchor, align) {
   close = popover(anchor, h("div", { class: "card" }, banner,
     h("div", { class: "body" },
       avatar(id, m.name, "", m.online),
-      h("h2", {}, called(id, m.name)),
+      h("h2", {}, m.name),
       h("div", { class: "id", title: "Copy full ID",
         onclick: () => copy(id, "ID copied") }, short(id)),
       h("span", { class: "role" }, id === s?.owner ? "Owner" : m.role),

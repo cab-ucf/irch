@@ -18,8 +18,12 @@ rustPlatform.buildRustPackage {
   env.IRCH_NIXOS = "1";
   doCheck = false; # its tests need a network
   nativeBuildInputs = [ pkg-config wrapGAppsHook3 copyDesktopItems ];
+  # Calls' codecs through WebKit's GStreamer: Opus (base), VP8 and VP9
+  # (good), AV1 and echo cancelling (bad), H.264 (libav).
   buildInputs = [ webkitgtk_4_1 libsoup_3 glib-networking openssl ]
-    ++ (with gst_all_1; [ gstreamer gst-plugins-base gst-plugins-good ]);
+    ++ (with gst_all_1; [
+      gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav
+    ]);
   # The tray loads it at run time.
   preFixup = ''
     gappsWrapperArgs+=(--prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ libayatana-appindicator ]})
