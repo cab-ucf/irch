@@ -244,6 +244,10 @@ async fn told(
     if !full {
         // A DM whose call ended stops ringing.
         let mut v = crate::alerts(&n, false);
+        // Its caller hears that it rings here (the doorbell said it came).
+        for x in v.iter().filter(|x| x.ring) {
+            n.ringing(&x.space, x.room).await;
+        }
         let dm = |s: &Id| n.view(s, |s| s.dm.is_some()) == Some(true);
         let ended =
             spaces.into_iter().filter(|s| dm(s) && n.calls(s).is_empty());

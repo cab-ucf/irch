@@ -174,6 +174,11 @@ pub struct Space {
     moved: Arc<Notify>,
     // Our ops written while nobody else was reachable.
     undelivered: Mutex<HashSet<Id>>,
+    // Per member, our ops up to this time are on one of their devices:
+    // they synced, gossiped, or a doorbell took them.
+    reach: Mutex<HashMap<Id, u64>>,
+    // Members whose device says our call is ringing there, and when.
+    ringing: Mutex<HashMap<(Id, Ch), Instant>>,
     task: OnceLock<AbortOnDropHandle<()>>,
 }
 
@@ -819,6 +824,12 @@ impl Node {
                 let (name, kem) = (n.name(), n.me.pk());
                 n.post(&own, Op::Profile { name, kem }).await?;
             }
+            // Named for us at once (renamed in My Account › Your devices).
+            let device = n.ep.id();
+            if n.label(&device).is_none() {
+                let name = host_name();
+                n.post(&own, Op::Label { device, name }).await?;
+            }
             n.reconcile().await;
         }
         tokio::spawn(heartbeat(Arc::downgrade(&n)));
@@ -992,12 +1003,12 @@ impl Node {
 
     /// Our UnifiedPush endpoint, or none: sealed to every space we are in.
     pub async fn set_push(self: &Arc<Self>, url: Option<String>) {
-        let old = std::mem::replace(&mut lock(&self.prefs).push, url.clone());
+        lock(&self.prefs).push = url;
         self.save_prefs();
-        if old != url {
-            for id in self.spaces() {
-                let _ = self.tell_push(&id).await;
-            }
+        // Every time, not only when it changed: each space's code must be
+        // the one a sender accepts now (0.1.0 changed its form).
+        for id in self.spaces() {
+            let _ = self.tell_push(&id).await;
         }
     }
 
@@ -1038,8 +1049,11 @@ impl Node {
     ) {
         let dev = self.ep.id();
         let urls = self.view(id, |s| s.pushes_of(who)).unwrap_or_default();
+        let ts =
+            raw.as_deref().and_then(|r| postcard::from_bytes::<Env>(r).ok());
+        let ts = ts.map_or_else(now, |e| e.ts);
         let (news, id) = (Arc::new(raw), *id);
-        for (_, url) in
+        for (d, url) in
             urls.into_iter().filter(|u| u.0 != dev && pushable(&u.1))
         {
             if url.starts_with("irch:ring:") {
@@ -1052,7 +1066,8 @@ impl Node {
                         let raw = news.as_deref();
                         let r = crate::wake::ring(&n.ep, &url, &id, raw);
                         match r.await {
-                            Ok(()) => return,
+                            // Their phone has it: woken, it tells or rings.
+                            Ok(()) => return n.reach_device(&id, &d, ts),
                             Err(e) => warn!("wake: {e:#}"),
                         }
                     }
@@ -1145,15 +1160,21 @@ impl Node {
         let Ok(sp) = self.get(id) else { return vec![] };
         let near: Vec<_> = lock(&sp.nbrs).iter().copied().collect();
         let mine = self.view(&self.own, |s| s.storage()).unwrap_or_default();
+        // Our own devices and storage nodes go by the names we gave them.
+        let named: HashMap<_, _> =
+            near.iter().filter_map(|d| Some((*d, self.label(d)?))).collect();
+        let me = self.id();
         let b = lock(&sp.book);
         let host = |d: &EndpointId| {
             b.st.hosts().iter().any(|h| h.id == *d)
                 || mine.iter().any(|(a, _)| a.id == *d)
         };
-        let who = |d: &EndpointId| match b.st.owner_of(d) {
-            Some(u) => b.st.display_name(&u),
-            None if host(d) => "a storage node".into(),
-            None => "a device not known yet".into(),
+        let who = |d: &EndpointId| match (named.get(d), b.st.owner_of(d)) {
+            (Some(n), _) => format!("{n} (yours)"),
+            (_, Some(u)) if u == me => "a device of yours".into(),
+            (_, Some(u)) => b.st.display_name(&u),
+            _ if host(d) => "a storage node".into(),
+            _ => "a device not known yet".into(),
         };
         near.into_iter().map(|d| (d, who(&d))).collect()
     }
@@ -1255,6 +1276,8 @@ impl Node {
             room: Mutex::new([0; 32]),
             moved: Arc::default(),
             undelivered: Mutex::default(),
+            reach: Mutex::default(),
+            ringing: Mutex::default(),
             task: OnceLock::new(),
         });
         {
@@ -1492,8 +1515,19 @@ impl Node {
             lock(&sp.undelivered).insert(s.id);
         }
         match sp.tx().filter(|_| raw.len() <= GOSSIP_MAX) {
-            Some(tx) => drop(tx.broadcast(raw.clone().into()).await),
+            Some(tx) => {
+                drop(tx.broadcast(raw.clone().into()).await);
+                self.gossiped(sp, ts);
+            }
             None => sp.nbrs().into_iter().for_each(|p| self.sync(sp, p)),
+        }
+        // Gossip with nobody in it holds it until the next sync, minutes
+        // away: hand it to the space's devices directly, now.
+        if sp.nbrs().is_empty() {
+            self.bootstrap(sp)
+                .into_iter()
+                .take(4)
+                .for_each(|p| self.sync(sp, p));
         }
         Ok((s.id, raw))
     }
@@ -1735,13 +1769,16 @@ impl Node {
     async fn signal(&self, sp: &Space, op: Op) -> Option<Vec<u8>> {
         let inv = sp.inv.as_ref()?;
         let (key, locked) = lock(&sp.book).key(inv);
-        let quiet = !matches!(op, Op::Call { .. } | Op::Gone);
+        let quiet =
+            !matches!(op, Op::Call { .. } | Op::Gone | Op::Ringing { .. });
         if locked || quiet && self.invisible() {
             return None;
         }
-        let raw = self.seal(sp, &key, self.tick(), op).1;
+        let ts = self.tick();
+        let raw = self.seal(sp, &key, ts, op).1;
         if let Some(tx) = sp.tx() {
             let _ = tx.broadcast(raw.clone().into()).await;
+            self.gossiped(sp, ts);
         }
         Some(raw)
     }
@@ -1921,15 +1958,66 @@ impl Node {
 
     pub async fn storage_code(&self) -> Option<String> {
         let token = self.serve?;
-        Some(code("host", &(self.addr().await, token)))
+        // Its name rides along: older irch reads the first two only.
+        Some(code("host", &(self.addr().await, token, host_name())))
     }
 
     pub async fn add_storage(self: &Arc<Self>, code: &str) -> Result<()> {
-        let (addr, token): (EndpointAddr, [u8; 16]) = uncode("host", code)?;
+        type Named = (EndpointAddr, [u8; 16], String);
+        let (addr, token, name) = match uncode::<Named>("host", code) {
+            Ok((a, t, n)) => (a, t, Some(n)),
+            Err(_) => {
+                let (a, t): (EndpointAddr, [u8; 16]) = uncode("host", code)?;
+                (a, t, None)
+            }
+        };
         let own = self.get(&self.own)?;
         let op = Op::Storage { addr: addr.clone(), token, on: true };
         self.post(&own, op).await?;
+        let named = self.label(&addr.id).is_some();
+        if let Some(name) = name.filter(|n| !named && !n.trim().is_empty()) {
+            let device = addr.id;
+            self.post(&own, Op::Label { device, name }).await?;
+        }
         self.host(&own, addr).await;
+        Ok(())
+    }
+
+    /// What we call one of our devices or storage nodes.
+    pub fn label(&self, d: &EndpointId) -> Option<String> {
+        self.view(&self.own, |s| s.label(d).map(String::from)).flatten()
+    }
+
+    /// Name one of our devices or storage nodes, on every device of ours.
+    pub async fn name_device(
+        self: &Arc<Self>,
+        device: EndpointId,
+        name: &str,
+    ) -> Result<()> {
+        let name = named(name)?.to_string();
+        self.post(&self.get(&self.own)?, Op::Label { device, name }).await?;
+        Ok(())
+    }
+
+    /// A preview of `url` (in our message `message`), from its site, now.
+    pub async fn preview(
+        self: &Arc<Self>,
+        space: &Id,
+        message: &Id,
+        url: &str,
+    ) -> Result<()> {
+        let me = self.id();
+        let ours = self.view(space, |s| s.message(message).map(|m| m.1));
+        let m = ours.flatten().context("no such message")?;
+        ensure!(m.author == me && m.text.contains(url), "not a link of ours");
+        ensure!(open(&reqwest::Url::parse(url)?), "https links only");
+        let (mut link, image) = crate::link::fetch(url).await?;
+        if let Some((b, ext)) = image {
+            link.image =
+                self.attach(space, &format!("preview.{ext}"), &b).await.ok();
+        }
+        let target = *message;
+        self.send(&self.get(space)?, Op::Preview { target, link }).await?;
         Ok(())
     }
 
@@ -2691,8 +2779,49 @@ impl Node {
     /// A sync with `peer` went through: what we wrote reached someone.
     pub(crate) fn reached(&self, sp: &Space, peer: EndpointId) {
         lock(&self.synced).insert(peer, now());
+        self.reach_device(&sp.id, &peer, now());
         if !std::mem::take(&mut *lock(&sp.undelivered)).is_empty() {
             self.emit(Event::Changed { space: sp.id });
+        }
+    }
+
+    /// Gossiped: the devices next to us have it, so their owners do.
+    fn gossiped(&self, sp: &Space, ts: u64) {
+        sp.nbrs().iter().for_each(|d| self.reach_device(&sp.id, d, ts));
+    }
+
+    /// A device of someone's has our ops here up to `ts`.
+    fn reach_device(&self, id: &Id, d: &EndpointId, ts: u64) {
+        let Ok(sp) = self.get(id) else { return };
+        let proven = lock(&self.verified).get(d).copied();
+        let Some(u) = proven.or_else(|| lock(&sp.book).st.owner_of(d)) else {
+            return;
+        };
+        let mut r = lock(&sp.reach);
+        let at = r.entry(u).or_default();
+        if *at < ts {
+            *at = ts;
+            drop(r);
+            self.emit(Event::Changed { space: *id });
+        }
+    }
+
+    /// Up to when `user`'s devices have our ops here.
+    pub fn reach(&self, id: &Id, user: &Id) -> Option<u64> {
+        lock(&self.get(id).ok()?.reach).get(user).copied()
+    }
+
+    /// `user`'s device says our call in `ch` rings there, lately.
+    pub fn rings(&self, id: &Id, user: &Id, ch: &Ch) -> bool {
+        let Ok(sp) = self.get(id) else { return false };
+        let r = lock(&sp.ringing);
+        r.get(&(*user, *ch)).is_some_and(|t| t.elapsed() < CALLER)
+    }
+
+    /// A call to us rings here: its caller hears so, and hears ringback.
+    pub async fn ringing(&self, id: &Id, channel: Ch) {
+        if let Ok(sp) = self.get(id) {
+            self.signal(&sp, Op::Ringing { channel }).await;
         }
     }
 
@@ -2849,6 +2978,13 @@ impl Node {
                     tokio::spawn(async move { n.signal(&sp, call).await });
                 }
             }
+            Op::Ringing { channel } => {
+                if self.in_call() == Some((sp.id, channel)) {
+                    lock(&sp.ringing)
+                        .insert((s.author, channel), Instant::now());
+                    self.emit(Event::Call { space: sp.id });
+                }
+            }
             Op::Call { channel } => {
                 // Aged as said: a ring retried late is not still ringing.
                 let age = Duration::from_millis(now().saturating_sub(s.ts));
@@ -2925,7 +3061,12 @@ async fn pump(n: Arc<Node>, sp: Weak<Space>, boot: Vec<EndpointId>) {
         let mut wait = Duration::from_secs(2);
         loop {
             let next = tokio::select! {
-                () = moved.notified() => break,
+                // A rekey goes out on the old topic, to those it cut off:
+                // stay a moment, or our own move outruns it.
+                () = moved.notified() => {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    break;
+                }
                 r = tokio::time::timeout(wait, rx.next()) => r,
             };
             let ev = match next {
@@ -2983,6 +3124,26 @@ fn client() -> reqwest::ClientBuilder {
     b.read_timeout(Duration::from_secs(30))
 }
 
+/// Link previews: https to public addresses, every hop of up to three
+/// redirects too (an address in a URL skips the resolver's check).
+pub(crate) fn web() -> reqwest::Client {
+    use reqwest::redirect::Policy;
+    let hop = Policy::custom(|a| match a.previous().len() {
+        3.. => a.error("too many redirects"),
+        _ if !open(a.url()) => a.error("not a public address"),
+        _ => a.follow(),
+    });
+    let b = client().redirect(hop).https_only(true).dns_resolver(Public);
+    b.user_agent("irch link preview").build().expect("HTTP client")
+}
+
+/// https, and no address of a LAN's or this machine's.
+pub(crate) fn open(u: &reqwest::Url) -> bool {
+    let host = u.host_str().unwrap_or_default().trim_matches(['[', ']']);
+    let ip = host.parse::<std::net::IpAddr>().ok();
+    u.scheme() == "https" && ip.is_none_or(|a| public(&a))
+}
+
 /// Push URLs, which members name: public https only, never redirected.
 fn push_http() -> reqwest::Client {
     let b = client().redirect(reqwest::redirect::Policy::none());
@@ -3036,6 +3197,16 @@ async fn heartbeat(n: Weak<Node>) {
                 (Some(p), _) if i % 2 == 0 => n.sync(&sp, *p),
                 _ => {}
             }
+            // One device we know but gossip does not reach, in turn: two
+            // halves of a split mesh find each other within minutes.
+            let far: Vec<_> = n
+                .bootstrap(&sp)
+                .into_iter()
+                .filter(|p| !nb.contains(p))
+                .collect();
+            if let Some(p) = far.get(i as usize % far.len().max(1)) {
+                n.sync(&sp, *p);
+            }
             n.signal(&sp, Op::Here).await;
             n.emit(Event::Presence { space: sp.id });
             // Pairings from before `Hold`, and admins since made.
@@ -3051,6 +3222,28 @@ async fn heartbeat(n: Weak<Node>) {
             let _ = store::save(&n.dir.join("budget"), &*b);
         }
     }
+}
+
+/// This computer's name, or what kind of device it is.
+pub fn host_name() -> String {
+    let file = std::fs::read_to_string("/etc/hostname").ok();
+    let cmd = || {
+        let o = std::process::Command::new("hostname").output().ok()?;
+        Some(String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    let h = std::env::var("COMPUTERNAME").ok().or(file).or_else(cmd);
+    let h = h.map(|h| h.trim().trim_end_matches(".local").to_string());
+    let h = h.filter(|h| !h.is_empty() && h != "localhost");
+    h.unwrap_or_else(|| {
+        match std::env::consts::OS {
+            "android" => "Android phone",
+            "ios" => "iPhone",
+            "macos" => "Mac",
+            "windows" => "Windows PC",
+            _ => "Linux computer",
+        }
+        .into()
+    })
 }
 
 #[cfg(test)]
@@ -3080,6 +3273,22 @@ mod tests {
         assert!(b.parked <= PARKED + (2 << 20) && b.at.is_empty());
         assert_eq!(std::fs::metadata(&p).unwrap().len(), 0);
         std::fs::remove_file(p).unwrap();
+    }
+
+    #[test]
+    fn previews_fetch_only_public_https() {
+        let ok = |u: &str| open(&reqwest::Url::parse(u).unwrap());
+        assert!(ok("https://example.com/a") && ok("https://1.1.1.1/"));
+        for u in [
+            "http://example.com/",
+            "https://10.0.0.1/",
+            "https://127.0.0.1:8080/",
+            "https://[::ffff:192.168.1.1]/",
+            "https://169.254.169.254/latest",
+        ] {
+            assert!(!ok(u), "{u}");
+        }
+        assert!(!host_name().is_empty());
     }
 
     #[test]

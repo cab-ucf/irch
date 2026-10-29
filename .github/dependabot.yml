@@ -1,10 +1,20 @@
-# Pinned actions and crates, kept current: each update a reviewed PR.
+# Everything in one pull request a month: crates and actions together.
+# Before merging it, run ci by hand (Actions › ci › Run workflow).
 version: 2
+multi-ecosystem-groups:
+  all:
+    schedule:
+      interval: monthly
 updates:
-  - package-ecosystem: github-actions
-    directory: /
-    schedule: { interval: weekly }
   - package-ecosystem: cargo
     directory: /
-    schedule: { interval: weekly }
-    open-pull-requests-limit: 5
+    patterns: ["*"]
+    multi-ecosystem-group: all
+    ignore:
+      # Its API changes reach Android code no CI here compiles.
+      - dependency-name: jni
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: github-actions
+    directory: /
+    patterns: ["*"]
+    multi-ecosystem-group: all

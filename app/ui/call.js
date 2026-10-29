@@ -1,8 +1,15 @@
-// Frame: kind (0 audio, 1 video, 2 key) ‖ codec ‖ f64 timestamp ‖ data;
-// heard ones lead with the sender's 32-byte id.
+// Frame: kind (0 audio, 1 video, 2 key, 3 codecs) ‖ codec ‖ f64 timestamp
+// ‖ data; heard ones lead with the sender's 32-byte id. Each side says
+// which codecs it decodes; a sender uses the newest every listener has.
 
 const core = window.__TAURI__?.core;
-const VIDEO = ["vp8", "avc1.42E01F"];
+// A codec's byte is its place here plus one; new ones only at the end.
+const VIDEO = ["vp8", "avc1.42E01F", "vp09.00.10.08", "av01.0.04M.08"];
+// AV1, then VP9: open, and the most picture for the bits.
+const PREFER = [3, 2, 0, 1];
+// What a listener from before codecs were said decodes.
+const OLD = new Set([0, 1]);
+const CAPS = 3;
 const RATE = 48000;
 const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
 const shut = (x) => { try { x?.close(); } catch {} };
@@ -30,14 +37,44 @@ export const supported = () => typeof AudioEncoder === "function" &&
   typeof VideoDecoder === "function" && !!navigator.mediaDevices;
 export const canShare = () => !!navigator.mediaDevices?.getDisplayMedia;
 
-let ctx, mic, aenc, venc, timer, tuned;
+let ctx, mic, aenc, venc, timer, tuned, said;
+// Codecs this device decodes, once asked.
+let decodes = null;
+
+async function decodable() {
+  const ok = async (codec) =>
+    (await VideoDecoder.isConfigSupported({ codec }).catch(() => ({})))
+      .supported;
+  const all = await Promise.all(VIDEO.map(ok));
+  return VIDEO.map((_, i) => i).filter((i) => all[i]);
+}
+
+/** Every few seconds: late joiners hear it too. */
+function sayCodecs() {
+  const b = new Uint8Array(10 + decodes.length);
+  b[0] = CAPS;
+  b.set(decodes.map((i) => i + 1), 10);
+  media(b);
+}
+
+// Android's bridge turns bytes into JSON arrays of numbers (4x, slow to
+// parse): base64 there, a third larger and quick.
+const android = /Android/.test(navigator.userAgent);
+const b64 = (b) => {
+  let s = "";
+  for (let i = 0; i < b.length; i += 0x8000) {
+    s += String.fromCharCode(...b.subarray(i, i + 0x8000));
+  }
+  return btoa(s);
+};
+const media = (b) => quiet(core.invoke("media", android ? { data: b64(b) } : b));
 
 function send(kind, codec, chunk) {
   const b = new Uint8Array(10 + chunk.byteLength);
   b.set([kind, codec]);
   new DataView(b.buffer).setFloat64(2, chunk.timestamp, true);
   chunk.copyTo(b.subarray(10));
-  quiet(core.invoke("media", b));
+  media(b);
 }
 
 export async function join(space, channel, rpc) {
@@ -53,15 +90,22 @@ export async function join(space, channel, rpc) {
   }
   await rpc("ring", { space, channel });
   call.on = { space, channel };
+  call.since = Date.now();
+  call.met = false;
   call.changed();
+  decodes ??= await decodable();
+  sayCodecs();
+  said = setInterval(sayCodecs, 5000);
   mic = await navigator.mediaDevices.getUserMedia({ audio: {
     echoCancellation: true, noiseSuppression: true, autoGainControl: true,
   } }).catch(() => null);
   call.mic = !!mic;
   if (!mic) return call.changed();
   aenc = new AudioEncoder({ output: (c) => send(0, 0, c), error: () => {} });
+  // In-band FEC: a lost packet is rebuilt from the next, not heard as a gap.
   aenc.configure({ codec: "opus", sampleRate: RATE, numberOfChannels: 1,
-    bitrate: 32000 });
+    bitrate: 32000, opus: { frameDuration: 20000, useinbandfec: true,
+      packetlossperc: 10, application: "voip" } });
   const node = new AudioWorkletNode(ctx, "mic");
   node.port.onmessage = ({ data }) => {
     call.level = call.mic ? rms(data) : 0;
@@ -79,6 +123,7 @@ export async function join(space, channel, rpc) {
 export async function leave(rpc) {
   if (!call.on) return;
   call.on = null;
+  clearInterval(said);
   await video(null);
   mic?.getTracks().forEach((t) => t.stop());
   [aenc, ctx].forEach(shut);
@@ -96,54 +141,85 @@ export async function video(kind) {
   if (kind && call.on) {
     const m = navigator.mediaDevices;
     const fps = kind === "screen" ? 10 : 15;
+    // A phone held upright sends a face upright: 3:4, cropped if its
+    // camera gives landscape anyway.
     const tall = matchMedia("(pointer: coarse) and (orientation: portrait)");
-    const [x, y] = tall.matches ? [480, 640] : [640, 480];
+    const upright = () => kind === "cam" && tall.matches;
+    const [x, y] = upright() ? [720, 960] : [640, 480];
     const s = await (kind === "screen"
       ? m.getDisplayMedia({ video: { frameRate: fps } })
       : m.getUserMedia({ video: { facingMode: "user", width: { ideal: x },
-        height: { ideal: y }, frameRate: fps } }));
+        height: { ideal: y }, aspectRatio: { ideal: x / y },
+        frameRate: fps } }));
     const v = document.createElement("video");
     Object.assign(v, { muted: true, playsInline: true, srcObject: s });
     await quiet(v.play());
     s.getVideoTracks()[0].onended = () => video(null);
     Object.assign(call, { self: v, [kind]: true });
-    let codec = 0, n = 0, w = 0, h = 0, hw = SOFT, sent = 0;
+    let codec = -1, n = 0, w = 0, h = 0, sent = 0;
     const ok = async (c) =>
       (await VideoEncoder.isConfigSupported(c).catch(() => ({}))).supported;
-    pick: for (const x of [SOFT, {}]) {
-      for (codec = 0; codec < VIDEO.length; codec++) {
-        hw = x;
-        if (await ok({ codec: VIDEO[codec], width: 640, height: 480, ...x })) {
-          break pick;
+    // Each codec this device encodes, in software if it can.
+    const can = new Map();
+    for (const i of PREFER) {
+      for (const x of [SOFT, {}]) {
+        if (await ok({ codec: VIDEO[i], width: 640, height: 480, ...x })) {
+          can.set(i, x);
+          break;
         }
       }
     }
-    if (codec === VIDEO.length) {
-      call.trouble("this device cannot encode video (no VP8 or H.264)");
-    }
-    venc = new VideoEncoder({
-      error: (e) => call.trouble(`video encoder: ${e.message}`),
+    if (!can.size) call.trouble("this device cannot encode video");
+    // One that failed here is not tried again this call.
+    const bad = new Set();
+    const pick = () => PREFER.find((i) => can.has(i) && !bad.has(i) &&
+      [...call.peers.values()].every((p) => (p.caps ?? OLD).has(i))) ?? -1;
+    const make = () => new VideoEncoder({
+      error: (e) => {
+        call.trouble(`video encoder (${VIDEO[codec]}): ${e.message}`);
+        bad.add(codec);
+        w = 0;
+      },
       output: (c) => (sent++, send(c.type === "key" ? 2 : 1, codec + 1, c)),
     });
+    venc = make();
     // Frames from a canvas, where a video element gives none.
     const canvas = h0("canvas");
+    let sw = 0, sh = 0, crop = false;
     const frame = (t) => {
       try {
+        if (crop) throw 0;
         return new VideoFrame(v, { timestamp: t });
       } catch {
         [canvas.width, canvas.height] = [w, h];
-        canvas.getContext("2d").drawImage(v, 0, 0, w, h);
+        const sx = (sw - w * sh / h) / 2;
+        canvas.getContext("2d")
+          .drawImage(v, Math.max(0, sx), 0, sw - 2 * Math.max(0, sx), sh,
+            0, 0, w, h);
         return new VideoFrame(canvas, { timestamp: t });
       }
     };
     timer = setInterval(() => {
-      if (v.readyState < 2 || venc.encodeQueueSize > 2) return;
+      // Someone joined who lacks this codec, or it failed: the next one.
+      const best = pick();
+      if (best !== codec) [codec, w] = [best, 0];
+      if (codec < 0 || v.readyState < 2) return;
+      if (venc.state === "closed") venc = make();
+      if (venc.encodeQueueSize > 2) return;
       try {
-        if (v.videoWidth !== w || v.videoHeight !== h) {
-          [w, h, n] = [v.videoWidth, v.videoHeight, 0];
+        const turn = upright() && v.videoWidth > v.videoHeight;
+        if (v.videoWidth !== sw || v.videoHeight !== sh || turn !== crop ||
+          !w) {
+          [sw, sh, crop, n, sent] = [v.videoWidth, v.videoHeight, turn, 0, 0];
+          const even = (k) => Math.max(2, Math.round(k / 2) * 2);
+          [w, h] = crop ? [even(sh * 3 / 4), even(sh)] : [even(sw), even(sh)];
           venc.configure({ codec: VIDEO[codec], width: w, height: h,
-            bitrate: fps === 10 ? 1.5e6 : 6e5, framerate: fps, ...hw,
-            latencyMode: "realtime", avc: { format: "annexb" } });
+            bitrate: fps === 10 ? 1.5e6 : 6e5, framerate: fps,
+            ...can.get(codec), latencyMode: "realtime",
+            avc: { format: "annexb" } });
+          const c = codec;
+          setTimeout(() => codec !== c || sent || (bad.add(c),
+            call.trouble(`${VIDEO[c]} gives no frames here`)), 5000);
         }
         const f = frame(performance.now() * 1000);
         venc.encode(f, { keyFrame: n++ % (2 * fps) === 0 });
@@ -152,9 +228,6 @@ export async function video(kind) {
         call.trouble(`video: ${e.message ?? e}`);
       }
     }, 1000 / fps);
-    // Nothing out in a few seconds: say so, rather than send nothing.
-    setTimeout(() => venc?.state === "configured" && !sent &&
-      call.trouble("this device's video encoder gives no frames"), 5000);
   }
   call.changed();
 }
@@ -216,6 +289,10 @@ function heard(buf) {
   const data = f.subarray(10);
   const p = peer(hex(b.subarray(0, 32)));
   p.heard = Date.now();
+  if (kind === CAPS) {
+    p.caps = new Set([...data].map((c) => c - 1));
+    return;
+  }
   if (kind === 0) {
     if (p.adec.state === "configured") {
       p.adec.decode(new EncodedAudioChunk({ type: "key", timestamp, data }));
@@ -224,7 +301,8 @@ function heard(buf) {
   }
   if (kind === 2 && p.codec !== codec && VIDEO[codec - 1]) {
     try {
-      p.vdec.configure({ codec: VIDEO[codec - 1] });
+      // Each frame shown as it comes, not held for reordering.
+      p.vdec.configure({ codec: VIDEO[codec - 1], optimizeForLatency: true });
       Object.assign(p, { codec, key: false });
     } catch { return; }
   }

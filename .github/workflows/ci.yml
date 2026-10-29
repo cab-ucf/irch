@@ -1,10 +1,8 @@
-# By hand: each release tests itself (release.yml's check). Weekly, the
-# dependencies are checked against RustSec's advisories.
+# By hand only, never on its own: releases test themselves before they
+# publish. `audit` checks the dependencies against RustSec's advisories.
 name: ci
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "17 5 * * 1"
 permissions:
   contents: read
 concurrency:
@@ -27,7 +25,6 @@ jobs:
       - run: cargo audit
 
   test:
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -46,7 +43,6 @@ jobs:
       - run: shellcheck -S warning install.sh
 
   build:
-    if: github.event_name != 'schedule'
     strategy:
       fail-fast: false
       matrix:
@@ -73,7 +69,6 @@ jobs:
           retention-days: 14
 
   android:
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -124,7 +119,6 @@ jobs:
           if-no-files-found: ignore
 
   ios:
-    if: github.event_name != 'schedule'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

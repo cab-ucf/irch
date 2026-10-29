@@ -43,6 +43,8 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
 - Photos, voice and short videos (to 25 MB) wait on the space's storage
   nodes whoever sent them, so everyone sees them inline, sender away.
 - Voice and video calls with screen sharing; a DM call rings like a phone.
+  The caller hears ringback only once the other device rings, and sees
+  when it is not getting through; a DM shows when it reached their device.
 - Notifications on desktops and phones, per space: all, @mentions or none.
 - Search on this device, Ctrl+K switcher, drafts per channel, vim keys
   as in the terminal (Esc, then `j`/`k`, `l`/`h`, `J`/`K`, `r`, `e`, `dd`,
@@ -58,6 +60,12 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
   identity is retired everywhere (*A device was lost or stolen*).
 - Invites show what they are to before you join; links show where they
   go before they open; a message only on this device says so.
+- A camera button takes a photo and sends it: never in the gallery, no
+  location in it. Link previews are made by the sender's device as it
+  sends (the site sees only the sender; off in My Account).
+- Devices and storage nodes have names (a computer's hostname, at first;
+  renamed in My Account or Storage Nodes); My Account shows the version.
+- On phones, a call of two fills the screen, upright, like FaceTime.
 - *Add to notes*: a message or thread lands in a
   [loroh](https://github.com/cab-ucf/siroh) note as a task, event or quote,
   with an `irch://` link back; on phones through loroh, which asks first.
@@ -94,8 +102,11 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   vouch for, and holders of the current key; they keep only the epochs
   their owners name, within a daily budget.
 - **Threads are channels** named by a message's id: no extra protocol.
-- **Calls are a mesh** over QUIC: Opus datagrams, VP8/H.264 one stream per
-  group of pictures, so a slow peer skips to the newest keyframe.
+- **Calls are a mesh** over QUIC: Opus datagrams; video in the newest
+  codec every listener decodes (AV1, VP9, then VP8 or H.264), one stream
+  per group of pictures, so a slow peer skips to the newest keyframe.
+- **Voice messages are Opus in Ogg**, played by decoding them in the app:
+  the same in every web view, seekable, the right length.
 - **Sync** compares per-day fingerprints, then sends only missing envs.
 - **Phones sleep**: out of sight for a minute, the node stops and a
   doorbell (an iroh endpoint with no connections) waits. Whoever writes
@@ -132,6 +143,18 @@ space = a grow-only set of envs;   state = a deterministic fold of it
 - A storage code is a password. A first install trusts GitHub's TLS
   (checked against irch's key where `minisign` exists); every update is
   checked. Unaudited.
+
+## Later, maybe
+
+Optional, and only if they stay simple:
+
+- Route through Tor or Nym, so members and relays never see an address
+  (relays over TCP; direct QUIC would be off then).
+- Rekey on a schedule, and per-sender key chains within an epoch: a
+  leaked key would then reveal little before or after it.
+- Safety numbers to compare in person; per-device keys, so one lost
+  phone can be removed alone.
+- An outside audit.
 
 ## Layout
 
