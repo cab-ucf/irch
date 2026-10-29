@@ -1,25 +1,30 @@
 //! Set reconciliation over one QUIC stream; gossip's safety net.
 //! ```text
-//! A → B  Hello { space, root, token, devices }   root: hash of day buckets
-//! B → A  None (same) | Some(B's buckets)    (unknown space: stream closed)
+//! A → B  Hello { space, root, room, who, token, devices, tags }
+//!        root: hash of day buckets; room: proof of a key; who: signed
+//! B → A  Same | Out (a key since replaced without A) | Days(B's buckets)
+//!        (unknown space, or not admitted: stream closed)
 //! A → B  A's ids for every day that differs
 //! B → A  ids B wants, then the items A lacks, then an empty frame
 //! A → B  the items B wants, then an empty frame; B finishes, A closes
 //! ```
 //! Items are opaque, so storage nodes reconcile too. Fingerprints hash
 //! sorted ids, never XOR them; lists are sets, so repeats count once.
+//! A member answers only someone holding a key no later epoch cut them
+//! off from; a storage node, only devices its owners vouched for.
 
 use crate::Id;
+use crate::crypto::{Key, kdf};
 use crate::node::{Node, Space};
 use anyhow::{Result, anyhow};
-use iroh::EndpointId;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::{EndpointId, PublicKey, SecretKey, Signature};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-pub const ALPN: &[u8] = b"irch/sync/1";
+pub const ALPN: &[u8] = b"irch/sync/2";
 pub type Bucket = (u32, u32, [u8; 16]);
 /// A session's whole time: a slow one resumes next time, a stalled one ends.
 pub const LIMIT: Duration = Duration::from_secs(300);
@@ -27,10 +32,56 @@ pub const LIMIT: Duration = Duration::from_secs(300);
 #[derive(Serialize, Deserialize)]
 pub struct Hello {
     pub space: Id,
-    root: [u8; 32],
+    pub root: [u8; 32],
+    /// The space's gossip topic under the key this side writes with.
+    pub room: [u8; 32],
+    /// A member, signed for the device asked (storage nodes: none).
+    pub who: Option<(Id, Signature)>,
     pub token: Option<[u8; 16]>,
-    // With a token: the devices a storage node may take this space from.
+    // With a token: the devices a storage node may take this space from,
+    // and the epochs it may keep.
     pub devices: Vec<EndpointId>,
+    pub tags: Vec<[u8; 8]>,
+}
+
+#[derive(Serialize, Deserialize)]
+enum Reply {
+    Same,
+    Out,
+    Days(Vec<Bucket>),
+}
+
+/// Whom a sync is answered for.
+pub enum Admit {
+    Yes,
+    No,
+    /// They hold a key a later epoch left them out of: tell them.
+    Out,
+}
+
+/// Where a space's members meet under `key`: unknown to anyone without it.
+pub fn room(space: &Id, key: &Key) -> [u8; 32] {
+    kdf("irch room", &[&space.0, key])
+}
+
+fn said(space: &Id, room: &[u8; 32], to: &EndpointId) -> Vec<u8> {
+    [ALPN, &space.0, room, to.as_bytes()].concat()
+}
+
+pub fn sign(
+    me: &SecretKey,
+    space: &Id,
+    room: &[u8; 32],
+    to: &EndpointId,
+) -> (Id, Signature) {
+    (Id(*me.public().as_bytes()), me.sign(&said(space, room, to)))
+}
+
+/// Who asked, if they signed it for us.
+pub fn who(h: &Hello, us: &EndpointId) -> Option<Id> {
+    let (u, sig) = h.who.as_ref()?;
+    let pk = PublicKey::from_bytes(&u.0).ok()?;
+    pk.verify(&said(&h.space, &h.room, us), sig).ok().map(|_| *u)
 }
 
 pub fn root(b: &[Bucket]) -> [u8; 32] {
@@ -45,14 +96,18 @@ pub async fn initiate(
 ) -> Result<usize> {
     let (mut tx, mut rx) = c.open_bi().await?;
     let mine = sp.buckets();
-    let devices = token.map(|_| sp.devices()).unwrap_or_default();
-    let hello = Hello { space: sp.id, root: root(&mine), token, devices };
+    let hello = n.hello(sp, &c.remote_id(), root(&mine), token);
     write(&mut tx, &hello).await?;
     // A bucket a day: a megabyte is a century.
-    let Some(theirs) = read::<Option<Vec<Bucket>>>(&mut rx, 1 << 20).await?
-    else {
-        return Ok(0);
+    let theirs = match read(&mut rx, 1 << 20).await? {
+        Reply::Same => return Ok(0),
+        Reply::Out => {
+            n.cut(sp, true);
+            anyhow::bail!("our key was replaced without us");
+        }
+        Reply::Days(d) => d,
     };
+    n.cut(sp, false);
     let mut days: BTreeMap<u32, (Option<Bucket>, Option<Bucket>)> =
         BTreeMap::new();
     mine.into_iter().for_each(|b| days.entry(b.0).or_default().0 = Some(b));
@@ -88,16 +143,21 @@ async fn session(n: &Arc<Node>, c: &Connection) -> Result<()> {
     };
     let ten = Duration::from_secs(10);
     let (mut tx, mut rx, hello) = tokio::time::timeout(ten, hello).await??;
-    let sp = n
-        .find(&hello, c.remote_id())
-        .ok_or_else(|| anyhow!("unknown space"))?;
+    let sp = match n.find(&hello, c.remote_id()) {
+        (Some(sp), Admit::Yes) => sp,
+        (_, Admit::Out) => {
+            write(&mut tx, &Reply::Out).await?;
+            return Ok(tx.finish()?);
+        }
+        _ => anyhow::bail!("unknown space"),
+    };
     let mine = sp.buckets();
     if root(&mine) == hello.root {
-        write(&mut tx, &None::<()>).await?;
+        write(&mut tx, &Reply::Same).await?;
+        n.reached(&sp, c.remote_id());
         return Ok(tx.finish()?);
     }
-    write(&mut tx, &Some(mine)).await?;
-    let keep = n.takes(&sp, &c.remote_id());
+    write(&mut tx, &Reply::Days(mine)).await?;
     let (mut want, mut have): (Vec<Id>, Vec<Id>) = (vec![], vec![]);
     // 500,000 ids at most; days as u16 (to 2149), so however many a peer
     // names, they are 65,536 at most.
@@ -108,15 +168,14 @@ async fn session(n: &Arc<Node>, c: &Connection) -> Result<()> {
         theirs.dedup();
         let ours = sp.ids(day.into());
         let new = theirs.iter().filter(|i| ours.binary_search(i).is_err());
-        want.extend(new.filter(|_| keep));
+        want.extend(new);
         let lack = |i: &Id| theirs.binary_search(i).is_err();
         have.extend(ours.into_iter().filter(lack));
     }
     write(&mut tx, &want).await?;
     give(&sp, &mut tx, &have).await?;
-    if keep {
-        take(n, &sp, &mut rx).await?;
-    }
+    take(n, &sp, &mut rx).await?;
+    n.reached(&sp, c.remote_id());
     Ok(tx.finish()?)
 }
 
@@ -134,15 +193,18 @@ async fn take(
     sp: &Arc<Space>,
     rx: &mut RecvStream,
 ) -> Result<usize> {
-    let (mut got, mut batch) = (0, vec![]);
+    let (mut got, mut batch, mut held) = (0, vec![], 0);
     loop {
         let b = unframe(rx, crate::op::MAX_ENV).await?;
         let done = b.is_empty();
+        held += b.len();
         if !done {
             batch.push(b);
         }
-        if done || batch.len() == 512 {
+        // Bytes, not count: 512 of the largest would be 2 GiB.
+        if done || held >= 16 << 20 {
             got += n.ingest(sp, std::mem::take(&mut batch), false);
+            held = 0;
         }
         if done {
             return Ok(got);

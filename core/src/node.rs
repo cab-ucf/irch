@@ -2,11 +2,11 @@
 //! Every op, local or remote: open, check, append to the log, fold, notify.
 
 use crate::call::{self, Call};
-use crate::crypto::{Key, Me, kem_open, kem_seal, rand};
+use crate::crypto::{Key, Me, kem_open, kem_seal, rand, same};
 use crate::op::{self, Env, File, Invite, Op, Role, Signed, code, tag, uncode};
 use crate::state::State;
 use crate::store::{self, Log};
-use crate::sync::{self, Bucket, Hello};
+use crate::sync::{self, Admit, Bucket, Hello};
 use crate::{Ch, Id, now};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use iroh::address_lookup::MemoryLookup;
@@ -30,10 +30,13 @@ use std::sync::atomic::{
 };
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
 
 const DAY: u64 = 86_400_000;
+/// How far ahead a clock may run: later ops wait (sync brings them again).
+const SKEW: u64 = 600_000;
 const GOSSIP_MAX: usize = 128 << 10;
 const BEAT: Duration = Duration::from_secs(60);
 const ONLINE: Duration = Duration::from_secs(150);
@@ -41,8 +44,7 @@ const ONLINE: Duration = Duration::from_secs(150);
 const CALLER: Duration = Duration::from_secs(45);
 const RELAYS: [&str; 2] =
     ["https://iroh.cxn.center./", "https://use1-1.relay.n0.iroh.link./"];
-pub const MAX_TEXT: usize = 4000;
-pub const MAX_NAME: usize = 64;
+pub use crate::op::{MAX_NAME, MAX_TEXT};
 /// What storage nodes keep without their password.
 pub const MAX_FILE: u64 = 5 << 30;
 /// `MAX_FILE`, or in tests (debug builds) IRCH_TEST_MAX_FILE.
@@ -115,6 +117,25 @@ struct Prefs {
     push: Option<String>,
 }
 
+/// A storage node's word for one space, from its owners: where members
+/// meet, which epochs it keeps, and each owner's devices it takes from.
+#[derive(Serialize, Deserialize, Default)]
+struct Host {
+    room: [u8; 32],
+    tags: BTreeSet<[u8; 8]>,
+    users: BTreeMap<Id, Vec<EndpointId>>,
+}
+
+/// A file served from here, to the members of the space it went to;
+/// `space` none once its sender stopped sharing it.
+#[derive(Serialize, Deserialize, Clone)]
+struct Shared {
+    space: Option<Id>,
+    tag: Vec<u8>,
+    name: String,
+    size: u64,
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub enum Level {
     #[default]
@@ -141,11 +162,18 @@ pub struct Space {
     tx: Mutex<Option<GossipSender>>,
     nbrs: Mutex<HashSet<EndpointId>>,
     seen: Mutex<HashMap<Id, Instant>>,
+    // Live ops already taken, so none is taken twice.
+    heard: Mutex<HashMap<Id, Instant>>,
     calls: Mutex<HashMap<Id, (Ch, EndpointId, Instant)>>,
     // Syncing with now; true: asked again meanwhile, so once more after.
     busy: Mutex<HashMap<EndpointId, bool>>,
     // Devices our storage nodes were last told they may take from.
     vouched: AtomicUsize,
+    // The gossip topic we are in, and a nudge to move to a new one.
+    room: Mutex<[u8; 32]>,
+    moved: Arc<Notify>,
+    // Our ops written while nobody else was reachable.
+    undelivered: Mutex<HashSet<Id>>,
     task: OnceLock<AbortOnDropHandle<()>>,
 }
 
@@ -163,14 +191,17 @@ struct Book {
     offered: Vec<Offered>,
     st: State,
     knocks: Vec<Invite>,
+    // A member said our key is one a later epoch left us out of.
+    out: bool,
 }
 
 /// (author, (ts, id), epoch, key, via `Back` rather than `Rekey`).
 type Offered = (Id, (u64, Id), [u8; 8], Key, bool);
 
-/// In the log (checked yet?), or held till it opens (ours: no check).
+/// In the log (0, or the version it checked as), or held till it opens
+/// (ours: no check).
 enum Src {
-    Log(bool),
+    Log(u8),
     Net(Vec<u8>, bool),
 }
 
@@ -215,6 +246,7 @@ impl Book {
             offered: vec![],
             st,
             knocks,
+            out: false,
         }
     }
 
@@ -233,7 +265,7 @@ impl Book {
         i: Id,
         ts: u64,
         raw: &[u8],
-        checked: bool,
+        checked: u8,
         flush: bool,
     ) -> bool {
         if self.at.contains_key(&i) {
@@ -261,19 +293,25 @@ impl Book {
                     self.park(i, e, src);
                     continue;
                 };
-                let trusted = matches!(src, Src::Log(true) | Src::Net(_, true));
-                let Some(s) = op::open(sp, &key, &e, !trusted) else {
+                let known = match src {
+                    Src::Log(0) | Src::Net(_, false) => None,
+                    Src::Log(v) => Some(v),
+                    Src::Net(_, true) => Some(2),
+                };
+                let Some((s, v)) = op::open(sp, &key, &e, known) else {
                     continue;
                 };
-                // Banned or cut off: dropped, or it fills every member's disk.
+                // Banned, cut off or retired: dropped, or it fills every
+                // member's disk.
                 let at = (s.ts, s.id);
                 if self.st.role(&s.author) == Role::Banned
                     || self.st.stale(&e.epoch, &at, &s.author)
+                    || self.st.burned_after(&at, &s.author)
                 {
                     continue;
                 }
                 if let Src::Net(raw, ours) = &src {
-                    if !self.store(i, e.ts, raw, true, *ours) {
+                    if !self.store(i, e.ts, raw, v, *ours) {
                         continue;
                     }
                     kept += 1;
@@ -475,28 +513,51 @@ pub struct Node {
     big: Option<String>,
     files: FsStore,
     held: Mutex<Option<std::fs::File>>,
-    // Per space, the day and what `Hold` took on it.
-    budget: Mutex<HashMap<Id, (u64, u64)>>,
+    // Per space, the day and what it took then (storage nodes).
+    budget: Mutex<BTreeMap<Id, (u64, u64)>>,
+    hosts: Mutex<BTreeMap<Id, Host>>,
+    // Devices whose users proved them theirs (sync, calls).
+    verified: Mutex<HashMap<EndpointId, Id>>,
+    shared: Mutex<BTreeMap<Id, Shared>>,
+    // When each peer last synced with us, either way.
+    synced: Mutex<HashMap<EndpointId, u64>>,
     call: Mutex<Option<Call>>,
     media: call::Media,
 }
 
-/// As far as its address says: not a LAN's, nor a carrier's 100.64/10.
-fn public(ip: &std::net::IpAddr) -> bool {
+/// As far as its address says: not a LAN's, a carrier's 100.64/10, nor
+/// one of those hidden in IPv6 (::ffff:10.0.0.1, 64:ff9b::10.0.0.1).
+pub(crate) fn public(ip: &std::net::IpAddr) -> bool {
+    use std::net::IpAddr::{V4, V6};
     match ip {
-        std::net::IpAddr::V4(a) => {
+        V4(a) => {
             let o = a.octets();
             !(a.is_private()
                 || a.is_loopback()
                 || a.is_link_local()
                 || a.is_unspecified()
-                || (o[0] == 100 && o[1] & 0xc0 == 64))
+                || a.is_broadcast()
+                || a.is_multicast()
+                || a.is_documentation()
+                || o[0] == 0
+                || (o[0] == 100 && o[1] & 0xc0 == 64)
+                || (o[0] == 198 && o[1] & 0xfe == 18))
         }
-        std::net::IpAddr::V6(a) => {
-            !(a.is_loopback()
-                || a.is_unspecified()
-                || (a.segments()[0] & 0xfe00) == 0xfc00
-                || (a.segments()[0] & 0xffc0) == 0xfe80)
+        V6(a) => {
+            let s = a.segments();
+            let nat64 = s[..6] == [0x64, 0xff9b, 0, 0, 0, 0];
+            let v4 = std::net::Ipv4Addr::from_bits(a.to_bits() as u32);
+            match a.to_ipv4_mapped() {
+                Some(v4) => public(&V4(v4)),
+                None if nat64 => public(&V4(v4)),
+                None => {
+                    !(a.is_loopback()
+                        || a.is_unspecified()
+                        || a.is_multicast()
+                        || (s[0] & 0xfe00) == 0xfc00
+                        || (s[0] & 0xffc0) == 0xfe80)
+                }
+            }
         }
     }
 }
@@ -589,26 +650,40 @@ fn own_invite(me: &Me, peers: Vec<EndpointAddr>) -> Invite {
     Invite { owner: me.id(), nonce, key, name: String::new(), dm: None, peers }
 }
 
-/// Offered files go only to devices of people in a space with us.
+/// Each file asked for, to whom it may go: an offered one only to the
+/// members of the space it was posted in.
 fn gate(n: std::sync::Weak<Node>) -> iroh_blobs::provider::events::EventSender {
     use iroh_blobs::provider::events::*;
-    let mask =
-        EventMask { connected: ConnectMode::Intercept, ..EventMask::DEFAULT };
+    let mask = EventMask {
+        connected: ConnectMode::Intercept,
+        get: RequestMode::Intercept,
+        get_many: RequestMode::Disabled,
+        ..EventMask::DEFAULT
+    };
     let (tx, mut rx) = EventSender::channel(32, mask);
     tokio::spawn(async move {
+        let mut who = HashMap::new();
         while let Some(m) = rx.recv().await {
-            if let ProviderMessage::ClientConnected(m) = m {
-                // A storage node holds only sealed files; a member's device
-                // serves them, and its own, to members and its storage.
-                let n = n.upgrade().zip(m.endpoint_id);
-                let ok = n.is_some_and(|(n, d)| {
-                    n.serve.is_some()
-                        || n.member_device(&d)
-                        || n.mine(&d)
-                        || n.hosting(&d)
-                });
-                let r = if ok { Ok(()) } else { Err(AbortReason::Permission) };
-                let _ = m.tx.send(r).await;
+            match m {
+                ProviderMessage::ClientConnected(m) => {
+                    if let Some(d) = m.endpoint_id {
+                        who.insert(m.connection_id, d);
+                    }
+                    let _ = m.tx.send(Ok(())).await;
+                }
+                ProviderMessage::ConnectionClosed(m) => {
+                    who.remove(&m.inner.connection_id);
+                }
+                ProviderMessage::GetRequestReceived(m) => {
+                    let d = who.get(&m.inner.connection_id);
+                    let h = Id(*m.inner.request.hash.as_bytes());
+                    let n = n.upgrade().zip(d);
+                    let ok = n.is_some_and(|(n, d)| n.may_get(d, &h));
+                    let r =
+                        if ok { Ok(()) } else { Err(AbortReason::Permission) };
+                    let _ = m.tx.send(r).await;
+                }
+                _ => {}
             }
         }
     });
@@ -680,6 +755,13 @@ impl Node {
         let gossip =
             Gossip::builder().max_message_size(GOSSIP_MAX).spawn(ep.clone());
         let own_inv = own_invite(&me, link.map(|l| l.1).unwrap_or_default());
+        let mut hosts: BTreeMap<Id, Host> = store::load(&cfg.dir.join("hosts"));
+        let budget = store::load(&cfg.dir.join("budget"));
+        let shared = store::load(&cfg.dir.join("shared"));
+        // From before owners were told apart: one list, no one's.
+        for (id, d) in std::mem::take(&mut local.hosted) {
+            hosts.entry(id).or_default().users.insert(Id::default(), d);
+        }
         let n = Arc::new(Self {
             own: own_inv.id(),
             me,
@@ -705,7 +787,11 @@ impl Node {
             big: cfg.big,
             files,
             held: Mutex::new(Some(held)),
-            budget: Mutex::default(),
+            budget: Mutex::new(budget),
+            hosts: Mutex::new(hosts),
+            verified: Mutex::default(),
+            shared: Mutex::new(shared),
+            synced: Mutex::default(),
             call: Mutex::new(None),
             media: broadcast::channel(128).0,
         });
@@ -719,11 +805,12 @@ impl Node {
             .spawn();
         let _ = n.router.set(router);
         n.persist();
+        n.save_hosts();
         if serve.is_some() {
-            let hosted = lock(&n.local).hosted.clone();
-            for (id, peers) in hosted {
-                let peers = peers.into_iter().take(16).map(EndpointAddr::new);
-                n.open(None, id, peers.collect())?;
+            let ids: Vec<Id> = lock(&n.hosts).keys().copied().collect();
+            for id in ids {
+                let peers = n.owners(&id).into_iter().take(16);
+                n.open(None, id, peers.map(EndpointAddr::new).collect())?;
             }
         } else {
             let own = n.open(Some(own_inv), n.own, vec![])?;
@@ -892,7 +979,7 @@ impl Node {
                 });
             }
             let p = &mut lock(&self.prefs).told;
-            p.insert(id, mark.max(newest.unwrap_or(0)));
+            p.insert(id, mark.max(newest.unwrap_or(0).min(now())));
         }
         lock(&self.rang).retain(|c| live.contains(c));
         self.save_prefs();
@@ -914,14 +1001,26 @@ impl Node {
         }
     }
 
+    /// Our push, as this space's members should have it: a doorbell's
+    /// code made for the space and its epoch, retired by the next rekey.
     async fn tell_push(self: &Arc<Self>, id: &Id) -> Result<()> {
         let Some(url) = lock(&self.prefs).push.clone() else { return Ok(()) };
+        let sp = self.get(id)?;
+        let Some(inv) = &sp.inv else { return Ok(()) };
+        let url = match url.starts_with("irch:wake:") {
+            true => {
+                let t = tag(&lock(&sp.book).key(inv).0);
+                crate::wake::allow(&self.dir, id, &t)?;
+                crate::wake::for_space(&url, id, &t).context("bad doorbell")?
+            }
+            false => url,
+        };
         let (me, dev) = (self.id(), self.ep.id());
         let has = self.view(id, |s| s.push(&me, &dev).map(str::to_string));
         if has.flatten().as_deref() == Some(&url) {
             return Ok(());
         }
-        self.post(&self.get(id)?, Op::Push { url: Some(url) }).await?;
+        self.post(&sp, Op::Push { url: Some(url) }).await?;
         Ok(())
     }
 
@@ -939,22 +1038,19 @@ impl Node {
     ) {
         let dev = self.ep.id();
         let urls = self.view(id, |s| s.pushes_of(who)).unwrap_or_default();
-        let news = Arc::new(raw.map(|r| (*id, r)));
+        let (news, id) = (Arc::new(raw), *id);
         for (_, url) in
             urls.into_iter().filter(|u| u.0 != dev && pushable(&u.1))
         {
-            if url.starts_with("irch:wake:") {
+            if url.starts_with("irch:ring:") {
                 let (n, news) = (Arc::downgrade(self), news.clone());
                 tokio::spawn(async move {
                     // No answer (a phone between networks): retry for a minute.
                     for wait in [0, 3, 10, 45] {
                         tokio::time::sleep(Duration::from_secs(wait)).await;
                         let Some(n) = n.upgrade() else { return };
-                        let r = crate::wake::ring(
-                            &n.ep,
-                            &url,
-                            news.as_ref().as_ref(),
-                        );
+                        let raw = news.as_deref();
+                        let r = crate::wake::ring(&n.ep, &url, &id, raw);
                         match r.await {
                             Ok(()) => return,
                             Err(e) => warn!("wake: {e:#}"),
@@ -1033,7 +1129,11 @@ impl Node {
     pub fn locked(&self, id: &Id) -> bool {
         let Ok(sp) = self.get(id) else { return false };
         let Some(inv) = &sp.inv else { return false };
-        lock(&sp.book).key(inv).1
+        let b = lock(&sp.book);
+        // A DM with someone who retired their identity: a thief may read.
+        let me = self.me.id();
+        let gone = b.st.peer(&me).is_some_and(|p| b.st.out(&p));
+        b.out || gone || b.key(inv).1
     }
 
     pub fn peers(&self, id: &Id) -> usize {
@@ -1093,6 +1193,7 @@ impl Node {
 
     pub fn mark_read(&self, id: &Id, ch: &Ch) {
         let latest = self.view(id, |s| s.latest(ch)).flatten().unwrap_or(0);
+        let latest = latest.min(now());
         if self.since(id, ch) < latest {
             lock(&self.local).read.insert((*id, *ch), latest);
             self.persist();
@@ -1147,9 +1248,13 @@ impl Node {
             tx,
             nbrs,
             seen: Mutex::default(),
+            heard: Mutex::default(),
             calls: Mutex::default(),
             busy: Mutex::default(),
             vouched: AtomicUsize::new(0),
+            room: Mutex::new([0; 32]),
+            moved: Arc::default(),
+            undelivered: Mutex::default(),
             task: OnceLock::new(),
         });
         {
@@ -1178,8 +1283,10 @@ impl Node {
         let mut l = lock(&self.local);
         l.read.retain(|(s, _), _| s != id);
         l.joined.remove(id);
-        l.hosted.remove(id);
         drop(l);
+        if lock(&self.hosts).remove(id).is_some() {
+            self.save_hosts();
+        }
         self.persist();
         if lock(&self.closed).contains_key(id) {
             self.hide(id, false);
@@ -1194,9 +1301,7 @@ impl Node {
         let mut v: Vec<_> = hosts.into_iter().map(|a| a.id).collect();
         v.extend(b.st.devices(16));
         v.extend(sp.inv.iter().flat_map(|i| i.peers.iter().map(|a| a.id)));
-        let l = lock(&self.local);
-        v.extend(l.hosted.get(&sp.id).into_iter().flatten().take(16));
-        drop(l);
+        v.extend(self.owners(&sp.id).into_iter().take(16));
         let me = self.ep.id();
         let mut seen = HashSet::new();
         v.retain(|p| *p != me && seen.insert(*p));
@@ -1209,22 +1314,35 @@ impl Node {
         raws: Vec<Vec<u8>>,
         mine: bool,
     ) -> usize {
+        // A storage node keeps only the epochs its owners named.
+        let tags = sp.inv.is_none().then(|| {
+            let h = lock(&self.hosts);
+            h.get(&sp.id).map(|h| h.tags.clone()).unwrap_or_default()
+        });
         let new = {
             let mut b = lock(&sp.book);
             let mut fresh = vec![];
             for raw in raws {
                 let Ok(e) = postcard::from_bytes::<Env>(&raw) else { continue };
                 let i = Id(blake3::hash(&raw).into());
-                if !e.live && e.ts <= now() + DAY && !b.has(&i) {
+                if !e.live && e.ts <= now() + SKEW && !b.has(&i) {
                     fresh.push((i, e, raw));
                 }
             }
             match sp.inv {
-                // A storage node keeps, unopened, what vouched devices send.
-                None => fresh
-                    .into_iter()
-                    .filter(|(i, e, r)| b.store(*i, e.ts, r, false, false))
-                    .count(),
+                // A storage node keeps, unopened, what vouched devices send,
+                // within the day's budget.
+                None => {
+                    let tags = tags.unwrap_or_default();
+                    let ok =
+                        |e: &Env| tags.is_empty() || tags.contains(&e.epoch);
+                    let fits =
+                        |r: &[u8]| self.budget(&sp.id, r.len() as u64).is_ok();
+                    let keep =
+                        fresh.into_iter().filter(|(_, e, r)| ok(e) && fits(r));
+                    keep.filter(|(i, e, r)| b.store(*i, e.ts, r, 0, false))
+                        .count()
+                }
                 Some(_) => {
                     let w = fresh
                         .into_iter()
@@ -1242,6 +1360,14 @@ impl Node {
 
     /// DMs to accept, spaces to open or close, epochs to replace, keys to pass.
     async fn effects(self: Arc<Self>, sp: Arc<Space>) {
+        // A new key: a new room, which our storage nodes hear of at once.
+        if self.rehome(&sp) && sp.inv.is_some() {
+            self.stores(&sp.id).into_iter().for_each(|s| self.sync(&sp, s.0));
+            // Our ring code too: the old one, which those cut off hold, dies.
+            if sp.id != self.own && !self.locked(&sp.id) {
+                let _ = self.tell_push(&sp.id).await;
+            }
+        }
         let (knocks, fix) = {
             let mut b = lock(&sp.book);
             let admin = b.st.role(&self.id()) == Role::Admin;
@@ -1354,11 +1480,17 @@ impl Node {
             // Locked out, admins can still ban and rekey, dated after the rest.
             let fix = matches!(op, Op::Role { .. } | Op::Rekey { .. });
             ensure!(!locked || fix, LOCKED);
+            let me = self.me.id();
+            let gone = b.st.peer(&me).is_some_and(|p| b.st.out(&p));
+            ensure!(!gone || op.live(), "they retired this identity");
             let after = if fix { b.st.horizon() + 1 } else { 0 };
             (key, self.tick().max(after))
         };
         let (s, raw) = self.seal(sp, &key, ts, op);
         self.ingest(sp, vec![raw.clone()], true);
+        if sp.nbrs().is_empty() {
+            lock(&sp.undelivered).insert(s.id);
+        }
         match sp.tx().filter(|_| raw.len() <= GOSSIP_MAX) {
             Some(tx) => drop(tx.broadcast(raw.clone().into()).await),
             None => sp.nbrs().into_iter().for_each(|p| self.sync(sp, p)),
@@ -1384,8 +1516,10 @@ impl Node {
             Op::Role { role, .. } => *role != Role::Banned,
             Op::Order { channels } => channels.len() <= 500,
             Op::Edit { .. } | Op::Channel { .. } | Op::Pin { .. } => true,
+            Op::Owner { .. } => true,
             _ => false,
         };
+        let ok = ok && op::fits(&op);
         ensure!(ok, "that cannot be sent (empty, too long, or not allowed)");
         ensure!(*id != self.own, "not a space");
         let role = matches!(op, Op::Role { .. });
@@ -1443,6 +1577,7 @@ impl Node {
                 self.sync(&sp, a);
             }
             self.emit(Event::Changed { space: sp.id });
+            tokio::spawn(self.clone().effects(sp.clone()));
         }
         Ok(sp.id)
     }
@@ -1486,7 +1621,39 @@ impl Node {
         let own = self.get(&self.own)?;
         self.post(&own, Op::Left { space: *id }).await?;
         self.close(id);
+        // Its files stop being served from here.
+        let mine = self.sharing().into_iter().filter(|f| f.1 == *id);
+        for (h, ..) in mine.collect::<Vec<_>>() {
+            let _ = self.unshare(&h).await;
+        }
         Ok(())
+    }
+
+    /// This identity is lost (a stolen phone): say so in every space, for
+    /// good. Admins rekey it out; nothing it signs later counts.
+    pub async fn burn(self: &Arc<Self>) -> Result<()> {
+        ensure!(self.serve.is_none(), "storage nodes have no identity");
+        for sp in self.all().into_iter().filter(|s| s.inv.is_some()) {
+            if let Err(e) = self.send(&sp, Op::Burn).await {
+                warn!("retiring in {:?}: {e:#}", sp.id);
+            }
+        }
+        Ok(())
+    }
+
+    /// This identity's devices, newest first: (device, last wrote).
+    pub fn devices(&self) -> Vec<(EndpointId, u64)> {
+        let me = self.id();
+        self.view(&self.own, |s| s.devices_of(&me)).unwrap_or_default()
+    }
+
+    pub fn device(&self) -> EndpointId {
+        self.ep.id()
+    }
+
+    /// When a storage node or peer last synced with us.
+    pub fn synced(&self, d: &EndpointId) -> Option<u64> {
+        lock(&self.synced).get(d).copied()
     }
 
     pub async fn ban(
@@ -1701,7 +1868,7 @@ impl Node {
             for d in dial {
                 let hi = async {
                     let conn = self.ep.connect(d, call::ALPN).await.ok()?;
-                    let user = self.hello(&conn).await?;
+                    let user = self.greet(&conn).await?;
                     Some((user, conn))
                 };
                 let ten = Duration::from_secs(10);
@@ -1719,13 +1886,13 @@ impl Node {
         let Ok(sp) = self.get(&id) else { return };
         let d = conn.remote_id();
         if self.callers(&sp, Some(ch)).iter().any(|w| w.0 == d)
-            && let Some(user) = self.hello(&conn).await
+            && let Some(user) = self.greet(&conn).await
         {
             self.admit(user, conn);
         }
     }
 
-    async fn hello(&self, conn: &Connection) -> Option<Id> {
+    async fn greet(&self, conn: &Connection) -> Option<Id> {
         call::hello(conn, &self.me.user, self.ep.id()).await
     }
 
@@ -1737,6 +1904,7 @@ impl Node {
         {
             return;
         }
+        self.bind(conn.remote_id(), user);
         let mut c = lock(&self.call);
         if let Some(c) = c.as_mut().filter(|c| (c.space, c.channel) == (id, ch))
         {
@@ -1955,8 +2123,15 @@ impl Node {
 
     /// Served from here to members while online: any size, no copy, unsealed
     /// (QUIC encrypts), checked chunk by chunk. `name`: else the path's.
-    pub async fn offer(&self, path: &Path, name: Option<&str>) -> Result<File> {
+    /// Served to `space`'s members only, until we stop sharing it.
+    pub async fn offer(
+        &self,
+        space: &Id,
+        path: &Path,
+        name: Option<&str>,
+    ) -> Result<File> {
         use iroh_blobs::api::blobs::{AddPathOptions, ImportMode};
+        self.get(space)?;
         let files = &self.files;
         let path = std::path::absolute(path)?;
         let size = std::fs::metadata(&path)?.len();
@@ -1964,9 +2139,55 @@ impl Node {
         let opts = AddPathOptions { path: path.clone(), format, mode };
         let tag = files.add_path_with_opts(opts).with_tag().await?;
         let base = path.file_name().and_then(|n| n.to_str());
-        let name = name.or(base).unwrap_or("file").chars().take(128).collect();
+        let name: String =
+            name.or(base).unwrap_or("file").chars().take(128).collect();
         let hash = Id(*tag.hash.as_bytes());
+        let space = Some(*space);
+        let (tag, n) = (tag.name.0.to_vec(), name.clone());
+        lock(&self.shared).insert(hash, Shared { space, tag, name: n, size });
+        self.save_shared();
         Ok(File { name, size, hash, key: crate::op::OFFERED })
+    }
+
+    /// Passed on from here too, to that space's members alone.
+    fn passed(&self, space: &Id, f: &File) {
+        let mut s = lock(&self.shared);
+        if s.contains_key(&f.hash) {
+            return;
+        }
+        let (space, name, size) = (Some(*space), f.name.clone(), f.size);
+        s.insert(f.hash, Shared { space, tag: vec![], name, size });
+        drop(s);
+        self.save_shared();
+    }
+
+    fn save_shared(&self) {
+        let s = lock(&self.shared);
+        if let Err(e) = store::save(&self.dir.join("shared"), &*s) {
+            warn!("saving shared files: {e}");
+        }
+    }
+
+    /// What this device serves, as (hash, space, name, size).
+    pub fn sharing(&self) -> Vec<(Id, Id, String, u64)> {
+        let s = lock(&self.shared);
+        let on = s.iter().filter_map(|(h, f)| Some((*h, f.space?, f)));
+        on.map(|(h, sp, f)| (h, sp, f.name.clone(), f.size)).collect()
+    }
+
+    /// Stop serving an offered file; its members can no longer fetch it.
+    pub async fn unshare(&self, h: &Id) -> Result<()> {
+        let tag = {
+            let mut s = lock(&self.shared);
+            let f = s.get_mut(h).context("not shared from here")?;
+            f.space = None;
+            std::mem::take(&mut f.tag)
+        };
+        self.save_shared();
+        if !tag.is_empty() {
+            self.files.tags().delete(tag).await?;
+        }
+        Ok(())
     }
 
     /// A blob's real size, proven by its hash, from the first that has it.
@@ -1990,13 +2211,23 @@ impl Node {
 
     /// Blob `h`, `len` bytes, from whoever has it (sender, members, storage
     /// nodes), resumed; served on.
-    async fn pull(&self, space: &Id, h: &Id, len: u64) -> Result<&FsStore> {
+    async fn pull(
+        self: &Arc<Self>,
+        space: &Id,
+        h: &Id,
+        len: u64,
+    ) -> Result<&FsStore> {
         let hash = iroh_blobs::Hash::from_bytes(h.0);
         if !self.files.has(hash).await? {
             let sp = self.get(space)?;
             let mut peers: Vec<EndpointId> = self.bootstrap(&sp);
             peers.extend(sp.nbrs());
             peers.extend(self.stores(space).into_iter().map(|s| s.0.id));
+            // Who we are, proven to each first: files go to members only.
+            for p in peers.iter().take(4) {
+                let s = self.clone().sync_with(sp.clone(), (*p).into());
+                let _ = tokio::time::timeout(Duration::from_secs(10), s).await;
+            }
             // Real size first: a post may claim 1 byte.
             let size = self.verified(&peers, h).await;
             ensure!(size == Some(len), "not reachable now, or not as said");
@@ -2012,8 +2243,14 @@ impl Node {
 
     /// A copy (a reflink where it can): referenced instead, what the user
     /// later writes there is what members asking for its hash would get.
-    async fn export(&self, space: &Id, f: &File, to: &Path) -> Result<()> {
+    async fn export(
+        self: &Arc<Self>,
+        space: &Id,
+        f: &File,
+        to: &Path,
+    ) -> Result<()> {
         let files = self.pull(space, &f.hash, f.size).await?;
+        self.passed(space, f);
         std::fs::remove_file(to)?;
         files.export(iroh_blobs::Hash::from_bytes(f.hash.0), to).await?;
         Ok(())
@@ -2042,6 +2279,7 @@ impl Node {
         let hash = iroh_blobs::Hash::from_bytes(f.hash.0);
         if f.offered() {
             let files = self.pull(space, &f.hash, f.size).await?;
+            self.passed(space, f);
             return Ok(files.get_bytes(hash).await?.to_vec());
         }
         let len = crate::crypto::sealed_len(f.size);
@@ -2088,7 +2326,12 @@ impl Node {
     }
 
     /// A sealed file too big to preview, opened straight into `to`.
-    async fn unseal(&self, space: &Id, f: &File, to: &Path) -> Result<()> {
+    async fn unseal(
+        self: &Arc<Self>,
+        space: &Id,
+        f: &File,
+        to: &Path,
+    ) -> Result<()> {
         let len = crate::crypto::sealed_len(f.size);
         let files = self.pull(space, &f.hash, len).await?;
         let tmp = self.scratch("out")?;
@@ -2135,12 +2378,18 @@ impl Node {
                         };
                         got.inspect_err(|_| drop(std::fs::remove_file(&p)))?;
                     }
-                    // Windows: from the internet, like a browser download.
+                    // From the internet, like a browser download: Windows
+                    // and macOS check it before it runs.
                     #[cfg(windows)]
                     let _ = std::fs::write(
                         format!("{}:Zone.Identifier", p.display()),
                         "[ZoneTransfer]\r\nZoneId=3\r\n",
                     );
+                    #[cfg(target_os = "macos")]
+                    let _ = std::process::Command::new("/usr/bin/xattr")
+                        .args(["-w", "com.apple.quarantine", "0081;0;irch;"])
+                        .arg(&p)
+                        .status();
                     return Ok(p);
                 }
                 Err(e) if e.kind() == AlreadyExists => continue,
@@ -2208,22 +2457,23 @@ impl Node {
         let mut head = [0u8; 17];
         rx.read_exact(&mut head).await?;
         let max = match (head[0], self.serve) {
-            (1 | 2, Some(t)) if head[1..] == t => PREVIEW + 16,
+            (1 | 2, Some(t)) if same(&head[1..], &t) => PREVIEW + 16,
             (1 | 2, _) => bail!("not a storage node of yours"),
             (3, Some(_)) => 128,
             _ => 64,
         };
         let rest = sync::rest(&mut rx, max).await?;
         match postcard::from_bytes(&[&head[..], &rest].concat())? {
-            Ask::Get(h) => {
+            Ask::Get(h) if self.may_get(&from, &h) => {
                 tx.write_all(&std::fs::read(self.blob(&h)).unwrap_or_default())
                     .await?
             }
-            Ask::Put(t, b) if self.serve == Some(t) => {
+            Ask::Get(_) => {}
+            Ask::Put(t, b) if self.serve.is_some_and(|s| same(&s, &t)) => {
                 std::fs::create_dir_all(self.dir.join("blobs"))?;
                 store::write(&self.blob(&Id(blake3::hash(&b).into())), &b)?;
             }
-            Ask::Keep(t, h, pw) if self.serve == Some(t) => {
+            Ask::Keep(t, h, pw) if self.serve.is_some_and(|s| same(&s, &t)) => {
                 let size = self.verified(&[from], &h).await;
                 let size = size.context("not reachable, or not there")?;
                 let same = |a: &str, b: &str| {
@@ -2240,7 +2490,9 @@ impl Node {
                 }
             }
             Ask::Hold(sp, t, h)
-                if self.serve.is_some_and(|s| hold_token(&s, &sp) == t) =>
+                if self
+                    .serve
+                    .is_some_and(|s| same(&hold_token(&s, &sp), &t)) =>
             {
                 ensure!(self.vouched(&sp, &from).await, "not vouched for");
                 let hash = iroh_blobs::Hash::from_bytes(h.0);
@@ -2263,33 +2515,210 @@ impl Node {
         Ok(())
     }
 
-    /// Anyone may read a space we have; a storage node's owner (its token)
-    /// has it keep a new one, from the devices it names.
+    /// What we tell `to` when we ask: our room, and who we are, signed.
+    pub(crate) fn hello(
+        &self,
+        sp: &Space,
+        to: &EndpointId,
+        root: [u8; 32],
+        token: Option<[u8; 16]>,
+    ) -> Hello {
+        let room = self.room(sp);
+        let me = &self.me.user;
+        let who = sp.inv.as_ref().map(|_| sync::sign(me, &sp.id, &room, to));
+        let (devices, tags) = match token {
+            Some(_) => {
+                let t =
+                    lock(&sp.book).keys.keys().copied().take(4096).collect();
+                (sp.devices(), t)
+            }
+            None => (vec![], vec![]),
+        };
+        Hello { space: sp.id, root, room, who, token, devices, tags }
+    }
+
+    /// Whom to answer: a member, who holds a key no later epoch cut them
+    /// off from; a storage node, only devices its owners vouched for. An
+    /// owner (its token) has it keep a new space.
     pub(crate) fn find(
         self: &Arc<Self>,
         h: &Hello,
         from: EndpointId,
-    ) -> Option<Arc<Space>> {
+    ) -> (Option<Arc<Space>>, Admit) {
+        let who = sync::who(h, &self.ep.id());
+        if let Some(u) = who {
+            self.bind(from, u);
+        }
         let sp = self.get(&h.space).ok();
-        if !self.serve.is_some_and(|t| h.token == Some(t)) {
-            return sp;
+        let owner = h.token.zip(self.serve).is_some_and(|(a, b)| same(&a, &b));
+        if owner {
+            self.vouch(h, from, who);
+            let sp =
+                sp.or_else(|| self.open(None, h.space, vec![from.into()]).ok());
+            return (sp, Admit::Yes);
         }
-        let ok: Vec<_> =
-            std::iter::once(from).chain(h.devices.clone()).collect();
-        let mut l = lock(&self.local);
-        if l.hosted.get(&h.space) != Some(&ok) {
-            l.hosted.insert(h.space, ok);
-            drop(l);
-            self.persist();
+        let Some(sp) = sp else { return (None, Admit::No) };
+        let a = self.admits(&sp, h, from, who);
+        (Some(sp), a)
+    }
+
+    fn admits(
+        &self,
+        sp: &Space,
+        h: &Hello,
+        d: EndpointId,
+        who: Option<Id>,
+    ) -> Admit {
+        let yes = |ok: bool| if ok { Admit::Yes } else { Admit::No };
+        // A storage node: a vouched device, an owner's (signed), or one
+        // holding the key its owners write with now (a newcomer).
+        if sp.inv.is_none() {
+            let hs = lock(&self.hosts);
+            let host = hs.get(&sp.id);
+            let owner = who.is_some_and(|u| {
+                host.is_some_and(|h| h.users.contains_key(&u))
+            });
+            let now =
+                host.is_some_and(|x| x.room != [0; 32] && x.room == h.room);
+            drop(hs);
+            return yes(owner || now || self.takes(sp, &d));
         }
-        sp.or_else(|| self.open(None, h.space, vec![from.into()]).ok())
+        if self.mine(&d) {
+            return Admit::Yes;
+        }
+        let b = lock(&sp.book);
+        if b.st.hosts().iter().any(|a| a.id == d) {
+            return Admit::Yes;
+        }
+        let Some(u) = who.filter(|u| !b.st.out(u)) else { return Admit::No };
+        let end = (u64::MAX, Id([255; 32]));
+        let k = b.keys.iter().find(|(_, k)| sync::room(&sp.id, k) == h.room);
+        match k {
+            Some((t, _)) if b.st.stale(t, &end, &u) => Admit::Out,
+            Some(_) => Admit::Yes,
+            None => Admit::No,
+        }
+    }
+
+    /// A member told us our key was replaced without us (or no longer).
+    pub(crate) fn cut(&self, sp: &Space, out: bool) {
+        let was = std::mem::replace(&mut lock(&sp.book).out, out);
+        if was != out {
+            self.emit(Event::Changed { space: sp.id });
+        }
+    }
+
+    fn bind(&self, d: EndpointId, u: Id) {
+        let mut v = lock(&self.verified);
+        if v.len() >= 4096 {
+            v.clear();
+        }
+        v.insert(d, u);
+    }
+
+    /// An owner's devices, room and epochs for a space this node keeps.
+    fn vouch(&self, h: &Hello, from: EndpointId, who: Option<Id>) {
+        let user = who.unwrap_or(Id(*from.as_bytes()));
+        let ds = std::iter::once(from).chain(h.devices.iter().copied());
+        let ds: Vec<_> = ds.take(4096).collect();
+        let mut hs = lock(&self.hosts);
+        let e = hs.entry(h.space).or_default();
+        let was = (e.room, e.tags.len(), e.users.get(&user) == Some(&ds));
+        e.users.insert(user, ds);
+        if h.room != [0; 32] {
+            e.room = h.room;
+        }
+        e.tags.extend(h.tags.iter().take(4096));
+        while e.tags.len() > 4096 {
+            e.tags.pop_first();
+        }
+        let moved = was.0 != e.room;
+        let changed = was != (e.room, e.tags.len(), true);
+        drop(hs);
+        if changed {
+            self.save_hosts();
+        }
+        if moved && let Ok(sp) = self.get(&h.space) {
+            self.rehome(&sp);
+        }
+    }
+
+    fn save_hosts(&self) {
+        if let Err(e) =
+            store::save(&self.dir.join("hosts"), &*lock(&self.hosts))
+        {
+            warn!("saving hosts: {e}");
+        }
+    }
+
+    /// Every device a storage node's owners vouched for in a space.
+    fn owners(&self, id: &Id) -> Vec<EndpointId> {
+        let h = lock(&self.hosts);
+        let all =
+            h.get(id).into_iter().flat_map(|h| h.users.values().flatten());
+        let mut v: Vec<_> = all.copied().collect();
+        v.sort_unstable();
+        v.dedup();
+        v
     }
 
     /// Members check every op; a storage node cannot: vouched devices only.
     pub(crate) fn takes(&self, sp: &Space, peer: &EndpointId) -> bool {
-        let l = lock(&self.local);
-        sp.inv.is_some()
-            || l.hosted.get(&sp.id).is_some_and(|v| v.contains(peer))
+        let h = lock(&self.hosts);
+        let ours = |h: &Host| h.users.values().any(|v| v.contains(peer));
+        sp.inv.is_some() || h.get(&sp.id).is_some_and(ours)
+    }
+
+    /// Where its members meet now: a member's current key, or what a
+    /// storage node's owners last said.
+    pub(crate) fn room(&self, sp: &Space) -> [u8; 32] {
+        match &sp.inv {
+            Some(inv) => sync::room(&sp.id, &lock(&sp.book).key(inv).0),
+            None => lock(&self.hosts).get(&sp.id).map_or([0; 32], |h| h.room),
+        }
+    }
+
+    /// Moved to a new room: true, and the gossip follows.
+    fn rehome(&self, sp: &Space) -> bool {
+        let r = self.room(sp);
+        let moved = std::mem::replace(&mut *lock(&sp.room), r) != r;
+        if moved {
+            sp.moved.notify_one();
+        }
+        moved
+    }
+
+    /// A sync with `peer` went through: what we wrote reached someone.
+    pub(crate) fn reached(&self, sp: &Space, peer: EndpointId) {
+        lock(&self.synced).insert(peer, now());
+        if !std::mem::take(&mut *lock(&sp.undelivered)).is_empty() {
+            self.emit(Event::Changed { space: sp.id });
+        }
+    }
+
+    /// Ours, not yet on any other device.
+    pub fn undelivered(&self, id: &Id) -> HashSet<Id> {
+        self.get(id).map(|s| lock(&s.undelivered).clone()).unwrap_or_default()
+    }
+
+    /// May `d` have blob `h`? Sealed ones: any member's proven device;
+    /// offered ones: only members of the space they went to.
+    fn may_get(&self, d: &EndpointId, h: &Id) -> bool {
+        if self.serve.is_some() || self.mine(d) || self.hosting(d) {
+            return true;
+        }
+        let Some(u) = lock(&self.verified).get(d).copied() else {
+            return false;
+        };
+        let member = |id: &Id| {
+            self.view(id, |s| s.profile(&u).is_some() && !s.out(&u))
+                == Some(true)
+        };
+        let shared = lock(&self.shared).get(h).map(|s| s.space);
+        match shared {
+            Some(sp) => sp.is_some_and(|sp| member(&sp)),
+            None => self.spaces().iter().any(member),
+        }
     }
 
     async fn sync_with(self: Arc<Self>, sp: Arc<Space>, peer: EndpointAddr) {
@@ -2316,8 +2745,12 @@ impl Node {
             };
             let r = tokio::time::timeout(sync::LIMIT, r).await;
             match r.unwrap_or_else(|e| Err(e.into())) {
-                Ok(0) => {}
-                Ok(count) => self.emit(Event::Synced { space: sp.id, count }),
+                Ok(count) => {
+                    self.reached(&sp, id);
+                    if count > 0 {
+                        self.emit(Event::Synced { space: sp.id, count });
+                    }
+                }
                 Err(e) => debug!("sync with {}: {e:#}", id.fmt_short()),
             }
         }
@@ -2378,21 +2811,25 @@ impl Node {
         }
         let s = {
             let b = lock(&sp.book);
-            let s = b
-                .keys
-                .get(&e.epoch)
-                .and_then(|k| op::open(&sp.id, k, &e, true));
+            let s = b.keys.get(&e.epoch);
+            let s = s.and_then(|k| op::open(&sp.id, k, &e, None)).map(|s| s.0);
             // Presence, typing and calls only from who holds the key now,
             // unbanned (a ban's rekey may wait for an admin).
             s.filter(|s| {
-                b.st.role(&s.author) != Role::Banned
+                !b.st.out(&s.author)
                     && !b.st.stale(&s.epoch, &(s.ts, s.id), &s.author)
             })
         };
         let Some(s) = s else { return };
-        if s.ts.abs_diff(now()) > 120_000 {
+        // Recent, and once: an old ring passed on again rings nothing.
+        let mut heard = lock(&sp.heard);
+        heard.retain(|_, t| t.elapsed() < Duration::from_secs(240));
+        if s.ts.abs_diff(now()) > 120_000
+            || heard.insert(s.id, Instant::now()).is_some()
+        {
             return;
         }
+        drop(heard);
         let gone = s.op == Op::Gone;
         if gone && lock(&sp.seen).remove(&s.author).is_some()
             || !gone && sp.saw(s.author)
@@ -2463,12 +2900,20 @@ impl Node {
 }
 
 /// One gossip subscription per space, renewed if it ever closes.
+/// The topic is the room: a rekey moves it, leaving whoever it cut off.
 async fn pump(n: Arc<Node>, sp: Weak<Space>, boot: Vec<EndpointId>) {
     loop {
         let Some(s) = sp.upgrade() else { return };
+        let (room, moved) = (n.room(&s), s.moved.clone());
+        *lock(&s.room) = room;
+        // A storage node not yet told where: wait to be.
+        if room == [0; 32] {
+            drop(s);
+            moved.notified().await;
+            continue;
+        }
         let peers = boot.iter().copied().chain(n.bootstrap(&s)).collect();
-        let topic =
-            n.gossip.subscribe(TopicId::from_bytes(s.id.0), peers).await;
+        let topic = n.gossip.subscribe(TopicId::from_bytes(room), peers).await;
         let Ok(topic) = topic else {
             tokio::time::sleep(Duration::from_secs(5)).await;
             continue;
@@ -2479,7 +2924,11 @@ async fn pump(n: Arc<Node>, sp: Weak<Space>, boot: Vec<EndpointId>) {
         // Alone (a dial failed, say): dial again soon, backing off to a minute.
         let mut wait = Duration::from_secs(2);
         loop {
-            let ev = match tokio::time::timeout(wait, rx.next()).await {
+            let next = tokio::select! {
+                () = moved.notified() => break,
+                r = tokio::time::timeout(wait, rx.next()) => r,
+            };
+            let ev = match next {
                 Ok(Some(ev)) => ev,
                 Ok(None) => break,
                 Err(_) => {
@@ -2548,7 +2997,7 @@ fn pushable(u: &str) -> bool {
         u.host_str()?.trim_matches(['[', ']']).parse().ok()
     };
     u.starts_with("https://") && ip().is_none_or(|a| public(&a))
-        || u.starts_with("irch:wake:")
+        || u.starts_with("irch:ring:")
         || cfg!(debug_assertions) && u.starts_with("http://127.0.0.1:")
 }
 
@@ -2596,6 +3045,11 @@ async fn heartbeat(n: Weak<Node>) {
                 }
             }
         }
+        // What storage took today, kept across restarts.
+        if n.serve.is_some() {
+            let b = lock(&n.budget);
+            let _ = store::save(&n.dir.join("budget"), &*b);
+        }
     }
 }
 
@@ -2630,7 +3084,7 @@ mod tests {
 
     #[test]
     fn pushes_go_out_only_to_public_https() {
-        assert!(pushable("https://ntfy.sh/up1") && pushable("irch:wake:x"));
+        assert!(pushable("https://ntfy.sh/up1") && pushable("irch:ring:x"));
         for u in [
             "http://ntfy.sh/up1",
             "https://10.0.0.8/up",
@@ -2638,6 +3092,11 @@ mod tests {
             "https://[fd00::1]/up",
             "https://100.64.0.1/up",
             "https://169.254.169.254/latest",
+            "https://[::ffff:10.0.0.8]/up",
+            "https://[::ffff:127.0.0.1]/up",
+            "https://[64:ff9b::a00:8]/up",
+            "https://224.0.0.1/up",
+            "https://0.1.2.3/up",
             "file:///etc/passwd",
         ] {
             assert!(!pushable(u), "{u}");
@@ -2677,7 +3136,7 @@ mod tests {
         ];
         let work = ops.into_iter().map(|(who, k, ts, op)| {
             let (s, raw) = op::seal(&sp, &k, &who.user, dev, ts, op);
-            (s.id, postcard::from_bytes(&raw).unwrap(), Src::Log(false))
+            (s.id, postcard::from_bytes(&raw).unwrap(), Src::Log(0))
         });
         b.fold(&sp, &o, work.rev().collect());
         assert!(

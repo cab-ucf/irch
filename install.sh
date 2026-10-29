@@ -5,7 +5,16 @@
 set -eu
 R=https://github.com/cab-ucf/irch/releases/latest/download
 case $(uname -m) in arm64 | aarch64) cpu=aarch64 ;; *) cpu=x86_64 ;; esac
-get() { curl -fL --progress-bar "$R/$1" -o "$2"; }
+# irch's key: with minisign here, every file is checked as updates are.
+KEY=RWSPfztwzR/MhakRL6cA70pN03n/nMCdTvoY5UHC2IcZuhcR+41RQI95
+check() {
+  command -v minisign >/dev/null || return 0
+  curl -fsSL "$1.sig" | base64 -d >"$2.minisig"
+  minisign -Vm "$2" -x "$2.minisig" -P "$KEY" | grep -q "file:${1##*/}" ||
+    { echo "$1: not signed by irch" && exit 1; }
+  rm -f "$2.minisig"
+}
+get() { curl -fL --progress-bar "$R/$1" -o "$2" && check "$R/$1" "$2"; }
 bin=$HOME/.local/bin
 
 if [ "${1:-}" = --server ]; then
@@ -41,9 +50,9 @@ url=$(curl -fsSL "$R/latest.json" | tr -d ' \n' |
 app=$bin/irch.AppImage
 mkdir -p "$bin" "$HOME/.local/share/applications" \
   "$HOME/.local/share/icons/hicolor/512x512/apps"
-curl -fL --progress-bar "$url" -o "$app.part"
+curl -fL --progress-bar "$url" -o "$app.part" && check "$url" "$app.part"
 chmod +x "$app.part" && mv "$app.part" "$app"
-curl -fsSL https://raw.githubusercontent.com/cab-ucf/irch/main/app/icons/icon.png \
+curl -fsSL "$R/irch.png" \
   -o "$HOME/.local/share/icons/hicolor/512x512/apps/irch.png" || true
 # Without FUSE 2 an AppImage still runs, unpacked each time.
 env=

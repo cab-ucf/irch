@@ -34,7 +34,10 @@ x         close a DM (kept; back with its next message)
 :reply TEXT  :thread TEXT  :react EMOJI  :edit TEXT  :delete
 :search WORDS  in this space          :note [FILE]  :todo [FILE]
 :file PATH TEXT  send a file   :share PATH TEXT  from here   :save
-:admin :member :ban :unban USER  :rekey  :link  :store CODE|local|here";
+:shared  what this machine serves   :unshare N  stop serving the Nth
+:admin :member :ban :unban USER  :rekey  :link  :store CODE|local|here
+:owner USER  hand the space on   :devices  yours, last seen
+:retire yes  this identity is lost (a stolen device): end it everywhere";
 
 type Typing = HashMap<(Id, Ch), HashMap<Id, Instant>>;
 type At = Option<(Id, Option<Ch>)>;
@@ -782,9 +785,10 @@ impl App {
             }
             "share" => {
                 let (path, text) = arg.split_once(' ').unwrap_or((&arg, ""));
-                let files =
-                    vec![n.offer(std::path::Path::new(path), None).await?];
-                let (channel, text) = (self.here()?.1, text.to_string());
+                let (space, channel) = self.here()?;
+                let p = std::path::Path::new(path);
+                let files = vec![n.offer(&space, p, None).await?];
+                let text = text.to_string();
                 self.post(Op::Post { channel, text, reply: None, files })
                     .await?;
                 self.status = "shared from this machine while it runs".into();
@@ -808,6 +812,49 @@ impl App {
             "store" => {
                 n.add_storage(&arg).await?;
                 self.status = "paired: /store here keeps a space there".into();
+            }
+            "shared" => {
+                let v = n.sharing();
+                let row = |(i, f): (usize, &(Id, Id, String, u64))| {
+                    let sp = n.view(&f.1, |s| s.name().to_string());
+                    format!("{}  {}  ({})", i + 1, f.2, sp.unwrap_or_default())
+                };
+                let v: Vec<_> = v.iter().enumerate().map(row).collect();
+                self.notice = Some(match v.is_empty() {
+                    true => "Nothing is served from this machine.".into(),
+                    false => v.join("\n") + "\n\n:unshare N stops one",
+                });
+            }
+            "unshare" => {
+                let i: usize =
+                    arg.parse().context(":unshare N (see :shared)")?;
+                let v = n.sharing();
+                let f = v.get(i.wrapping_sub(1)).context("no such file")?;
+                n.unshare(&f.0).await?;
+                self.status = format!("{} is no longer served", f.2);
+            }
+            "owner" => {
+                self.post(Op::Owner { user: self.user(&arg)? }).await?;
+                self.status = "the space is theirs now".into();
+            }
+            "devices" => {
+                let now = irch_core::now();
+                let row = |(d, t): (iroh::EndpointId, u64)| {
+                    let ago = now.saturating_sub(t) / 60_000;
+                    let me = if d == n.device() { "  (this one)" } else { "" };
+                    format!("{}  {ago} min ago{me}", d.fmt_short())
+                };
+                let v: Vec<_> = n.devices().into_iter().map(row).collect();
+                self.notice = Some(v.join("\n"));
+            }
+            "retire" => {
+                ensure!(
+                    arg == "yes",
+                    ":retire yes ends this identity for good"
+                );
+                n.burn().await?;
+                self.status =
+                    "retired: start a new identity, get new invites".into();
             }
             "invisible" => {
                 n.set_invisible(!n.invisible()).await;

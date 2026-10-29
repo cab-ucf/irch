@@ -124,6 +124,15 @@ in {
           ProtectKernelTunables = true; ProtectControlGroups = true;
           RestrictSUIDSGID = true; LockPersonality = true;
           SystemCallArchitectures = "native";
+          # No privileges, no other processes, no new code in memory; only
+          # the network (netlink: iroh watches the interfaces).
+          CapabilityBoundingSet = ""; AmbientCapabilities = "";
+          ProtectProc = "invisible"; ProcSubset = "pid";
+          ProtectKernelModules = true; ProtectKernelLogs = true;
+          ProtectClock = true; ProtectHostname = true;
+          RestrictNamespaces = true; RestrictRealtime = true;
+          MemoryDenyWriteExecute = true;
+          RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" ];
         };
       };
       systemd.paths.irch-new = {

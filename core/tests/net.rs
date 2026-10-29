@@ -312,9 +312,10 @@ async fn a_ring_tells_a_sleeping_phone_what_rang() {
     until("b in the DM", || b.spaces().contains(&dm)).await;
     let url = wake::doorbell(&db, &Net::Direct).await.unwrap();
     b.set_push(Some(url.clone())).await;
+    // Each space has its own ring code, made from b's doorbell.
+    let ring = |p: &(iroh::EndpointId, String)| p.1.starts_with("irch:ring:");
     let told = |s: &Id| {
-        a.view(s, |st| st.pushes_of(None).iter().any(|p| p.1 == url))
-            == Some(true)
+        a.view(s, |st| st.pushes_of(None).iter().any(ring)) == Some(true)
     };
     until("a knows b's doorbell", || told(&id) && told(&dm)).await;
     b.notices(); // asked once: what comes next is news
@@ -416,7 +417,7 @@ async fn offered_files_go_from_device_to_members_only() {
     let src = dir("src").join("big.bin");
     std::fs::create_dir_all(src.parent().unwrap()).unwrap();
     std::fs::write(&src, &big).unwrap();
-    let f = a.offer(&src, None).await.unwrap();
+    let f = a.offer(&id, &src, None).await.unwrap();
     assert!(f.offered() && f.size == big.len() as u64 && f.name == "big.bin");
     // Said to be a byte, to open in place: refused before any of it comes.
     let tiny = irch_core::File { size: 1, ..f.clone() };
@@ -440,6 +441,10 @@ async fn offered_files_go_from_device_to_members_only() {
     a.shutdown().await;
     let got = c.save(&id, &f, &dir("c")).await.unwrap();
     assert!(std::fs::read(got).unwrap() == big, "from b, as shared");
+    // Stopped: no longer listed, nor served from b to this space's others.
+    assert!(b.sharing().iter().any(|x| x.0 == f.hash && x.1 == id));
+    b.unshare(&f.hash).await.unwrap();
+    assert!(b.sharing().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -664,9 +669,8 @@ async fn writing_rings_a_sleeping_phone() {
     b.join(&a.invite(&id).await.unwrap()).await.unwrap();
     let url = wake::doorbell(&db, &Net::Direct).await.unwrap();
     b.set_push(Some(url.clone())).await;
-    let told = |n: &Node| {
-        n.view(&id, |s| s.pushes_of(None).iter().any(|p| p.1 == url))
-    };
+    let ring = |p: &(iroh::EndpointId, String)| p.1.starts_with("irch:ring:");
+    let told = |n: &Node| n.view(&id, |s| s.pushes_of(None).iter().any(ring));
     until("a knows b's doorbell", || told(&a) == Some(true)).await;
     let b_id = b.id();
     b.shutdown().await;

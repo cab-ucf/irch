@@ -29,6 +29,11 @@ pub fn rand<const N: usize>() -> [u8; N] {
     b
 }
 
+/// Equal, in time that says nothing about where they differ.
+pub fn same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0, |x, (a, b)| x | (a ^ b)) == 0
+}
+
 fn aead(key: &Key) -> XChaCha20Poly1305 {
     XChaCha20Poly1305::new(key.into())
 }

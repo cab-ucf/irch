@@ -1,6 +1,8 @@
 # Self-updating irch: irm $R/install.ps1 | iex
 # -Server: an always-on storage node instead (a task, at login).
 # Fetched by PowerShell, it is not marked as from the web: no SmartScreen.
+# Trusted as GitHub serves it; every update after is checked against
+# irch's key (Windows has no minisign to check this first one).
 param([switch]$Server)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'

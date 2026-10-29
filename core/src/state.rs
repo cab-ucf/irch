@@ -44,6 +44,8 @@ pub struct Thread {
     pub name: String,
     pub count: usize,
     pub last: u64,
+    /// Only its starter replied: they may still delete it.
+    pub alone: bool,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -72,7 +74,11 @@ struct Post {
 
 #[derive(Default)]
 pub struct State {
+    /// Who made it (its id is bound to them); `head` owns it now.
     pub owner: Id,
+    head: Id,
+    // Identities retired, and from when.
+    burned: HashMap<Id, Pos>,
     pub dm: Option<Id>,
     hint: String,
     control: BTreeMap<Pos, (Id, Op)>,
@@ -107,7 +113,8 @@ pub struct State {
 impl State {
     pub fn new(inv: &Invite) -> Self {
         let (owner, dm, hint) = (inv.owner, inv.dm, inv.name.clone());
-        let mut s = Self { owner, dm, hint, ..Default::default() };
+        let head = owner;
+        let mut s = Self { owner, head, dm, hint, ..Default::default() };
         s.refold();
         s
     }
@@ -155,7 +162,11 @@ impl State {
             }
             Op::React { target, emoji, on } => {
                 let r = self.reacts.entry(target).or_default();
+                // 20 kinds per person and message: no wall of reactions.
+                let mine = r.iter().filter(|((a, _), v)| *a == s.author && v.1);
+                let full = on && mine.count() >= 20;
                 match r.get(&(s.author, emoji.clone())) {
+                    None if full => (false, false),
                     Some((p, _)) if *p >= at => (false, false),
                     _ => (
                         r.insert((s.author, emoji), (at, on)) != Some((at, on)),
@@ -200,6 +211,7 @@ impl State {
         self.holds = BTreeMap::new();
         (self.spaces, self.storage) = (BTreeMap::new(), BTreeMap::new());
         self.stored = BTreeMap::new();
+        (self.head, self.burned) = (self.owner, HashMap::new());
         if self.dm.is_some() {
             self.channels.insert(DM, "dm".into());
         }
@@ -207,8 +219,17 @@ impl State {
         for (at, (a, op)) in &control {
             let role = self.role(a);
             let (admin, own) = (role == Role::Admin, *a == self.owner);
+            let head = *a == self.head;
             match op {
                 _ if role == Role::Banned || self.stale_at(at, a) => {}
+                Op::Burn => drop(self.burned.insert(*a, *at)),
+                Op::Owner { user }
+                    if head && *user != *a && !self.out(user) =>
+                {
+                    self.roles.insert(*a, Role::Admin);
+                    self.roles.remove(user);
+                    self.head = *user;
+                }
                 Op::Profile { name, kem } => {
                     let n = crate::op::name(name);
                     self.profiles.insert(*a, (n, kem.clone()));
@@ -229,10 +250,10 @@ impl State {
                 Op::Order { channels } if admin => {
                     self.order = channels.clone()
                 }
-                Op::Role { user, role: r } if admin && *user != self.owner => {
+                Op::Role { user, role: r } if admin && *user != self.head => {
                     let admins =
                         *r == Role::Admin || self.role(user) == Role::Admin;
-                    if own || !admins {
+                    if head || !admins {
                         self.roles.insert(*user, *r);
                         if *r == Role::Banned {
                             self.bans.push((*at, *user));
@@ -302,7 +323,23 @@ impl State {
 
     fn stale_at(&self, at: &Pos, a: &Id) -> bool {
         let tags = self.sealed.get(&at.1);
-        tags.is_some_and(|t| t.iter().all(|t| self.stale(t, at, a)))
+        self.burned.get(a).is_some_and(|b| at > b)
+            || tags.is_some_and(|t| t.iter().all(|t| self.stale(t, at, a)))
+    }
+
+    /// Banned, or retired: no keys, no wakes, no calls, no say.
+    pub fn out(&self, u: &Id) -> bool {
+        self.role(u) == Role::Banned || self.burned.contains_key(u)
+    }
+
+    /// Signed by an identity after it was retired.
+    pub fn burned_after(&self, at: &Pos, a: &Id) -> bool {
+        self.burned.get(a).is_some_and(|b| at > b)
+    }
+
+    /// Who owns it now.
+    pub fn head(&self) -> Id {
+        self.head
     }
 
     pub fn push(&self, a: &Id, d: &EndpointId) -> Option<&str> {
@@ -311,7 +348,7 @@ impl State {
 
     pub fn pushes_of(&self, who: Option<&Id>) -> Vec<(EndpointId, String)> {
         let ok = |((a, _), (at, _)): &(&(Id, EndpointId), &(Pos, _))| {
-            self.role(a) != Role::Banned && !self.stale_at(at, a)
+            !self.out(a) && !self.stale_at(at, a)
         };
         // A few per member: anyone may claim any device.
         let p = self.pushes.iter().filter(ok);
@@ -339,7 +376,7 @@ impl State {
 
     pub fn role(&self, user: &Id) -> Role {
         match self.roles.get(user) {
-            _ if *user == self.owner => Role::Admin,
+            _ if *user == self.head => Role::Admin,
             r => r.copied().unwrap_or_default(),
         }
     }
@@ -355,7 +392,7 @@ impl State {
 
     pub fn kem(&self, user: &Id) -> Option<&[u8]> {
         let k = &self.profiles.get(user)?.1;
-        (!k.is_empty() && self.role(user) != Role::Banned).then_some(k)
+        (!k.is_empty() && !self.out(user)).then_some(k)
     }
 
     pub fn channels(&self) -> Vec<(Ch, String)> {
@@ -405,6 +442,7 @@ impl State {
         {
             return None;
         }
+        let alone = seen.iter().all(|(_, p)| p.author == by);
         let topic = topic.map(|t| t.1.clone()).filter(|n| !n.is_empty());
         let text = self.post(&root).and_then(|p| self.resolve(&root, p));
         let line = text
@@ -412,7 +450,7 @@ impl State {
             .and_then(|t| t.0.lines().find(|l| !l.trim().is_empty()))
             .map(|l| l.chars().take(48).collect());
         let name = topic.or(line).unwrap_or("Thread".into());
-        Some(Thread { id: *ch, root, parent, by, name, count, last })
+        Some(Thread { id: *ch, root, parent, by, name, count, last, alone })
     }
 
     pub fn threads(&self) -> Vec<Thread> {
@@ -463,7 +501,7 @@ impl State {
         let banned = |u: &Id| self.role(u) == Role::Banned;
         let e = self.epoch();
         let after = |at: &Pos| e.is_none_or(|e| *at > e.at);
-        e.is_some_and(|e| e.to.iter().any(banned))
+        e.is_some_and(|e| e.to.iter().any(|u| self.out(u)))
             || self.bans.iter().any(|(at, u)| after(at) && banned(u))
     }
 
@@ -472,7 +510,8 @@ impl State {
         let banned = |u: &Id| self.role(u) == Role::Banned;
         let bans = self.bans.iter().filter(|(_, u)| banned(u));
         let e = self.epoch().map(|e| e.at.0);
-        bans.map(|(at, _)| at.0).chain(e).max().unwrap_or(0)
+        let burns = self.burned.values().map(|at| at.0);
+        bans.map(|(at, _)| at.0).chain(e).chain(burns).max().unwrap_or(0)
     }
 
     pub fn hosts(&self) -> Vec<EndpointAddr> {
@@ -504,16 +543,21 @@ impl State {
     }
 
     pub fn owner_of(&self, d: &EndpointId) -> Option<Id> {
-        let mine = self
-            .devices
-            .iter()
-            .filter(|((x, a), _)| x == d && self.role(a) != Role::Banned);
+        let mine =
+            self.devices.iter().filter(|((x, a), _)| x == d && !self.out(a));
         mine.max_by_key(|(_, t)| **t).map(|((_, a), _)| *a)
     }
 
+    /// `user`'s devices, and when each last wrote (never ahead of now).
+    pub fn devices_of(&self, user: &Id) -> Vec<(EndpointId, u64)> {
+        let mine = self.devices.iter().filter(|((_, a), _)| a == user);
+        let mut v: Vec<_> = mine.map(|((d, _), t)| (*d, *t)).collect();
+        v.sort_by_key(|x| std::cmp::Reverse(x.1));
+        v
+    }
+
     pub fn devices(&self, n: usize) -> Vec<EndpointId> {
-        let ok =
-            |((_, a), _): &(&(EndpointId, Id), _)| self.role(a) != Role::Banned;
+        let ok = |((_, a), _): &(&(EndpointId, Id), _)| !self.out(a);
         let v = self.devices.iter().filter(ok).map(|((d, _), t)| (*t, *d));
         let mut v: Vec<_> = v.collect();
         v.sort_unstable_by(|a, b| b.cmp(a));
@@ -1060,6 +1104,83 @@ mod tests {
         assert!(st.leaks() && st.horizon() == 240);
         st.extend([op(241, o, rekey(5, &[]))]);
         assert!(!st.leaks());
+    }
+
+    #[test]
+    fn owners_hand_on_and_the_lost_are_retired() {
+        let [o, a, b] = people();
+        let mut st = State::new(&Invite::new(o, "", None));
+        let rekey = |t, to: &[Id]| Op::Rekey {
+            epoch: [t; 8],
+            boxes: to.iter().map(|u| (*u, vec![])).collect(),
+        };
+        let name = |n: &str| Op::Profile { name: n.into(), kem: vec![1] };
+        st.extend([
+            op(1, o, Op::Channel { id: CH, name: Some("g".into()) }),
+            op(2, a, name("a")),
+            op(3, b, name("b")),
+            op(4, o, rekey(1, &[o, a, b])),
+            op(5, o, Op::Owner { user: a }),
+            op(6, o, Op::Role { user: b, role: Role::Admin }),
+        ]);
+        assert_eq!(st.head(), a);
+        assert_eq!(st.role(&o), Role::Admin, "the old owner stays an admin");
+        assert_eq!(st.role(&b), Role::Member, "only the owner makes admins");
+        st.extend([op(7, a, Op::Role { user: b, role: Role::Admin })]);
+        assert_eq!(st.role(&b), Role::Admin, "and the new one may");
+        // b's phone is stolen: b retires the identity; the thief writes on.
+        st.extend([
+            op(8, b, post("before", None)),
+            op(9, b, Op::Burn),
+            op(10, b, post("thief", None)),
+            op(11, b, name("not b")),
+        ]);
+        let texts: Vec<_> =
+            st.messages(&CH, None, 9).into_iter().map(|m| m.text).collect();
+        assert_eq!(texts, ["before"]);
+        assert!(st.kem(&b).is_none() && st.display_name(&b) == "b");
+        assert!(st.leaks(), "b holds the key: time to rekey");
+        assert!(st.horizon() >= 9);
+        st.extend([op(12, a, rekey(2, &[o, a]))]);
+        assert!(!st.leaks());
+    }
+
+    #[test]
+    fn reactions_stop_at_twenty_kinds_a_person() {
+        let [o, a, _] = people();
+        let mut st = State::new(&Invite::new(o, "", None));
+        st.extend([
+            op(1, o, Op::Channel { id: CH, name: Some("g".into()) }),
+            op(2, o, post("hi", None)),
+        ]);
+        let react = |n: u8| Op::React {
+            target: Id([2; 32]),
+            emoji: n.to_string(),
+            on: true,
+        };
+        st.extend((10..40).map(|n| op(n, a, react(n))));
+        assert_eq!(st.messages(&CH, None, 1)[0].reactions.len(), 20);
+    }
+
+    #[test]
+    fn a_thread_says_whether_its_starter_alone_replied() {
+        let [o, a, _] = people();
+        let mut st = State::new(&Invite::new(o, "", None));
+        let t = Id([2; 32]).thread();
+        let say = |ch, text: &str| Op::Post {
+            channel: ch,
+            text: text.into(),
+            reply: None,
+            files: vec![],
+        };
+        st.extend([
+            op(1, o, Op::Channel { id: CH, name: Some("g".into()) }),
+            op(2, a, say(CH, "root")),
+            op(3, a, say(t, "mine")),
+        ]);
+        assert!(st.thread(&t).unwrap().alone);
+        st.extend([op(4, o, say(t, "theirs"))]);
+        assert!(!st.thread(&t).unwrap().alone);
     }
 
     #[test]

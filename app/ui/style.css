@@ -1437,3 +1437,28 @@ video.scan {
 .voice { display: flex; flex-direction: column; gap: 4px; }
 .voice audio { max-width: 320px; height: 36px; }
 .channel[draggable="true"] { cursor: grab; }
+
+/* Keyboard users see where they are. */
+[role="button"]:focus-visible, button:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: -2px;
+}
+.pending-note { color: var(--dim); font-size: 12px; font-style: italic; }
+.url {
+  font-family: var(--mono, monospace);
+  word-break: break-all;
+  background: var(--field);
+  padding: 8px;
+  border-radius: 6px;
+}
+.row.shared {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 6px 0;
+}
+.row.shared small { color: var(--muted); }
+#locked .btn { margin-left: 8px; }
+.choice.danger { color: var(--red); }
+mark { background: var(--mention-bg); color: var(--text-strong); }
