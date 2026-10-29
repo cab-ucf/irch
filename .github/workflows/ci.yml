@@ -62,7 +62,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo test -p irch-core
       - run: cargo build --release -p irch -p irch-app
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: irch-${{ runner.os }}
           path: |
@@ -110,12 +110,12 @@ jobs:
           target: google_apis
           disable-animations: true
           script: sh app/smoke.sh irch.apk evidence
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: irch-android
           path: irch.apk
           retention-days: 14
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: android-evidence
@@ -146,7 +146,7 @@ jobs:
         working-directory: app
         run: cargo tauri ios build --ci --no-sign --target aarch64
       - run: mv app/gen/apple/build/arm64/irch.ipa irch.ipa
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: irch-ios
           path: irch.ipa

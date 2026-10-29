@@ -102,7 +102,7 @@ jobs:
             tar -C $b/macos -czf out/irch_${{ matrix.arch }}.app.tar.gz irch.app
           fi
           ls -l out
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: desktop-${{ matrix.target }}
           path: out/*
@@ -138,7 +138,7 @@ jobs:
           --ci --apk --target aarch64
       - run: mkdir out && cp app/gen/android/app/build/outputs/apk/*/release/*.apk
           out/unsigned.apk
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: android
           path: out/*
@@ -171,7 +171,7 @@ jobs:
         working-directory: app
         run: cargo tauri ios build --ci --no-sign --target aarch64
       - run: mkdir out && mv app/gen/apple/build/arm64/irch.ipa out/irch.ipa
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ios
           path: out/*
