@@ -15,7 +15,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 data-encoding = "2"
-dirs = "6"
+dirs = "7"
 iroh = { version = "1.4", default-features = false }
 n0-future = "0.3"
 serde_json.workspace = true
