@@ -268,7 +268,7 @@ jobs:
           "$tools/zipalign" -f 4 art/unsigned.apk a.apk
           "$tools/apksigner" sign --ks "$RUNNER_TEMP/irch.jks" \
             --ks-pass env:PW --ks-key-alias irch --out art/irch.apk a.apk
-          rm "$RUNNER_TEMP/irch.jks" art/unsigned.apk a.apk
+          rm -f "$RUNNER_TEMP/irch.jks" art/unsigned.apk a.apk art/*.idsig
       - name: The source (nixos.nix builds it), the installers, the icon
         run: |
           git archive --format=tar.gz -o art/source.tar.gz HEAD
