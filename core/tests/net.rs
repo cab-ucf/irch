@@ -714,6 +714,49 @@ async fn writing_rings_a_sleeping_phone() {
     assert!(woke.expect("a new DM rings").unwrap().is_ok());
 }
 
+/// A call to a sleeping phone shows the moment its doorbell rings, from
+/// what its node left at its nap: no node starts first. Hung up, it stops.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_shows_on_a_sleeping_phone_at_once() {
+    use irch_core::{state::DM, wake};
+    let db = dir("b");
+    let a = node("a").await;
+    let b = start(&db, "b", None, false).await;
+    let id = a.create("hub").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let keyed = || a.view(&id, |s| s.kem(&b.id()).is_some()) == Some(true);
+    until("b's key", keyed).await;
+    let dm = a.dm(&id, &b.id()).await.unwrap();
+    until("b in the DM", || b.spaces().contains(&dm)).await;
+    let url = wake::doorbell(&db, &Net::Direct).await.unwrap();
+    b.set_push(Some(url)).await;
+    let ring = |p: &(iroh::EndpointId, String)| p.1.starts_with("irch:ring:");
+    let told = || a.view(&dm, |s| s.pushes_of(None).iter().any(ring));
+    until("a knows b's doorbell in the DM", || told() == Some(true)).await;
+    b.shutdown().await;
+    drop(b);
+
+    let d = db.clone();
+    let phone = tokio::spawn(async move { wake::rung(&d, &Net::Direct).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let t = std::time::Instant::now();
+    a.call(Some((dm, DM))).await.unwrap();
+    let news = phone.await.unwrap().unwrap().expect("the call, sealed");
+    let n = Node::peek(&db, &news).expect("shown at once");
+    let ms = t.elapsed().as_millis();
+    assert!(ms < 2000, "{ms} ms");
+    assert!(n.ring && !n.hush, "rings");
+    assert_eq!((n.space, n.room), (dm, DM));
+    assert_eq!((&n.title[..], &n.body[..]), ("a", "is calling you"));
+
+    let d = db.clone();
+    let phone = tokio::spawn(async move { wake::rung(&d, &Net::Direct).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    a.call(None).await.unwrap();
+    let news = phone.await.unwrap().unwrap().expect("its end");
+    assert!(Node::peek(&db, &news).expect("hushed").hush);
+}
+
 /// A member's photo waits on the space's storage node, though it is not
 /// theirs: everyone sees it while its sender is away.
 #[tokio::test(flavor = "multi_thread")]

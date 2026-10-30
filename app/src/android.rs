@@ -164,7 +164,8 @@ pub extern "system" fn Java_dev_irch_chat_Wake_moved(_: JNIEnv, _: JClass) {
     });
 }
 
-/// No push app: a service waits on the doorbell, never holding the CPU.
+/// No push app: a service waits on the doorbell; a call it brings, shown
+/// at once (the rest is caught up after).
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_irch_chat_Wake_rung<'l>(
     mut env: JNIEnv<'l>,
@@ -175,11 +176,11 @@ pub extern "system" fn Java_dev_irch_chat_Wake_rung<'l>(
     let dir = text(&mut env, &dir).unwrap_or_default();
     let dir = irch_core::profile(std::path::Path::new(&dir));
     reply(env, ctx, async {
-        if let Err(e) = rung(dir).await {
-            tracing::warn!("doorbell: {e:#}");
+        let r = rung(dir).await;
+        if r.is_err() {
             tokio::time::sleep(Duration::from_secs(30)).await;
         }
-        Ok(vec![])
+        r
     })
 }
 
@@ -290,7 +291,8 @@ async fn node(dir: PathBuf) -> anyhow::Result<std::sync::Arc<Node>> {
 }
 
 /// Until the doorbell rings, or half an hour in case a ring was missed.
-async fn rung(dir: PathBuf) -> anyhow::Result<()> {
+/// Never deaf: a running node is handed the news too.
+async fn rung(dir: PathBuf) -> anyhow::Result<Vec<Notice>> {
     static TOLD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
     let net = crate::config(dir.clone(), None, None)?.net;
     let url = wake::doorbell(&dir, &net).await?;
@@ -298,19 +300,23 @@ async fn rung(dir: PathBuf) -> anyhow::Result<()> {
     if told.as_ref() != Some(&url) {
         node(dir.clone()).await?.set_push(Some(url.clone())).await;
         *TOLD.lock().unwrap_or_else(|e| e.into_inner()) = Some(url);
-    }
-    // A running node tells of news itself; the doorbell waits for its nap.
-    let mut away = 0;
-    while crate::FG.load(SeqCst) || crate::running().is_some() {
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        away = if crate::FG.load(SeqCst) { 0 } else { away + 5 };
-        if away >= 60 {
+        // A minute to tell the spaces, then asleep (unless in sight).
+        tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
             crate::nap().await;
-        }
+        });
     }
     let half = Duration::from_secs(30 * 60);
-    if let Ok(news) = tokio::time::timeout(half, wake::rung(&dir, &net)).await {
-        NEWS.lock().unwrap_or_else(|e| e.into_inner()).extend(news?);
+    let Ok(news) = tokio::time::timeout(half, wake::rung(&dir, &net)).await
+    else {
+        return Ok(vec![]);
+    };
+    let Some(news) = news? else { return Ok(vec![]) };
+    let hide = dir.join("private").exists();
+    let shown = Node::peek(&dir, &news).filter(|_| !crate::FG.load(SeqCst));
+    match crate::running() {
+        Some(n) => n.deliver(news),
+        None => NEWS.lock().unwrap_or_else(|e| e.into_inner()).push(news),
     }
-    Ok(())
+    Ok(shown.into_iter().map(|x| crate::veil(x, hide)).collect())
 }

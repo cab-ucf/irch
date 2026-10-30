@@ -158,6 +158,18 @@ pub struct Notice {
     pub hush: bool,
 }
 
+/// A space as a ring needs it before any node starts: its current key,
+/// whether its calls ring here, who is in it and its rooms' names.
+#[derive(Serialize, Deserialize)]
+struct Page {
+    name: String,
+    dm: bool,
+    ring: bool,
+    key: Key,
+    names: BTreeMap<Id, String>,
+    rooms: BTreeMap<Ch, String>,
+}
+
 pub struct Space {
     pub id: Id,
     inv: Option<Invite>,
@@ -1001,6 +1013,88 @@ impl Node {
         out
     }
 
+    /// Left for a sleeping phone (`peek`): each space's key, as on disk
+    /// beside the seed that unlocks them all anyway.
+    fn phonebook(&self) {
+        let me = self.id();
+        let named = |u: &Id| {
+            let mut all = self.spaces().into_iter();
+            all.find_map(|sp| {
+                self.view(&sp, |s| s.profile(u).map(str::to_string))
+            })
+            .flatten()
+        };
+        let mut pb = BTreeMap::new();
+        for sp in self.all() {
+            let Some(inv) = &sp.inv else { continue };
+            let (loud, level) = (self.loud(&sp.id), self.level(&sp.id));
+            let ids: Vec<Id> = self
+                .view(&sp.id, |s| s.members().into_iter())
+                .into_iter()
+                .flatten()
+                .filter(|m| m.role != Role::Banned && m.id != me)
+                .map(|m| m.id)
+                .collect();
+            let names = ids.iter().map(|u| (*u, named(u).unwrap_or_default()));
+            let names = names.collect();
+            let b = lock(&sp.book);
+            let (key, locked) = b.key(inv);
+            let (s, dm) = (&b.st, b.st.dm.is_some());
+            let ring = level != Level::Off && (dm || level == Level::All);
+            let page = Page {
+                name: s.name().to_string(),
+                dm,
+                ring: ring && loud,
+                key,
+                names,
+                rooms: s.channels().into_iter().collect(),
+            };
+            if !locked {
+                pb.insert(sp.id, page);
+            }
+        }
+        if let Err(e) = store::save(&self.dir.join("phonebook"), &pb) {
+            warn!("phonebook: {e}");
+        }
+    }
+
+    /// A ring shown the moment it comes, before any node starts: a call
+    /// that rings here, or its end, if the phonebook knows its space.
+    pub fn peek(
+        dir: &Path,
+        (space, raw): &crate::wake::News,
+    ) -> Option<Notice> {
+        let pb: BTreeMap<Id, Page> = store::load(&dir.join("phonebook"));
+        let p = pb.get(space)?;
+        let e: Env = postcard::from_bytes(raw).ok()?;
+        let (s, _) = op::open(space, &p.key, &e, None)?;
+        let who = p.names.get(&s.author)?;
+        let who = match who.is_empty() {
+            true => s.author.to_string()[..8].to_string(),
+            false => who.clone(),
+        };
+        let Op::Call { channel } = s.op else { return None };
+        let n = |room, title, body: &str, hush: bool| Notice {
+            space: *space,
+            room,
+            title,
+            body: body.into(),
+            ring: !hush,
+            hush,
+        };
+        match channel {
+            None => Some(n(crate::state::DM, String::new(), "", true)),
+            // A minute either way: clocks differ, and late it has ended.
+            Some(_) if !p.ring || e.ts.abs_diff(now()) > 60_000 => None,
+            Some(ch) if p.dm => Some(n(ch, who, "is calling you", false)),
+            Some(ch) => {
+                let room = p.rooms.get(&ch).map_or("call", String::as_str);
+                let title = format!("{who} in #{room} ({})", p.name);
+                Some(n(ch, title, "is calling the channel", false))
+            }
+        }
+    }
+
     pub fn pushed(&self) -> bool {
         lock(&self.prefs).push.is_some()
     }
@@ -1014,6 +1108,7 @@ impl Node {
         for id in self.spaces() {
             let _ = self.tell_push(&id).await;
         }
+        self.phonebook();
     }
 
     /// Our push, as this space's members should have it: a doorbell's
@@ -3112,6 +3207,7 @@ impl Node {
     }
 
     pub async fn shutdown(&self) {
+        self.phonebook();
         let call = lock(&self.call).take();
         if let Some(sp) = call.and_then(|c| self.get(&c.space).ok()) {
             self.signal(&sp, Op::Call { channel: None }).await;

@@ -91,7 +91,13 @@ pub async fn doorbell(dir: &Path, net: &Net) -> Result<String> {
     if matches!(net, Net::Default | Net::Relay(_)) {
         let _ = timeout(SLOW, ep.online()).await; // a relay, to be found by
     }
-    Ok(code("wake", &(ep.addr(), secret)))
+    // Through a relay, the relay alone: a phone's own addresses change with
+    // every network, and each change would retell every space.
+    let mut at = ep.addr();
+    if at.addrs.iter().any(|a| a.is_relay()) {
+        at.addrs.retain(|a| a.is_relay());
+    }
+    Ok(code("wake", &(at, secret)))
 }
 
 /// Until rung with the secret; with news, unless an older irch rang bare.

@@ -80,6 +80,9 @@ fun postCall(ctx: Context, space: String, room: String, who: String) {
   channel(ctx, CALLS, "Calls", Settings.System.DEFAULT_RINGTONE_URI,
     AudioAttributes.USAGE_NOTIFICATION_RINGTONE, longArrayOf(0, 1000, 1000))
   val tag = space + room
+  // Shown from the doorbell already: posted again, it would restart.
+  val nm = NotificationManagerCompat.from(ctx)
+  if (nm.activeNotifications.any { it.tag == tag && it.id == CALL }) return
   val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
   val open = { verb: String, code: Int ->
     // Only this notification's token answers; other links just ring.

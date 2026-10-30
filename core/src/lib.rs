@@ -100,7 +100,7 @@ pub fn profile(root: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// What signing out takes away.
-pub const MINE: [&str; 15] = [
+pub const MINE: [&str; 16] = [
     "seed",
     "device",
     "local",
@@ -117,6 +117,7 @@ pub const MINE: [&str; 15] = [
     "bells",
     "sealed",
     "shared",
+    "phonebook",
 ];
 
 /// Unix time in milliseconds.

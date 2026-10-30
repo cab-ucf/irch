@@ -24,7 +24,7 @@ object Wake {
 
   @JvmStatic external fun moved()
 
-  /** Waits for the doorbell, letting the CPU sleep. */
+  /** Waits for the doorbell; a call it brings, as notices to show now. */
   @JvmStatic external fun rung(ctx: Context, dir: String): String
 
   /** Hand Android's context back before the activity's runtime takes it. */
@@ -138,8 +138,14 @@ class IrchLive : Service() {
       Thread {
         while (true) {
           awake?.acquire(40 * 60_000L) // the doorbell waits at most 30 min
-          runCatching { Wake.rung(applicationContext, dataDir.absolutePath) }
-          catchUp(this, null)
+          runCatching {
+            val got = JSONArray(Wake.rung(applicationContext, dataDir.absolutePath))
+            for (k in 0 until got.length()) alert(this, got.getJSONObject(k))
+          }
+          // Caught up beside it: the doorbell listens again at once.
+          if (catching.compareAndSet(false, true)) Thread {
+            try { catchUp(this, null) } finally { catching.set(false) }
+          }.start()
         }
       }.start()
     }
@@ -153,6 +159,7 @@ class IrchLive : Service() {
 
   companion object {
     val running = java.util.concurrent.atomic.AtomicBoolean(false)
+    val catching = java.util.concurrent.atomic.AtomicBoolean(false)
     var awake: android.os.PowerManager.WakeLock? = null
   }
 }
