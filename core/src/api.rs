@@ -149,6 +149,11 @@ pub enum Call {
         room: Option<Ch>,
     },
     Hangup,
+    /// The microphone, while the call's voice is ours.
+    Mute {
+        on: bool,
+    },
+    Levels,
     /// A call to us rings here.
     Ringing {
         space: Id,
@@ -164,8 +169,9 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
     Ok(match c {
         Call::Me => {
             let (id, name, invisible) = (n.id(), n.name(), n.invisible());
-            let call =
-                n.in_call().map(|(s, c)| json!({ "space": s, "channel": c }));
+            let call = n.in_call().map(|(s, c)| {
+                json!({ "space": s, "channel": c, "native": n.native() })
+            });
             json!({
                 "id": id, "name": name, "invisible": invisible, "call": call,
                 "push": n.pushed(),
@@ -305,6 +311,8 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
             json!(n.call(Some((space, channel))).await?)
         }
         Call::Hangup => json!(n.call(None).await?),
+        Call::Mute { on } => json!(n.mute(on)),
+        Call::Levels => json!(n.levels()),
         Call::Ringing { space, channel } => {
             json!(n.ringing(&space, channel).await)
         }

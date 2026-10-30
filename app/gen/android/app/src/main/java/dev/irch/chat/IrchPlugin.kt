@@ -6,8 +6,6 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.media.AudioDeviceInfo
-import android.media.AudioManager
 import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
@@ -21,8 +19,11 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import app.tauri.PermissionState
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
+import app.tauri.annotation.Permission
+import app.tauri.annotation.PermissionCallback
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Channel
 import app.tauri.plugin.Invoke
@@ -64,7 +65,10 @@ class OnArgs {
   var on = false
 }
 
-@TauriPlugin
+@TauriPlugin(permissions = [
+  Permission(strings = [android.Manifest.permission.RECORD_AUDIO],
+    alias = "microphone"),
+])
 class IrchPlugin(private val activity: Activity) : Plugin(activity) {
   override fun load(webView: WebView) {
     if (!notificationsAllowed(activity) && Build.VERSION.SDK_INT >= 33) {
@@ -168,30 +172,19 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     invoke.resolve()
   }
 
-  /** A call, as a phone has one: the voice path (its echo canceller
-   *  works both ways only so), a headset if there is one, else the
-   *  speaker; the screen on, and over the lock screen. Off undoes it all. */
+  /** A call: the screen on, over the lock screen, and the microphone
+   *  allowed before irch's own voice opens it. */
   @Command
   fun inCall(invoke: Invoke) {
     val on = invoke.parseArgs(OnArgs::class.java).on
-    val am = activity.getSystemService(AudioManager::class.java)
-    am.mode = if (on) AudioManager.MODE_IN_COMMUNICATION else AudioManager.MODE_NORMAL
-    if (Build.VERSION.SDK_INT >= 31) {
-      if (on) {
-        val ear = listOf(AudioDeviceInfo.TYPE_WIRED_HEADSET,
-          AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_BLE_HEADSET,
-          AudioDeviceInfo.TYPE_BLUETOOTH_SCO, AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
-        val all = am.availableCommunicationDevices
-        ear.firstNotNullOfOrNull { t -> all.firstOrNull { it.type == t } }
-          ?.let { am.setCommunicationDevice(it) }
-      } else am.clearCommunicationDevice()
-    } else {
-      @Suppress("DEPRECATION")
-      am.isSpeakerphoneOn = on && !am.isWiredHeadsetOn && !am.isBluetoothScoOn
-    }
     activity.runOnUiThread { (activity as? MainActivity)?.overLock(on) }
-    invoke.resolve()
+    if (on && getPermissionState("microphone") != PermissionState.GRANTED) {
+      requestPermissionForAlias("microphone", invoke, "allowed")
+    } else invoke.resolve()
   }
+
+  @PermissionCallback
+  private fun allowed(invoke: Invoke) = invoke.resolve()
 
   @Command
   fun share(invoke: Invoke) {

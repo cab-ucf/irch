@@ -12,6 +12,8 @@ pub mod release;
 pub mod state;
 mod store;
 mod sync;
+#[cfg(feature = "voice")]
+pub mod voice;
 pub mod wake;
 
 pub use node::{Config, Event, Level, Net, Node, Notice, host_name, http};

@@ -31,6 +31,14 @@ postcard = { version = "1", features = ["use-std"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 x-wing = { version = "0.1", features = ["getrandom"] }
 
+# A call's voice, native: the echo canceller hears what plays.
+cpal = { version = "0.18", optional = true }
+sonora = { version = "0.2", optional = true }
+unsafe-libopus = { version = "0.2", optional = true }
+
+[features]
+voice = ["dep:cpal", "dep:sonora", "dep:unsafe-libopus"]
+
 [target.'cfg(not(target_os = "android"))'.dependencies]
 iroh-mainline-address-lookup = "0.6"
 # Desktops trust what the system trusts: a network that inspects TLS too.

@@ -1018,6 +1018,7 @@ async function camera(kind) {
 
 const mute = () => {
   av.call.mic = !av.call.mic;
+  if (av.call.native) quiet(rpc("mute", { on: !av.call.mic }));
   renderCall();
 };
 

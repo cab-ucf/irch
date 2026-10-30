@@ -41,6 +41,10 @@ tauri-plugin-updater = "2"
 # In the tray, and from login: notified whether its window is open or not.
 tauri-plugin-autostart = "2"
 
+# A call's voice, native: everywhere but iOS, whose web view keeps it.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+irch-core = { workspace = true, features = ["voice"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = "2"
 # Whether the tray's library is there (without it, the tray panics).

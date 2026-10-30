@@ -1847,7 +1847,21 @@ impl Node {
         let sp = self.get(&id)?;
         ensure!(!self.locked(&id), LOCKED);
         let run = u64::from_le_bytes(rand());
-        *lock(&self.call) = Some(Call::new(id, ch, run));
+        #[allow(unused_mut)]
+        let mut call = Call::new(id, ch, run);
+        #[cfg(feature = "voice")]
+        {
+            let n = Arc::downgrade(self);
+            let send = move |f: Vec<u8>| {
+                n.upgrade().iter().for_each(|n| n.send_media(&f))
+            };
+            let media = self.media();
+            let start = move || crate::voice::Voice::start(send, media);
+            let v = tokio::task::spawn_blocking(start).await?;
+            // No devices here: the page's audio, as before.
+            call.voice = v.inspect_err(|e| warn!("voice: {e:#}")).ok();
+        }
+        *lock(&self.call) = Some(call);
         let raw = self.signal(&sp, Op::Call { channel: Some(ch) }).await;
         self.emit(Event::Call { space: id });
         self.wake(&id, raw); // sleeping phones: someone is calling
@@ -1891,6 +1905,31 @@ impl Node {
             v.entry(ch).or_default().insert(0, self.id());
         }
         v
+    }
+
+    /// Whether the call's voice is ours, not the page's.
+    pub fn native(&self) -> bool {
+        #[cfg(feature = "voice")]
+        return lock(&self.call).as_ref().is_some_and(|c| c.voice.is_some());
+        #[cfg(not(feature = "voice"))]
+        false
+    }
+
+    pub fn mute(&self, _on: bool) {
+        #[cfg(feature = "voice")]
+        if let Some(v) =
+            lock(&self.call).as_ref().and_then(|c| c.voice.as_ref())
+        {
+            v.mute(_on);
+        }
+    }
+
+    /// Ours and each peer's who spoke lately, while the voice is ours.
+    pub fn levels(&self) -> Option<(f32, Vec<(Id, f32)>)> {
+        #[cfg(feature = "voice")]
+        return lock(&self.call).as_ref()?.voice.as_ref().map(|v| v.levels());
+        #[cfg(not(feature = "voice"))]
+        None
     }
 
     pub fn send_media(&self, f: &[u8]) {

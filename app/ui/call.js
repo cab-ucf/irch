@@ -37,7 +37,7 @@ export const supported = () => typeof AudioEncoder === "function" &&
   typeof VideoDecoder === "function" && !!navigator.mediaDevices;
 export const canShare = () => !!navigator.mediaDevices?.getDisplayMedia;
 
-let ctx, mic, aenc, venc, timer, tuned, said;
+let ctx, mic, aenc, venc, timer, tuned, said, levels;
 // Codecs this device decodes, once asked.
 let decodes = null;
 
@@ -88,9 +88,12 @@ export async function join(space, channel, rpc) {
     await core.invoke("tune", { to: ch });
     tuned = true;
   }
+  // A phone's call: the microphone allowed, the screen on.
+  await quiet(core.invoke("in_call", { on: true }));
   await rpc("ring", { space, channel });
-  // A phone's call mode: its echo canceller both ways, screen on.
-  quiet(core.invoke("in_call", { on: true }));
+  // The core's own voice where it has one: its echo canceller hears what
+  // plays, so both sides speak at once. Else the web view's, as before.
+  call.native = !!(await rpc("me")).call?.native;
   call.on = { space, channel };
   call.since = Date.now();
   call.met = false;
@@ -98,6 +101,19 @@ export async function join(space, channel, rpc) {
   decodes ??= await decodable();
   sayCodecs();
   said = setInterval(sayCodecs, 5000);
+  if (call.native) {
+    shut(ctx);
+    ctx = null;
+    call.mic = true;
+    levels = setInterval(async () => {
+      const [me, them] = (await quiet(rpc("levels"))) ?? [0, []];
+      if (!call.native) return;
+      call.level = me;
+      for (const [id, l] of them) Object.assign(peer(id), {
+        level: l, spoke: Date.now() });
+    }, 150);
+    return call.changed();
+  }
   mic = await navigator.mediaDevices.getUserMedia({ audio: {
     echoCancellation: true, noiseSuppression: true, autoGainControl: true,
   } }).catch(() => null);
@@ -125,8 +141,9 @@ export async function join(space, channel, rpc) {
 export async function leave(rpc) {
   if (!call.on) return;
   call.on = null;
+  call.native = false;
   quiet(core.invoke("in_call", { on: false }));
-  clearInterval(said);
+  [said, levels].forEach(clearInterval);
   await video(null);
   mic?.getTracks().forEach((t) => t.stop());
   [aenc, ctx].forEach(shut);
@@ -243,7 +260,7 @@ export function keep(ids) {
   for (const [id, p] of call.peers) {
     if (ids.includes(id) || Date.now() - p.heard < 5000) continue;
     [p.adec, p.vdec].forEach(shut);
-    p.out.disconnect();
+    p.out?.disconnect();
     call.peers.delete(id);
   }
 }
@@ -252,8 +269,6 @@ function peer(id) {
   let p = call.peers.get(id);
   if (p) return p;
   p = { id, canvas: document.createElement("canvas"), video: 0, level: 0 };
-  p.out = new AudioWorkletNode(ctx, "play");
-  p.out.connect(ctx.destination);
   const adec = () => {
     p.adec = new AudioDecoder({ error: adec, output: (d) => {
       const s = new Float32Array(d.numberOfFrames);
@@ -278,7 +293,11 @@ function peer(id) {
       p.video = Date.now();
     } });
   };
-  adec();
+  if (ctx) {
+    p.out = new AudioWorkletNode(ctx, "play");
+    p.out.connect(ctx.destination);
+    adec();
+  }
   vdec();
   call.peers.set(id, p);
   call.changed();
@@ -300,7 +319,7 @@ function heard(buf) {
     return;
   }
   if (kind === 0) {
-    if (p.adec.state === "configured") {
+    if (p.adec?.state === "configured") {
       p.adec.decode(new EncodedAudioChunk({ type: "key", timestamp, data }));
     }
     return;

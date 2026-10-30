@@ -1,7 +1,7 @@
 # The app and `irch`; nixos.nix builds each release with this.
 { lib, rustPlatform, pkg-config, wrapGAppsHook3, webkitgtk_4_1, libsoup_3
 , glib-networking, gst_all_1, openssl, makeDesktopItem, copyDesktopItems
-, libayatana-appindicator }:
+, libayatana-appindicator, alsa-lib }:
 rustPlatform.buildRustPackage {
   pname = "irch";
   version = (lib.importTOML ./Cargo.toml).workspace.package.version;
@@ -20,7 +20,8 @@ rustPlatform.buildRustPackage {
   nativeBuildInputs = [ pkg-config wrapGAppsHook3 copyDesktopItems ];
   # Calls' codecs through WebKit's GStreamer: Opus (base), VP8 and VP9
   # (good), AV1 and echo cancelling (bad), H.264 (libav).
-  buildInputs = [ webkitgtk_4_1 libsoup_3 glib-networking openssl ]
+  # A call's voice: ALSA, which PipeWire and PulseAudio serve too.
+  buildInputs = [ webkitgtk_4_1 libsoup_3 glib-networking openssl alsa-lib ]
     ++ (with gst_all_1; [
       gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav
     ]);

@@ -30,7 +30,8 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
   storage node); `cd app && cargo tauri dev` or
   `cargo tauri android build --apk`; on a Mac, `cargo tauri ios init`,
   then `cargo tauri ios dev`. Linux needs webkit2gtk-4.1, gtk3,
-  libsoup3 and, for calls, gstreamer plugins base, good, bad and libav.
+  libsoup3, ALSA (libasound2) and, for calls, gstreamer plugins base,
+  good, bad and libav.
 
 ## Features
 
@@ -105,6 +106,9 @@ space = a grow-only set of envs;   state = a deterministic fold of it
 - **Calls are a mesh** over QUIC: Opus datagrams; video in the newest
   codec every listener decodes (AV1, VP9, then VP8 or H.264), one stream
   per group of pictures, so a slow peer skips to the newest keyframe.
+- **A call's voice is native** (not on iPhones): WebRTC's echo canceller
+  (sonora) hears exactly what plays, so both sides talk at once on a
+  speaker; a web view's cannot. Opus in the page's frames: they mix.
 - **Voice messages are Opus in Ogg**, played by decoding them in the app:
   the same in every web view, seekable, the right length.
 - **Sync** compares per-day fingerprints, then sends only missing envs.
