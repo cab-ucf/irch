@@ -164,7 +164,8 @@ pub extern "system" fn Java_dev_irch_chat_Wake_moved(_: JNIEnv, _: JClass) {
     });
 }
 
-/// No push app: a service waits on the doorbell, never holding the CPU.
+/// No push app: a service waits on the doorbell; a call it brings, shown
+/// at once (the rest is caught up after).
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_irch_chat_Wake_rung<'l>(
     mut env: JNIEnv<'l>,
@@ -175,11 +176,11 @@ pub extern "system" fn Java_dev_irch_chat_Wake_rung<'l>(
     let dir = text(&mut env, &dir).unwrap_or_default();
     let dir = irch_core::profile(std::path::Path::new(&dir));
     reply(env, ctx, async {
-        if let Err(e) = rung(dir).await {
-            tracing::warn!("doorbell: {e:#}");
+        let r = rung(dir).await;
+        if r.is_err() {
             tokio::time::sleep(Duration::from_secs(30)).await;
         }
-        Ok(vec![])
+        r
     })
 }
 
@@ -187,11 +188,22 @@ fn text(env: &mut JNIEnv, s: &JString) -> Option<String> {
     (!s.is_null()).then(|| env.get_string(s).ok().map(Into::into))?
 }
 
-fn reply(
+fn reply<T: Serialize + Default>(
     env: JNIEnv,
     ctx: JObject,
-    f: impl Future<Output = anyhow::Result<Vec<Notice>>>,
+    f: impl Future<Output = anyhow::Result<T>>,
 ) -> jstring {
+    hold(&env, &ctx);
+    let r = tauri::async_runtime::block_on(f);
+    let r =
+        r.inspect_err(|e| tracing::warn!("wake: {e:#}")).unwrap_or_default();
+    let json = serde_json::to_string(&r).unwrap_or_default();
+    env.new_string(json).map_or(std::ptr::null_mut(), |s| s.into_raw())
+}
+
+/// Android's context for native code, where the activity's runtime has
+/// not set it.
+fn hold(env: &JNIEnv, ctx: &JObject) {
     if !TAO.load(SeqCst)
         && !OURS.load(SeqCst)
         && let (Ok(vm), Ok(g)) = (env.get_java_vm(), env.new_global_ref(ctx))
@@ -202,11 +214,6 @@ fn reply(
         std::mem::forget(g);
         OURS.store(true, SeqCst);
     }
-    let r = tauri::async_runtime::block_on(f);
-    let r =
-        r.inspect_err(|e| tracing::warn!("wake: {e:#}")).unwrap_or_default();
-    let json = serde_json::to_string(&r).unwrap_or_else(|_| "[]".into());
-    env.new_string(json).map_or(std::ptr::null_mut(), |s| s.into_raw())
 }
 
 /// The activity is starting, and tao brings its own context.
@@ -289,8 +296,9 @@ async fn node(dir: PathBuf) -> anyhow::Result<std::sync::Arc<Node>> {
     Ok(n)
 }
 
-/// Until the doorbell rings, or half an hour in case a ring was missed.
-async fn rung(dir: PathBuf) -> anyhow::Result<()> {
+/// Until the doorbell rings (or half an hour, to look again). Never deaf:
+/// a running node is handed the news too.
+async fn rung(dir: PathBuf) -> anyhow::Result<Shown> {
     static TOLD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
     let net = crate::config(dir.clone(), None, None)?.net;
     let url = wake::doorbell(&dir, &net).await?;
@@ -298,19 +306,95 @@ async fn rung(dir: PathBuf) -> anyhow::Result<()> {
     if told.as_ref() != Some(&url) {
         node(dir.clone()).await?.set_push(Some(url.clone())).await;
         *TOLD.lock().unwrap_or_else(|e| e.into_inner()) = Some(url);
-    }
-    // A running node tells of news itself; the doorbell waits for its nap.
-    let mut away = 0;
-    while crate::FG.load(SeqCst) || crate::running().is_some() {
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        away = if crate::FG.load(SeqCst) { 0 } else { away + 5 };
-        if away >= 60 {
+        // A minute to tell the spaces, then asleep (unless in sight).
+        tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
             crate::nap().await;
-        }
+        });
     }
     let half = Duration::from_secs(30 * 60);
-    if let Ok(news) = tokio::time::timeout(half, wake::rung(&dir, &net)).await {
-        NEWS.lock().unwrap_or_else(|e| e.into_inner()).extend(news?);
+    let Ok(news) = tokio::time::timeout(half, wake::rung(&dir, &net)).await
+    else {
+        return Ok(Shown::default());
+    };
+    let Some(news) = news? else { return Ok(Shown::default()) };
+    Ok(shown(&dir, news))
+}
+
+/// What a ring brings, to show now, and whether to catch up for it. With
+/// irch in use its node takes it; else no node starts (`Node::woken`).
+#[derive(serde::Serialize, Default)]
+struct Shown {
+    show: Vec<Notice>,
+    catch: bool,
+}
+
+fn shown(dir: &std::path::Path, news: News) -> Shown {
+    if let Some(n) = crate::running() {
+        n.deliver(news);
+        return Shown::default();
     }
-    Ok(())
+    let (n, catch) = Node::woken(dir, &news);
+    if catch {
+        NEWS.lock().unwrap_or_else(|e| e.into_inner()).push(news);
+    }
+    let hide = dir.join("private").exists();
+    let n = n.filter(|_| !crate::FG.load(SeqCst));
+    Shown { show: n.into_iter().map(|x| crate::veil(x, hide)).collect(), catch }
+}
+
+/// Firebase: our token to the push servers. False if none took it.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_irch_chat_Wake_fcm<'l>(
+    mut env: JNIEnv<'l>,
+    _: JClass<'l>,
+    ctx: JObject<'l>,
+    dir: JString<'l>,
+    token: JString<'l>,
+) -> jboolean {
+    hold(&env, &ctx);
+    let (dir, token) = (text(&mut env, &dir), text(&mut env, &token));
+    let dir =
+        irch_core::profile(std::path::Path::new(&dir.unwrap_or_default()));
+    let ok = tauri::async_runtime::block_on(async {
+        let n = node(dir).await?;
+        n.set_push(Some(format!("fcm:{}", token.unwrap_or_default()))).await;
+        tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            crate::nap().await;
+        });
+        anyhow::Ok(n.pushing())
+    });
+    ok.unwrap_or(false).into()
+}
+
+/// What Google brought: a ring sealed to us (push.rs), opened here.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_irch_chat_Wake_rang<'l>(
+    mut env: JNIEnv<'l>,
+    _: JClass<'l>,
+    ctx: JObject<'l>,
+    dir: JString<'l>,
+    data: JString<'l>,
+) -> jstring {
+    use data_encoding::BASE64;
+    let (dir, data) = (text(&mut env, &dir), text(&mut env, &data));
+    let dir =
+        irch_core::profile(std::path::Path::new(&dir.unwrap_or_default()));
+    let b =
+        BASE64.decode(data.unwrap_or_default().as_bytes()).unwrap_or_default();
+    reply(env, ctx, async move {
+        let key = wake::push_key(&dir)?;
+        let news = irch_core::push::open(&key, &b).context("not for us")?;
+        Ok(shown(&dir, news))
+    })
+}
+
+/// A push server's Firebase project, found among our storage nodes as
+/// irch starts, for Android to take a token from (IrchPlugin.kt).
+pub async fn firebase(app: tauri::AppHandle, n: std::sync::Arc<Node>) {
+    let Some((f, _)) = n.firebase().await else { return };
+    if let Some(b) = app.try_state::<Bridge>() {
+        b.call("firebase", f).await;
+    }
 }

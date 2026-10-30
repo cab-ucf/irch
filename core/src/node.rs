@@ -4,6 +4,7 @@
 use crate::call::{self, Call};
 use crate::crypto::{Key, Me, kem_open, kem_seal, rand, same};
 use crate::op::{self, Env, File, Invite, Op, Role, Signed, code, tag, uncode};
+use crate::push::Firebase;
 use crate::state::State;
 use crate::store::{self, Log};
 use crate::sync::{self, Admit, Bucket, Hello};
@@ -45,7 +46,7 @@ const RINGS: usize = 10;
 const ONLINE: Duration = Duration::from_secs(150);
 // Someone in a call says so every 15 s.
 const CALLER: Duration = Duration::from_secs(45);
-const RELAYS: [&str; 2] =
+pub(crate) const RELAYS: [&str; 2] =
     ["https://iroh.cxn.center./", "https://use1-1.relay.n0.iroh.link./"];
 pub use crate::op::{MAX_NAME, MAX_TEXT};
 /// What storage nodes keep without their password.
@@ -158,6 +159,21 @@ pub struct Notice {
     pub hush: bool,
 }
 
+/// A space as a ring needs it before any node starts: its current key,
+/// whether its calls ring here, who is in it and its rooms' names.
+#[derive(Serialize, Deserialize)]
+struct Page {
+    name: String,
+    dm: bool,
+    ring: bool,
+    level: Level,
+    // `@our name`, as messages mention us.
+    tag: String,
+    key: Key,
+    names: BTreeMap<Id, String>,
+    rooms: BTreeMap<Ch, String>,
+}
+
 pub struct Space {
     pub id: Id,
     inv: Option<Invite>,
@@ -231,7 +247,7 @@ async fn hold(dir: &Path) -> Result<std::fs::File> {
     bail!("another irch is using {}", dir.display())
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -513,6 +529,8 @@ pub struct Node {
     wake: Mutex<HashMap<String, (Option<Instant>, bool)>>,
     rang: Mutex<HashSet<(Id, Id, Ch)>>,
     push: OnceLock<reqwest::Client>,
+    // Push servers that took our Firebase token, and the ring tokens.
+    via: Mutex<(Vec<EndpointAddr>, Vec<[u8; 16]>)>,
     name: Mutex<String>,
     events: broadcast::Sender<Event>,
     clock: AtomicU64,
@@ -595,6 +613,9 @@ pub(crate) fn endpoint(net: &Net) -> iroh::endpoint::Builder {
             .congestion_controller_factory(Arc::new(cc))
             .build(),
     );
+    // A phone's network has no router to map ports on: no probing it.
+    #[cfg(target_os = "android")]
+    let b = b.portmapper_config(iroh::endpoint::PortmapperConfig::Disabled);
     // Desktops: the network's proxy and system roots, as any other https.
     let b = b.proxy_from_env();
     #[cfg(not(target_os = "android"))]
@@ -727,7 +748,14 @@ impl Node {
         let dev =
             SecretKey::from_bytes(&secret(&cfg.dir.join("device"), None)?);
         let mut local: Local = store::load(&cfg.dir.join("local"));
-        let prefs: Prefs = store::load(&cfg.dir.join("prefs"));
+        let mut prefs: Prefs = store::load(&cfg.dir.join("prefs"));
+        // Told while asleep (`peek`): not again.
+        let shown = cfg.dir.join("shown");
+        for (id, ts) in store::load::<BTreeMap<Id, u64>>(&shown) {
+            let t = prefs.told.entry(id).or_default();
+            *t = (*t).max(ts);
+        }
+        let _ = std::fs::remove_file(shown);
         let closed = store::load(&cfg.dir.join("closed"));
         let lookup = MemoryLookup::new();
         local.peers.values().for_each(|a| lookup.add_endpoint_info(a.clone()));
@@ -788,6 +816,7 @@ impl Node {
             wake: Mutex::default(),
             rang: Mutex::default(),
             push: OnceLock::new(),
+            via: Mutex::default(),
             name: Mutex::new(cfg.name),
             events: broadcast::channel(1024).0,
             clock: AtomicU64::new(0),
@@ -804,13 +833,20 @@ impl Node {
             media: broadcast::channel(128).0,
         });
         let gate = Some(gate(Arc::downgrade(&n)));
-        let router = Router::builder(n.ep.clone())
+        let mut router = Router::builder(n.ep.clone())
             .accept(iroh_blobs::ALPN, BlobsProtocol::new(&n.files, gate))
             .accept(iroh_gossip::ALPN, n.gossip.clone())
             .accept(sync::ALPN, Proto(Arc::downgrade(&n)))
             .accept(BLOB, Proto(Arc::downgrade(&n)))
-            .accept(call::ALPN, Proto(Arc::downgrade(&n)))
-            .spawn();
+            .accept(call::ALPN, Proto(Arc::downgrade(&n)));
+        // With a Firebase key, a storage node rings phones through Google.
+        if serve.is_some()
+            && let Some(p) = crate::push::Server::open(&n.dir)?
+        {
+            let r = router.accept(crate::push::ALPN, p.clone());
+            router = r.accept(crate::wake::ALPN, p);
+        }
+        let router = router.spawn();
         let _ = n.router.set(router);
         n.persist();
         n.save_hosts();
@@ -1001,19 +1037,209 @@ impl Node {
         out
     }
 
+    /// Left for a sleeping phone (`peek`): each space's key, as on disk
+    /// beside the seed that unlocks them all anyway.
+    fn phonebook(&self) {
+        let me = self.id();
+        let named = |u: &Id| {
+            let mut all = self.spaces().into_iter();
+            all.find_map(|sp| {
+                self.view(&sp, |s| s.profile(u).map(str::to_string))
+            })
+            .flatten()
+        };
+        let mut pb = BTreeMap::new();
+        for sp in self.all() {
+            let Some(inv) = &sp.inv else { continue };
+            let (loud, level) = (self.loud(&sp.id), self.level(&sp.id));
+            let ids: Vec<Id> = self
+                .view(&sp.id, |s| s.members().into_iter())
+                .into_iter()
+                .flatten()
+                .filter(|m| m.role != Role::Banned && m.id != me)
+                .map(|m| m.id)
+                .collect();
+            let names = ids.iter().map(|u| (*u, named(u).unwrap_or_default()));
+            let names = names.collect();
+            let b = lock(&sp.book);
+            let (key, locked) = b.key(inv);
+            let (s, dm) = (&b.st, b.st.dm.is_some());
+            let ring = level != Level::Off && (dm || level == Level::All);
+            let tag = format!("@{}", s.display_name(&me).to_lowercase());
+            let page = Page {
+                name: s.name().to_string(),
+                dm,
+                ring: ring && loud,
+                level,
+                tag,
+                key,
+                names,
+                rooms: s.rooms().into_iter().collect(),
+            };
+            if !locked {
+                pb.insert(sp.id, page);
+            }
+        }
+        if let Err(e) = store::save(&self.dir.join("phonebook"), &pb) {
+            warn!("phonebook: {e}");
+        }
+    }
+
+    /// A ring to a phone with no node running, handled without one: a
+    /// call shown (or hushed); a message shown as our level asks, and kept
+    /// for the node to fold (and check) when it next opens. Also whether
+    /// that node must start now: for what the ring could not carry, from
+    /// someone the phonebook does not know, or a DM only it can take.
+    pub fn woken(
+        dir: &Path,
+        (space, raw): &crate::wake::News,
+    ) -> (Option<Notice>, bool) {
+        let pb: BTreeMap<Id, Page> = store::load(&dir.join("phonebook"));
+        let opened = postcard::from_bytes::<Env>(raw).ok().and_then(|e| {
+            let p = pb.get(space)?;
+            let (s, _) = op::open(space, &p.key, &e, None)?;
+            Some((p, e, s))
+        });
+        let Some((p, e, s)) = opened else { return (None, true) };
+        let log = dir.join("spaces").join(format!("{space}.log"));
+        // Live ops (calls) pass; the rest wait in the log.
+        if !e.live && store::append(&log, raw).is_err() {
+            return (None, true);
+        }
+        let Some(who) = p.names.get(&s.author) else { return (None, true) };
+        let who = match who.is_empty() {
+            true => s.author.to_string()[..8].to_string(),
+            false => who.clone(),
+        };
+        let room = |ch| p.rooms.get(ch).map_or("call", String::as_str);
+        let at = |ch| match p.dm {
+            true => who.clone(),
+            false => format!("{who} in #{} ({})", room(ch), p.name),
+        };
+        let n = |room, title, body: String, ring, hush| Notice {
+            space: *space,
+            room,
+            title,
+            body,
+            ring,
+            hush,
+        };
+        let shown = match s.op {
+            Op::Post { channel, text, .. } => {
+                let mention = p.dm || text.to_lowercase().contains(&p.tag);
+                let tell = match p.level {
+                    Level::All => true,
+                    Level::Mentions => mention,
+                    Level::Off => false,
+                };
+                // Told now: the node does not tell it again.
+                let f = dir.join("shown");
+                let mut told: BTreeMap<Id, u64> = store::load(&f);
+                let t = told.entry(*space).or_default();
+                *t = (*t).max(e.ts);
+                let _ = store::save(&f, &told);
+                let body = if text.is_empty() { "(file)".into() } else { text };
+                tell.then(|| n(channel, at(&channel), body, false, false))
+            }
+            Op::Call { channel: None } => Some(n(
+                crate::state::DM,
+                String::new(),
+                String::new(),
+                false,
+                true,
+            )),
+            // A minute either way: clocks differ, and late it has ended.
+            Op::Call { channel: Some(ch) }
+                if p.ring && e.ts.abs_diff(now()) < 60_000 =>
+            {
+                let body = match p.dm {
+                    true => "is calling you",
+                    false => "is calling the channel",
+                };
+                Some(n(ch, at(&ch), body.into(), true, false))
+            }
+            Op::Knock { .. } => return (None, true),
+            _ => None,
+        };
+        (shown, false)
+    }
+
+    /// Whether a push server took our Firebase token.
+    pub fn pushing(&self) -> bool {
+        !lock(&self.via).0.is_empty()
+    }
+
     pub fn pushed(&self) -> bool {
         lock(&self.prefs).push.is_some()
     }
 
     /// Our UnifiedPush endpoint, or none: sealed to every space we are in.
+    /// `fcm:TOKEN` for Firebase, through whichever push servers take it.
     pub async fn set_push(self: &Arc<Self>, url: Option<String>) {
         lock(&self.prefs).push = url;
         self.save_prefs();
+        self.register().await;
         // Every time, not only when it changed: each space's code must be
         // the one a sender accepts now (0.1.0 changed its form).
         for id in self.spaces() {
             let _ = self.tell_push(&id).await;
         }
+        self.phonebook();
+    }
+
+    /// Storage nodes we know: ours, then those keeping our spaces.
+    fn keepers(&self) -> Vec<EndpointAddr> {
+        let mut at: Vec<EndpointAddr> = vec![];
+        let ours = self.stores(&self.own).into_iter().map(|x| x.0);
+        let theirs = self
+            .spaces()
+            .into_iter()
+            .flat_map(|id| self.view(&id, |s| s.holds()).unwrap_or_default());
+        for a in ours.chain(theirs.map(|x| x.0)) {
+            if !at.iter().any(|b| b.id == a.id) {
+                at.push(a);
+            }
+        }
+        at
+    }
+
+    /// The Firebase project of the first push server among them, and every
+    /// one serving it.
+    pub async fn firebase(&self) -> Option<(Firebase, Vec<EndpointAddr>)> {
+        let asks = self.keepers().into_iter().map(|a| async {
+            let f = crate::push::firebase(&self.ep, a.clone()).await;
+            f.ok().map(|f| (f, a))
+        });
+        let got: Vec<_> = n0_future::join_all(asks).await;
+        let got: Vec<_> = got.into_iter().flatten().collect();
+        let f = got.first()?.0.clone();
+        let at = got.into_iter().filter(|g| g.0 == f).map(|g| g.1).collect();
+        Some((f, at))
+    }
+
+    /// Our Firebase token, every space's ring token and the key pushes are
+    /// sealed to, to each push server of that project.
+    async fn register(self: &Arc<Self>) {
+        let push = lock(&self.prefs).push.clone();
+        let Some(fcm) = push.as_deref().and_then(|u| u.strip_prefix("fcm:"))
+        else {
+            return;
+        };
+        let mut rings = vec![];
+        for sp in self.all() {
+            let Some(inv) = &sp.inv else { continue };
+            let t = tag(&lock(&sp.book).key(inv).0);
+            rings.extend(crate::wake::push_token(&self.dir, &sp.id, &t));
+        }
+        let at = self.firebase().await.map(|f| f.1).unwrap_or_default();
+        let Ok(key) = crate::wake::push_key(&self.dir) else { return };
+        let tries = at.into_iter().map(|a| {
+            let go =
+                crate::push::register(&self.ep, a.clone(), fcm, &rings, key);
+            async move { go.await.map(|_| a) }
+        });
+        let took = n0_future::join_all(tries).await.into_iter().flatten();
+        *lock(&self.via) = (took.collect(), rings);
     }
 
     /// Our push, as this space's members should have it: a doorbell's
@@ -1022,13 +1248,23 @@ impl Node {
         let Some(url) = lock(&self.prefs).push.clone() else { return Ok(()) };
         let sp = self.get(id)?;
         let Some(inv) = &sp.inv else { return Ok(()) };
-        let url = match url.starts_with("irch:wake:") {
-            true => {
-                let t = tag(&lock(&sp.book).key(inv).0);
-                crate::wake::allow(&self.dir, id, &t)?;
-                crate::wake::for_space(&url, id, &t).context("bad doorbell")?
+        let t = tag(&lock(&sp.book).key(inv).0);
+        let url = if url.starts_with("irch:wake:") {
+            crate::wake::allow(&self.dir, id, &t)?;
+            crate::wake::for_space(&url, id, &t).context("bad doorbell")?
+        } else if url.starts_with("fcm:") {
+            // A ring code for each push server; a new one (a space joined,
+            // rekeyed) registered first.
+            let k = crate::wake::push_token(&self.dir, id, &t)?;
+            if !lock(&self.via).1.contains(&k) {
+                self.register().await;
             }
-            false => url,
+            let at = lock(&self.via).0.clone();
+            ensure!(!at.is_empty(), "no push server took us");
+            let codes = at.into_iter().map(|a| code("ring", &(a, t, k)));
+            codes.collect::<Vec<_>>().join(" ")
+        } else {
+            url
         };
         let (me, dev) = (self.id(), self.ep.id());
         let has = self.view(id, |s| s.push(&me, &dev).map(str::to_string));
@@ -1060,8 +1296,13 @@ impl Node {
         for (d, url) in
             urls.into_iter().filter(|u| u.0 != dev && pushable(&u.1))
         {
-            if url.starts_with("irch:ring:") {
-                let (n, news) = (Arc::downgrade(self), news.clone());
+            // Each of a phone's routes at once (its doorbell, push servers):
+            // the first through rings it.
+            for url in
+                url.split_whitespace().filter(|_| url.starts_with("irch:ring:"))
+            {
+                let (n, news, url) =
+                    (Arc::downgrade(self), news.clone(), url.to_string());
                 tokio::spawn(async move {
                     // No answer (a phone between networks): retry for a minute.
                     for wait in [0, 3, 10, 45] {
@@ -1076,6 +1317,8 @@ impl Node {
                         }
                     }
                 });
+            }
+            if url.starts_with("irch:ring:") {
                 continue;
             }
             let wait = {
@@ -3112,6 +3355,7 @@ impl Node {
     }
 
     pub async fn shutdown(&self) {
+        self.phonebook();
         let call = lock(&self.call).take();
         if let Some(sp) = call.and_then(|c| self.get(&c.space).ok()) {
             self.signal(&sp, Op::Call { channel: None }).await;
@@ -3205,7 +3449,7 @@ pub fn http() -> reqwest::Client {
     client().build().expect("HTTP client")
 }
 
-fn client() -> reqwest::ClientBuilder {
+pub(crate) fn client() -> reqwest::ClientBuilder {
     #[cfg(not(target_os = "android"))]
     let ca = iroh::tls::CaTlsConfig::system();
     #[cfg(target_os = "android")]

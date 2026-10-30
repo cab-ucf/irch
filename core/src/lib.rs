@@ -8,6 +8,7 @@ pub mod link;
 mod node;
 pub mod notes;
 pub mod op;
+pub mod push;
 pub mod release;
 pub mod state;
 mod store;
@@ -100,7 +101,7 @@ pub fn profile(root: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// What signing out takes away.
-pub const MINE: [&str; 15] = [
+pub const MINE: [&str; 17] = [
     "seed",
     "device",
     "local",
@@ -117,6 +118,8 @@ pub const MINE: [&str; 15] = [
     "bells",
     "sealed",
     "shared",
+    "phonebook",
+    "shown",
 ];
 
 /// Unix time in milliseconds.

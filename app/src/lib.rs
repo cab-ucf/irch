@@ -801,6 +801,8 @@ async fn start(app: &AppHandle, link: Option<String>) -> Result<(), String> {
     let r = r.await.map_err(err);
     if let Ok(n) = &r {
         forward(app.clone(), n.clone());
+        #[cfg(target_os = "android")]
+        tauri::async_runtime::spawn(android::firebase(app.clone(), n.clone()));
     }
     let done = r.as_ref().map(drop).map_err(Clone::clone);
     app.state::<App>().0.send_replace(Some(r));

@@ -97,6 +97,10 @@ pub fn install(exe: &Path) -> Result<()> {
             println!("A storage node runs here from now on, kept up to date.");
             println!("Its code, for the people you store for (irch on this");
             println!("computer pairs with it by itself):\n\n{}", c.trim());
+            if code.with_file_name("google-services.json").exists() {
+                println!("\nA push server too: phones in the spaces it keeps");
+                println!("are woken through Google.");
+            }
             return Ok(());
         }
         std::thread::sleep(Duration::from_secs(1));

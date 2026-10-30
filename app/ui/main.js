@@ -912,6 +912,8 @@ function tone(notes, gain) {
     const g = audio.createGain();
     o.frequency.value = f;
     g.gain.setValueAtTime(gain, t0 + at);
+    // A ring holds, fading only at its end; a chime's notes just fade.
+    if (len > 1) g.gain.setValueAtTime(gain, t0 + at + len - 0.1);
     g.gain.exponentialRampToValueAtTime(1e-4, t0 + at + len);
     o.connect(g).connect(audio.destination);
     o.start(t0 + at);
@@ -922,7 +924,7 @@ const chime = () => tone([[880, 0, 0.12], [1320, 0.13, 0.25]], 0.15);
 // A phone's ring: 440 and 480 Hz, 2 s in every 6; the caller's ringback,
 // the same, softer, once the other side is ringing.
 const ringing = () => tone([[440, 0, 2], [480, 0, 2]], 0.07);
-const ringback = () => tone([[440, 0, 2], [480, 0, 2]], 0.025);
+const ringback = () => tone([[440, 0, 2], [480, 0, 2]], 0.04);
 
 /** A DM call of ours, alone in it: is it reaching them, ringing there,
  * or not getting through? Ringback only once it rings; a minute, then
@@ -2474,8 +2476,9 @@ function notifyCheck() {
       row(a.calls, "calls may fill the screen when the phone is locked"),
       h("p", { class: "note" }, a.push
         ? `Whoever writes wakes it through ${a.push}: no battery to speak of.`
-        : "It stays connected, shown by a quiet notification. A " +
-          "UnifiedPush app such as ntfy costs less battery."),
+        : "It stays connected through a relay, shown by a quiet " +
+          "notification, which costs battery: a UnifiedPush app such as " +
+          "ntfy costs far less."),
       h("div", { class: "row" },
         !(a.notify && a.background && a.calls) && h("button",
           { class: "btn", onclick: () => draw("fix") }, "Allow"),

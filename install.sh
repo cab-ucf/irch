@@ -1,6 +1,7 @@
 #!/bin/sh
-# Self-updating irch: curl -fsSL $R/install.sh | sh [-s -- --server]
-# --server: an always-on storage node instead (a service).
+# Self-updating irch: curl -fsSL $R/install.sh | sh [-s -- --server [files]]
+# --server: an always-on storage node instead (a service); given Firebase's
+# two files, a push server too.
 # Fetched by curl, nothing is quarantined: no Gatekeeper, no xattr.
 set -eu
 R=https://github.com/cab-ucf/irch/releases/latest/download
@@ -22,6 +23,16 @@ if [ "${1:-}" = --server ]; then
   mkdir -p "$bin"
   get "irch-$cpu-$t" "$bin/irch.part"
   chmod +x "$bin/irch.part" && mv "$bin/irch.part" "$bin/irch"
+  # Firebase's two files after --server (its service account's key and
+  # google-services.json): a push server too.
+  d=${XDG_DATA_HOME:-$HOME/.local/share}/irch-serve
+  [ "$(uname -s)" = Darwin ] && d="$HOME/Library/Application Support/irch-serve"
+  shift
+  for f in "$@"; do
+    mkdir -p "$d"
+    grep -q private_key "$f" && n=fcm.json || n=google-services.json
+    install -m 600 "$f" "$d/$n"
+  done
   exec "$bin/irch" --install
 fi
 

@@ -8,6 +8,13 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import com.google.firebase.FirebaseApp
+import com.google.firebase.FirebaseOptions
+import com.google.firebase.messaging.FirebaseMessaging
+import com.google.firebase.FirebaseApp
+import com.google.firebase.FirebaseOptions
+import com.google.firebase.messaging.FirebaseMessagingService
+import com.google.firebase.messaging.RemoteMessage
 import org.json.JSONArray
 import org.unifiedpush.android.connector.FailedReason
 import org.unifiedpush.android.connector.PushService
@@ -24,8 +31,14 @@ object Wake {
 
   @JvmStatic external fun moved()
 
-  /** Waits for the doorbell, letting the CPU sleep. */
+  /** Waits for the doorbell: `{show: notices, catch: whether to catch up}`. */
   @JvmStatic external fun rung(ctx: Context, dir: String): String
+
+  /** Our Firebase token to irch's push servers; false if none took it. */
+  @JvmStatic external fun fcm(ctx: Context, dir: String, token: String): Boolean
+
+  /** What Google brought, sealed to us, as `rung` tells it. */
+  @JvmStatic external fun rang(ctx: Context, dir: String, data: String): String
 
   /** Hand Android's context back before the activity's runtime takes it. */
   @JvmStatic external fun release()
@@ -34,23 +47,100 @@ object Wake {
 /** UnifiedPush: the ping carries nothing; irch fetches from peers. */
 class IrchPush : PushService() {
   override fun onNewEndpoint(endpoint: PushEndpoint, instance: String) =
-    wake(endpoint.url)
+    wake(this, endpoint.url)
 
-  override fun onMessage(message: PushMessage, instance: String) = wake(null)
+  override fun onMessage(message: PushMessage, instance: String) =
+    wake(this, null)
 
-  override fun onUnregistered(instance: String) = wake("")
+  override fun onUnregistered(instance: String) = wake(this, "")
 
   override fun onRegistrationFailed(reason: FailedReason, instance: String) {}
+}
 
-  private fun wake(push: String?) {
-    val i = Intent(this, IrchWake::class.java).putExtra("push", push)
-    // The distributor lends a few foreground seconds to start a service;
-    // refused (Android 12+, battery optimized), catch up in those seconds.
-    runCatching { startForegroundService(i) }.onFailure {
-      Thread {
-        catchUp(this, push)
-      }.start()
+/** A push lends a few foreground seconds to start a service; refused
+ *  (Android 12+, battery optimized), irch catches up in those seconds. */
+fun wake(ctx: Context, push: String?) {
+  val i = Intent(ctx, IrchWake::class.java).putExtra("push", push)
+  runCatching { ctx.startForegroundService(i) }.onFailure {
+    Thread { catchUp(ctx, push) }.start()
+  }
+}
+
+/** Google's push, through a push server among our storage nodes (core/
+ *  src/push.rs): no connection of irch's own held open. Each carries a
+ *  ring sealed to this phone, always the same size. */
+class IrchFcm : FirebaseMessagingService() {
+  override fun onNewToken(token: String) {
+    register(this, token)
+  }
+
+  override fun onMessageReceived(m: RemoteMessage) {
+    val r = m.data["r"] ?: return
+    if (show(this, Wake.rang(applicationContext, dataDir.absolutePath, r))) {
+      wake(this, null)
     }
+  }
+
+  // Google dropped some, for a phone off too long: caught up instead.
+  override fun onDeletedMessages() = wake(this, null)
+}
+
+/** Firebase as a storage node told it (IrchPlugin.firebase), from the
+ *  start of every process: a push may be what starts it. */
+class IrchApp : android.app.Application() {
+  override fun onCreate() {
+    super.onCreate()
+    startFirebase(this)
+  }
+}
+
+fun startFirebase(ctx: Context): Boolean {
+  if (FirebaseApp.getApps(ctx).isNotEmpty()) return true
+  val p = ctx.getSharedPreferences("irch", 0)
+  val app = p.getString("fb_app", null) ?: return false
+  return runCatching {
+    FirebaseApp.initializeApp(ctx, FirebaseOptions.Builder()
+      .setApplicationId(app)
+      .setApiKey(p.getString("fb_key", "")!!)
+      .setProjectId(p.getString("fb_project", ""))
+      .setGcmSenderId(p.getString("fb_sender", ""))
+      .build())
+    true
+  }.getOrDefault(false)
+}
+
+/** A ring's notices shown; true if irch must catch up for it (a message
+ *  too big to carry, a DM to take): most need no node at all. */
+fun show(ctx: Context, json: String): Boolean = runCatching {
+  val got = org.json.JSONObject(json)
+  val show = got.getJSONArray("show")
+  for (k in 0 until show.length()) alert(ctx, show.getJSONObject(k))
+  got.getBoolean("catch")
+}.getOrDefault(true)
+
+/** Rung through Google: a push server took our Firebase token. */
+fun google(ctx: Context) = ctx.getSharedPreferences("irch", 0).getBoolean("fcm", false)
+
+fun register(ctx: Context, token: String): Boolean {
+  val ok = runCatching {
+    Wake.fcm(ctx.applicationContext, ctx.dataDir.absolutePath, token)
+  }.getOrDefault(false)
+  ctx.getSharedPreferences("irch", 0).edit().putBoolean("fcm", ok).apply()
+  return ok
+}
+
+/** Firebase's token to the push servers; `done(false)` where this build
+ *  or phone has no Firebase, or no push server took it. */
+fun fcm(ctx: Context, done: (Boolean) -> Unit) {
+  val main = android.os.Handler(android.os.Looper.getMainLooper())
+  val t = runCatching { FirebaseMessaging.getInstance().token }.getOrNull()
+    ?: return done(false)
+  t.addOnCompleteListener { r ->
+    val token = if (r.isSuccessful) r.result else null
+    Thread {
+      val ok = token != null && register(ctx, token)
+      main.post { done(ok) }
+    }.start()
   }
 }
 
@@ -122,12 +212,7 @@ class IrchLive : Service() {
       startForeground(3, n)
     }
     if (running.compareAndSet(false, true)) {
-      // Relays drop clients that miss a ping (~18 s) by 5 s; asleep, a
-      // phone often does, silencing the doorbell for minutes. So the CPU
-      // idles awake, which Android honors while irch runs unrestricted.
-      val pm = getSystemService(android.os.PowerManager::class.java)
-      awake = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "irch:doorbell")
-        .apply { setReferenceCounted(false) }
+      // No wake lock held: a ring's packets wake the phone themselves.
       // Native code cannot see the network change; the doorbell must.
       val cm = getSystemService(android.net.ConnectivityManager::class.java)
       cm.registerDefaultNetworkCallback(object :
@@ -136,24 +221,24 @@ class IrchLive : Service() {
           Thread { runCatching { Wake.moved() } }.start()
       })
       Thread {
-        while (true) {
-          awake?.acquire(40 * 60_000L) // the doorbell waits at most 30 min
-          runCatching { Wake.rung(applicationContext, dataDir.absolutePath) }
-          catchUp(this, null)
+        // Until Google's push takes over.
+        while (!google(this)) {
+          val dir = dataDir.absolutePath
+          // Caught up beside it, if need be: the doorbell listens at once.
+          if (show(this, Wake.rung(applicationContext, dir)) &&
+            catching.compareAndSet(false, true)) Thread {
+            try { catchUp(this, null) } finally { catching.set(false) }
+          }.start()
         }
+        stopSelf()
       }.start()
     }
     return START_STICKY
   }
 
-  override fun onDestroy() {
-    awake?.release()
-    super.onDestroy()
-  }
-
   companion object {
     val running = java.util.concurrent.atomic.AtomicBoolean(false)
-    var awake: android.os.PowerManager.WakeLock? = null
+    val catching = java.util.concurrent.atomic.AtomicBoolean(false)
   }
 }
 
@@ -162,7 +247,7 @@ class Boot : android.content.BroadcastReceiver() {
     if (i.action != Intent.ACTION_BOOT_COMPLETED) return
     val pushed = org.unifiedpush.android.connector.UnifiedPush
       .getAckDistributor(ctx) != null
-    if (!pushed) live(ctx)
+    if (!pushed && !google(ctx)) live(ctx)
   }
 }
 
