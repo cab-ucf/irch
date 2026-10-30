@@ -30,6 +30,9 @@
       "icons/icon.ico"
     ],
     "createUpdaterArtifacts": true,
+    "android": {
+      "minSdkVersion": 26
+    },
     "iOS": {
       "frameworks": ["SystemConfiguration"]
     },
