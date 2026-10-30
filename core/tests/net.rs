@@ -734,6 +734,8 @@ async fn a_call_shows_on_a_sleeping_phone_at_once() {
     let ring = |p: &(iroh::EndpointId, String)| p.1.starts_with("irch:ring:");
     let told = || a.view(&dm, |s| s.pushes_of(None).iter().any(ring));
     until("a knows b's doorbell in the DM", || told() == Some(true)).await;
+    let named = || b.view(&id, |s| s.profile(&a.id()).is_some()) == Some(true);
+    until("b knows a", named).await;
     b.shutdown().await;
     drop(b);
 
@@ -776,6 +778,9 @@ async fn a_message_shows_and_keeps_on_a_sleeping_phone() {
     let ring = |p: &(iroh::EndpointId, String)| p.1.starts_with("irch:ring:");
     let told = || a.view(&id, |s| s.pushes_of(None).iter().any(ring));
     until("a knows b's doorbell", || told() == Some(true)).await;
+    // Whom its phonebook names: else the node starts, to learn who.
+    let named = || b.view(&id, |s| s.profile(&a.id()).is_some()) == Some(true);
+    until("b knows a", named).await;
     b.shutdown().await;
     drop(b);
 
@@ -846,12 +851,12 @@ async fn fake_google() -> (String, tokio::sync::mpsc::UnboundedReceiver<String>)
     (url, rx)
 }
 
-/// A storage node with a Firebase key rings a sleeping phone through
-/// Google, which carries only an empty "wake": the phone, registered there,
-/// fetches the sealed call from it and shows it from its phonebook.
+/// A storage node with a Firebase project rings a sleeping phone through
+/// Google: the phone finds it among its storage nodes, registers, and each
+/// ring lands sealed to it, a call or a message alike in size.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_push_server_rings_a_phone_through_google() {
-    use irch_core::state::DM;
+    use irch_core::{push, state::DM, wake};
     let (google, mut sent) = fake_google().await;
     let sd = dir("s");
     std::fs::create_dir_all(&sd).unwrap();
@@ -860,43 +865,70 @@ async fn a_push_server_rings_a_phone_through_google() {
         "private_key": include_str!("data/test-key.pem"),
         "token_uri": format!("{google}/token"), "fcm_uri": google,
     });
+    let app = serde_json::json!({
+        "project_info": { "project_id": "p", "project_number": "42" },
+        "client": [{ "api_key": [{ "current_key": "AIza" }], "client_info": {
+            "mobilesdk_app_id": "1:42:android:7",
+            "android_client_info": { "package_name": "dev.irch.chat" } } }],
+    });
     std::fs::write(sd.join("fcm.json"), account.to_string()).unwrap();
+    std::fs::write(sd.join("google-services.json"), app.to_string()).unwrap();
     let s = start(&sd, "s", None, true).await;
     let db = dir("b");
     let (a, b) = (node("a").await, start(&db, "b", None, false).await);
     let id = a.create("hub").await.unwrap();
+    let ch = general(&a, &id);
     b.join(&a.invite(&id).await.unwrap()).await.unwrap();
     pair(&b, &s, &[]).await;
+    let (f, at) = b.firebase().await.expect("its storage node pushes");
+    assert_eq!(
+        (&f.app[..], &f.sender[..], at.len()),
+        ("1:42:android:7", "42", 1)
+    );
     let keyed = || a.view(&id, |s| s.kem(&b.id()).is_some()) == Some(true);
     until("b's key", keyed).await;
     let dm = a.dm(&id, &b.id()).await.unwrap();
     until("b in the DM", || b.spaces().contains(&dm)).await;
     b.set_push(Some("fcm:TOKEN".into())).await;
     let ring = |p: &(iroh::EndpointId, String)| p.1.starts_with("irch:ring:");
-    let told = || a.view(&dm, |s| s.pushes_of(None).iter().any(ring));
-    until("a knows b's push server", || told() == Some(true)).await;
+    let told = |sp| a.view(&sp, |s| s.pushes_of(None).iter().any(ring));
+    until("a knows b's push server", || told(dm) == Some(true)).await;
+    until("in the hub too", || told(id) == Some(true)).await;
+    let named = || b.view(&id, |s| s.profile(&a.id()).is_some()) == Some(true);
+    until("b knows a", named).await;
     b.shutdown().await;
     drop(b);
 
+    let key = wake::push_key(&db).unwrap();
+    let mut next = async || {
+        let req = tokio::time::timeout(Duration::from_secs(10), sent.recv());
+        let req = req.await.expect("sent within seconds").unwrap();
+        assert!(req.starts_with("POST /v1/projects/p/messages:send"), "{req}");
+        assert!(req.to_lowercase().contains("authorization: bearer t"));
+        let body = &req[req.find("\r\n\r\n").unwrap() + 4..];
+        let m: serde_json::Value = serde_json::from_str(body).unwrap();
+        let m = &m["message"];
+        assert_eq!(
+            (&m["token"], &m["android"]["priority"]),
+            (&"TOKEN".into(), &"high".into())
+        );
+        assert_eq!(m["data"].as_object().unwrap().len(), 1, "the ring alone");
+        m["data"]["r"].as_str().unwrap().to_string()
+    };
     a.call(Some((dm, DM))).await.unwrap();
-    let req = tokio::time::timeout(Duration::from_secs(10), sent.recv());
-    let req = req.await.expect("sent within seconds").unwrap();
-    assert!(req.starts_with("POST /v1/projects/p/messages:send"), "{req}");
-    assert!(req.to_lowercase().contains("authorization: bearer t"));
-    // Google is told "wake" and nothing else: not the space, not the call.
-    let body = &req[req.find("\r\n\r\n").unwrap() + 4..];
-    let m: serde_json::Value = serde_json::from_str(body).unwrap();
-    let wake = serde_json::json!({ "token": "TOKEN", "data": { "w": "" },
-        "android": { "priority": "high", "collapse_key": "w" } });
-    assert_eq!(m["message"], wake);
-    // Woken, the phone fetches the sealed ring from the push server.
-    let got = irch_core::push::fetch_asleep(&db, &Net::Direct).await.unwrap();
-    let n = got.iter().find_map(|x| Node::woken(&db, x).0);
-    let n = n.expect("shown from the phonebook");
+    let call = next().await;
+    let open = |r: &str| {
+        let b = data_encoding::BASE64.decode(r.as_bytes()).unwrap();
+        let news = push::open(&key, &b).expect("sealed to b");
+        Node::woken(&db, &news).0.expect("shown from the phonebook")
+    };
+    let n = open(&call);
     assert!(n.ring && n.space == dm);
     assert_eq!((&n.title[..], &n.body[..]), ("a", "is calling you"));
-    let again = irch_core::push::fetch_asleep(&db, &Net::Direct).await;
-    assert!(again.unwrap().is_empty(), "fetched once");
+    say(&a, &id, ch, "hi").await;
+    let hi = next().await;
+    assert_eq!(hi.len(), call.len(), "a message looks as a call does");
+    assert_eq!(open(&hi).body, "hi");
 }
 
 /// A member's photo waits on the space's storage node, though it is not

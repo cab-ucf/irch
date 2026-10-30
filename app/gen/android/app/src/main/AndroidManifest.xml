@@ -28,6 +28,7 @@
 
     <!-- No cloud backups: the app data holds the identity key. -->
     <application
+        android:name=".IrchApp"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"

@@ -33,29 +33,22 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
   libsoup3, ALSA (libasound2) and, for calls, gstreamer plugins base,
   good, bad and libav.
 
-## Your own build, with push (once, 5 minutes)
+## Push for Android phones (optional, once per server)
 
-With irch's releases there is nothing to set up. To ship your own, with
-Android phones woken through Google (no battery spent holding anything
-open):
+A storage node holding a Firebase project wakes Android phones through
+Google, so they hold nothing open. Phones in the spaces it keeps, or paired
+with it, find it by themselves: no app setting, no build of your own.
 
 1. In the [Firebase console](https://console.firebase.google.com): *Add
-   project*, then *Add app → Android* with the package `dev.irch.chat`.
-   Commit the `google-services.json` it gives as `app/google-services.json`.
-   Then *Project settings → Service accounts → Generate new private key*,
-   saved as `key.json`.
-2. On an always-on server, one command: a storage node, which pushes too.
+   project*; *Add app → Android*, package `dev.irch.chat`; download
+   `google-services.json`. Then *Project settings → Service accounts →
+   Generate new private key* (`key.json`).
+2. On the server, one command:
    ```sh
-   curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh | sh -s -- --server key.json
+   curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh | sh -s -- --server key.json google-services.json
    ```
-   It prints the node's storage code and its push server id. (NixOS:
-   `sudo install -o irch -m 600 key.json /var/lib/irch/data/fcm.json`, then
-   `sudo systemctl restart irch`; the id is in `journalctl -u irch`.)
-3. Set that id as the repository variable `IRCH_PUSH` (*Settings → Secrets
-   and variables → Actions → Variables*) and tag a release.
-
-Every phone on that build is then woken through your push server; people
-just install the app.
+   (NixOS: both into `/var/lib/irch/data`, as `fcm.json` and
+   `google-services.json`, owned by `irch`; then `systemctl restart irch`.)
 
 ## Features
 
@@ -145,20 +138,15 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   UnifiedPush app such as ntfy, through it; else, at a battery's cost,
   through irch's own doorbell, kept open on a relay. iPhones catch up when
   opened, and a call keeps irch up.
-- **Push servers**: a storage node holding a Firebase key. A phone tells
-  it its Firebase token and one ring token per space and epoch; members
-  ring with those as with a doorbell. The push server holds the sealed
-  ring for the phone (a day at most) and has Google send it "wake", the
-  same empty message every time; the phone, woken, fetches what is held
-  over iroh. Google learns when, and nothing else. Members ring a phone's
-  every route at once. To offer it, once, for
-  whoever builds irch: in Firebase, a project with the Android app
-  `dev.irch.chat`; commit the `google-services.json` it gives as
-  `app/google-services.json`; put its service account's key on a storage
-  node (`sudo install -o irch -m 600 key.json /var/lib/irch/data/fcm.json`
-  on NixOS, then restart `irch`); set the repository variable `IRCH_PUSH`
-  to the id it prints (several: comma-separated). Every phone running that
-  build is then rung through it; nothing else to set up.
+- **Push servers** are storage nodes holding a Firebase project. Phones
+  ask the storage nodes they know (theirs, their spaces') for one, take a
+  Firebase token from its project, and give it that token, a ring token
+  per space and epoch, and a key. Members ring with those as with a
+  doorbell, every route of a phone at once; Google carries the ring
+  sealed to that key and padded to one size, so it learns when and
+  nothing else, and the phone shows it as it lands. Google keeps pushes
+  for a phone that is off four weeks; storage nodes and members keep
+  everything, synced when irch opens.
 
 | network | terminal (app env) | who else is involved |
 |---|---|---|

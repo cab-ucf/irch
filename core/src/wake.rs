@@ -68,10 +68,9 @@ pub fn push_token(dir: &Path, space: &Id, tag: &[u8; 8]) -> Result<[u8; 16]> {
     Ok(token(&k[32..].try_into()?, space, tag))
 }
 
-/// The key to our mailbox on push servers, from the same secret.
-pub fn mailbox(dir: &Path) -> Result<[u8; 16]> {
-    let k = kept(dir)?;
-    Ok(kdf("irch mailbox", &[&k[32..]])[..16].try_into()?)
+/// The key pushes to us are sealed to, from the same secret.
+pub fn push_key(dir: &Path) -> Result<crate::crypto::Key> {
+    Ok(kdf("irch push", &[&kept(dir)?[32..]]))
 }
 
 pub async fn moved() {

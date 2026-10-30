@@ -1,50 +1,48 @@
-//! Push servers: a storage node with a Firebase key (`fcm.json` beside its
-//! data) wakes phones through Google the moment a member rings, as their
-//! doorbell would, so no phone holds a connection open for it. A phone tells
-//! it its Firebase token and a ring token per space and epoch (wake.rs);
-//! members ring with those. Google is told nothing but "wake": the same
-//! empty message every time. The phone, woken, fetches the sealed rings
-//! from the push server, which holds them for it a while.
+//! Push servers: a storage node given a Firebase project (its service
+//! account's key, `fcm.json`, and `google-services.json`) wakes phones
+//! through Google the moment a member rings, as their doorbell would, so no
+//! phone holds a connection open. Phones find it among the storage nodes
+//! they know (theirs, and their spaces'), learn the project from it, and
+//! give it their Firebase token, a ring token per space and epoch, and a
+//! key (wake.rs). Members ring with those; Google carries the ring sealed
+//! to that key, always the same size: when, and nothing else.
 
+use crate::crypto::Key;
 use crate::wake::{HEAD, MAX, News};
-use crate::{Id, Net, node::lock, store};
+use crate::{Id, node::lock, store};
 use anyhow::{Context, Result, ensure};
 use data_encoding::{BASE64, BASE64URL_NOPAD};
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
-use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
+use iroh::{Endpoint, EndpointAddr, EndpointId};
 use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub const ALPN: &[u8] = b"irch/push/2";
+pub const ALPN: &[u8] = b"irch/push/3";
 /// Ring tokens a phone may have here: one per space it is in.
 const MOST: usize = 4096;
-/// Rings held for a phone, at most, and for at most a day.
-const HELD: usize = 64;
-const DAY: Duration = Duration::from_secs(24 * 3600);
+/// Every push's sealed size: a short message or a call fits whole.
+const SIZE: usize = 2048;
 const SLOW: Duration = Duration::from_secs(15);
 
-/// This build's push servers (`IRCH_PUSH`: endpoint ids), at irch's relay.
-pub fn defaults() -> Vec<EndpointAddr> {
-    let relay: iroh::RelayUrl = crate::node::RELAYS[0].parse().expect("url");
-    let ids = option_env!("IRCH_PUSH").unwrap_or_default().split(',');
-    let ids = ids.filter_map(|s| s.trim().parse::<EndpointId>().ok());
-    let at = |id| {
-        EndpointAddr::from_parts(id, [TransportAddr::Relay(relay.clone())])
-    };
-    ids.map(at).collect()
+/// A Firebase project's public half: what a phone needs for a token.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Firebase {
+    pub app: String,
+    pub key: String,
+    pub project: String,
+    pub sender: String,
 }
 
 #[derive(Serialize, Deserialize)]
 enum Ask {
-    /// Our Firebase token, ring tokens, and the key to our mailbox.
-    Register(String, Vec<[u8; 16]>, [u8; 16]),
-    /// What the mailbox holds, emptied.
-    Fetch([u8; 16]),
+    Firebase,
+    /// Our Firebase token, ring tokens, and the key pushes are sealed to.
+    Register(String, Vec<[u8; 16]>, Key),
 }
 
 async fn ask(ep: &Endpoint, to: EndpointAddr, a: &Ask) -> Result<Vec<u8>> {
@@ -53,11 +51,16 @@ async fn ask(ep: &Endpoint, to: EndpointAddr, a: &Ask) -> Result<Vec<u8>> {
         let (mut tx, mut rx) = c.open_bi().await?;
         tx.write_all(&postcard::to_allocvec(a)?).await?;
         tx.finish()?;
-        let got = crate::sync::rest(&mut rx, HELD * (MAX + 64)).await?;
+        let got = crate::sync::rest(&mut rx, 4096).await?;
         c.close(0u8.into(), b"");
         Ok(got)
     };
     tokio::time::timeout(SLOW, go).await?
+}
+
+/// Its Firebase project, if `to` is a push server.
+pub async fn firebase(ep: &Endpoint, to: EndpointAddr) -> Result<Firebase> {
+    Ok(postcard::from_bytes(&ask(ep, to, &Ask::Firebase).await?)?)
 }
 
 pub async fn register(
@@ -65,70 +68,63 @@ pub async fn register(
     to: EndpointAddr,
     fcm: &str,
     rings: &[[u8; 16]],
-    mailbox: [u8; 16],
+    key: Key,
 ) -> Result<()> {
-    let a = Ask::Register(fcm.into(), rings.to_vec(), mailbox);
+    let a = Ask::Register(fcm.into(), rings.to_vec(), key);
     ensure!(ask(ep, to, &a).await? == [1], "no push here");
     Ok(())
 }
 
-/// What our push servers (as last registered) hold for us.
-pub async fn fetch(ep: &Endpoint, dir: &Path) -> Vec<News> {
-    let at: Vec<EndpointAddr> = store::load(&dir.join("pushers"));
-    let Ok(mailbox) = crate::wake::mailbox(dir) else { return vec![] };
-    let a = &Ask::Fetch(mailbox);
-    let got = n0_future::join_all(at.into_iter().map(|to| ask(ep, to, a)));
-    let got = got.await.into_iter().flatten();
-    let got = got.flat_map(|b| postcard::from_bytes::<Vec<Vec<u8>>>(&b));
-    let news = got.flatten().filter_map(|r| {
-        let (space, raw) = r.split_first_chunk::<32>()?;
-        Some((Id(*space), raw.to_vec()))
-    });
-    news.collect()
+/// A ring (the space, then its sealed op) sealed again to a phone, padded
+/// to one size; too big, the space alone, for the phone to catch up.
+pub fn seal(key: &Key, ring: &[u8]) -> Vec<u8> {
+    let ring = if ring.len() + 2 <= SIZE { ring } else { &ring[..32] };
+    let mut b = (ring.len() as u16).to_le_bytes().to_vec();
+    b.extend_from_slice(ring);
+    b.resize(SIZE, 0);
+    crate::crypto::seal(key, b"irch push", &b)
 }
 
-/// The same, with no node running: one brief endpoint of its own.
-pub async fn fetch_asleep(dir: &Path, net: &Net) -> Result<Vec<News>> {
-    let ep = crate::node::endpoint(net).bind().await?;
-    let news = fetch(&ep, dir).await;
-    ep.close().await;
-    Ok(news)
+pub fn open(key: &Key, b: &[u8]) -> Option<News> {
+    let b = crate::crypto::open(key, b"irch push", b)?;
+    let (len, rest) = b.split_first_chunk::<2>()?;
+    let ring = rest.get(..u16::from_le_bytes(*len) as usize)?;
+    let (space, raw) = ring.split_first_chunk::<32>()?;
+    Some((Id(*space), raw.to_vec()))
 }
 
-type Phones = BTreeMap<EndpointId, (String, Vec<[u8; 16]>, [u8; 16])>;
-type Boxes = HashMap<[u8; 16], VecDeque<(Instant, Vec<u8>)>>;
+type Phones = BTreeMap<EndpointId, (String, Vec<[u8; 16]>, Key)>;
 
 #[derive(Clone)]
-pub struct Server(Arc<(PathBuf, Mutex<Phones>, Mutex<Boxes>, Google)>);
+pub struct Server(Arc<(PathBuf, Mutex<Phones>, Google, Firebase)>);
 
 impl Server {
     pub fn open(dir: &Path) -> Result<Option<Self>> {
-        let Ok(json) = std::fs::read(dir.join("fcm.json")) else {
+        let (Ok(key), Ok(app)) = (
+            std::fs::read(dir.join("fcm.json")),
+            std::fs::read(dir.join("google-services.json")),
+        ) else {
             return Ok(None);
         };
-        let google = Google::new(&json).context("fcm.json")?;
+        let google = Google::new(&key).context("fcm.json")?;
+        let firebase = app_of(&app).context("google-services.json")?;
         let file = dir.join("phones");
         let phones = Mutex::new(store::load(&file));
-        let boxes = Mutex::default();
-        Ok(Some(Self(Arc::new((file, phones, boxes, google)))))
+        Ok(Some(Self(Arc::new((file, phones, google, firebase)))))
     }
 
     async fn asked(&self, c: &Connection) -> Result<()> {
         let (mut tx, mut rx) = c.accept_bi().await?;
-        let b = crate::sync::rest(&mut rx, 1024 + 17 * MOST).await?;
-        let (file, phones, boxes, _) = &*self.0;
+        let b = crate::sync::rest(&mut rx, 1024 + 17 * MOST + 64).await?;
+        let (file, phones, _, firebase) = &*self.0;
         let reply = match postcard::from_bytes(&b)? {
-            Ask::Register(fcm, rings, mailbox) => {
+            Ask::Firebase => postcard::to_allocvec(firebase)?,
+            Ask::Register(fcm, rings, key) => {
                 ensure!(fcm.len() <= 1024 && rings.len() <= MOST, "too big");
                 let mut p = lock(phones);
-                p.insert(c.remote_id(), (fcm, rings, mailbox));
+                p.insert(c.remote_id(), (fcm, rings, key));
                 store::save(file, &*p)?;
                 vec![1]
-            }
-            Ask::Fetch(mailbox) => {
-                let held = lock(boxes).remove(&mailbox).unwrap_or_default();
-                let held = held.into_iter().filter(|(t, _)| t.elapsed() < DAY);
-                postcard::to_allocvec(&held.map(|x| x.1).collect::<Vec<_>>())?
             }
         };
         tx.write_all(&reply).await?;
@@ -137,30 +133,23 @@ impl Server {
         Ok(())
     }
 
-    /// A doorbell's ring, held for whichever phones hold its token, which
-    /// Google then wakes.
+    /// A doorbell's ring, to whichever phones hold its token.
     async fn ring(&self, c: &Connection) -> Result<()> {
         let (mut tx, mut rx) = c.accept_bi().await?;
         let mut head = [0u8; HEAD];
         rx.read_exact(&mut head).await?;
         let raw = crate::sync::rest(&mut rx, MAX).await?;
-        let (_, phones, boxes, google) = &*self.0;
-        let to: Vec<(String, [u8; 16])> = lock(phones)
+        let (_, phones, google, _) = &*self.0;
+        let to: Vec<(String, Key)> = lock(phones)
             .values()
             .filter(|p| p.1.iter().any(|t| t[..] == head[..16]))
             .map(|p| (p.0.clone(), p.2))
             .collect();
         let ring = [&head[16..48], &raw[..]].concat();
         let mut ok = false;
-        for (fcm, mailbox) in to {
-            {
-                let mut b = lock(boxes);
-                let held = b.entry(mailbox).or_default();
-                held.retain(|(t, _)| t.elapsed() < DAY);
-                held.truncate(HELD - 1);
-                held.push_front((Instant::now(), ring.clone()));
-            }
-            let sent = google.wake(&fcm).await;
+        for (fcm, key) in to {
+            let r = BASE64.encode(&seal(&key, &ring));
+            let sent = google.send(&fcm, &r).await;
             ok |= sent.inspect_err(|e| tracing::warn!("fcm: {e:#}")).is_ok();
         }
         tx.write_all(&[ok as u8]).await?;
@@ -168,6 +157,25 @@ impl Server {
         let _ = tokio::time::timeout(SLOW, c.closed()).await;
         Ok(())
     }
+}
+
+/// From `google-services.json`: the Android app `dev.irch.chat`'s settings.
+fn app_of(json: &[u8]) -> Result<Firebase> {
+    let v: serde_json::Value = serde_json::from_slice(json)?;
+    let p = &v["project_info"];
+    let us = |c: &&serde_json::Value| {
+        c["client_info"]["android_client_info"]["package_name"]
+            == "dev.irch.chat"
+    };
+    let c = v["client"].as_array().and_then(|c| c.iter().find(us));
+    let c = c.context("no Android app dev.irch.chat in it")?;
+    let s = |v: &serde_json::Value| v.as_str().unwrap_or_default().to_string();
+    Ok(Firebase {
+        app: s(&c["client_info"]["mobilesdk_app_id"]),
+        key: s(&c["api_key"][0]["current_key"]),
+        project: s(&p["project_id"]),
+        sender: s(&p["project_number"]),
+    })
 }
 
 impl std::fmt::Debug for Server {
@@ -280,13 +288,13 @@ impl Google {
         Ok(t.0.clone())
     }
 
-    /// "Wake", and nothing more: the same each time, so Google learns only
-    /// when. High priority wakes a phone from its deepest sleep; one key
-    /// folds wakes waiting on a phone that is off into one.
-    async fn wake(&self, to: &str) -> Result<()> {
+    /// High priority wakes a phone from its deepest sleep. Kept by Google
+    /// for a phone that is off as long as it keeps any (four weeks); past
+    /// that, irch catches up when opened.
+    async fn send(&self, to: &str, r: &str) -> Result<()> {
         let m = serde_json::json!({ "message": {
-            "token": to, "data": { "w": "" },
-            "android": { "priority": "high", "collapse_key": "w" },
+            "token": to, "data": { "r": r },
+            "android": { "priority": "high", "ttl": "2419200s" },
         }});
         let url =
             format!("{}/v1/projects/{}/messages:send", self.fcm, self.project);

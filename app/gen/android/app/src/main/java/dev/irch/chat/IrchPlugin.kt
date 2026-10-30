@@ -61,6 +61,14 @@ class FileArgs {
 }
 
 @InvokeArg
+class FirebaseArgs {
+  var app = ""
+  var key = ""
+  var project = ""
+  var sender = ""
+}
+
+@InvokeArg
 class OnArgs {
   var on = false
 }
@@ -183,6 +191,20 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
 
   @PermissionCallback
   private fun allowed(invoke: Invoke) = invoke.resolve()
+
+  /** A push server's Firebase project, found among our storage nodes: kept
+   *  for every process to come, and our token sent to it. */
+  @Command
+  fun firebase(invoke: Invoke) {
+    val f = invoke.parseArgs(FirebaseArgs::class.java)
+    activity.getSharedPreferences("irch", 0).edit()
+      .putString("fb_app", f.app).putString("fb_key", f.key)
+      .putString("fb_project", f.project).putString("fb_sender", f.sender)
+      .apply()
+    startFirebase(activity)
+    fcm(activity) {}
+    invoke.resolve()
+  }
 
   @Command
   fun share(invoke: Invoke) {

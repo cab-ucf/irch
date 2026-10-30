@@ -368,28 +368,33 @@ pub extern "system" fn Java_dev_irch_chat_Wake_fcm<'l>(
     ok.unwrap_or(false).into()
 }
 
-/// Google woke us, saying nothing: what the push servers hold, fetched.
+/// What Google brought: a ring sealed to us (push.rs), opened here.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_irch_chat_Wake_rang<'l>(
     mut env: JNIEnv<'l>,
     _: JClass<'l>,
     ctx: JObject<'l>,
     dir: JString<'l>,
+    data: JString<'l>,
 ) -> jstring {
-    let dir = text(&mut env, &dir).unwrap_or_default();
-    let dir = irch_core::profile(std::path::Path::new(&dir));
+    use data_encoding::BASE64;
+    let (dir, data) = (text(&mut env, &dir), text(&mut env, &data));
+    let dir =
+        irch_core::profile(std::path::Path::new(&dir.unwrap_or_default()));
+    let b =
+        BASE64.decode(data.unwrap_or_default().as_bytes()).unwrap_or_default();
     reply(env, ctx, async move {
-        if let Some(n) = crate::running() {
-            n.fetch_pushed().await;
-            return Ok(Shown::default());
-        }
-        let net = crate::config(dir.clone(), None, None)?.net;
-        let mut all = Shown::default();
-        for news in irch_core::push::fetch_asleep(&dir, &net).await? {
-            let s = shown(&dir, news);
-            all.show.extend(s.show);
-            all.catch |= s.catch;
-        }
-        Ok(all)
+        let key = wake::push_key(&dir)?;
+        let news = irch_core::push::open(&key, &b).context("not for us")?;
+        Ok(shown(&dir, news))
     })
+}
+
+/// A push server's Firebase project, found among our storage nodes as
+/// irch starts, for Android to take a token from (IrchPlugin.kt).
+pub async fn firebase(app: tauri::AppHandle, n: std::sync::Arc<Node>) {
+    let Some((f, _)) = n.firebase().await else { return };
+    if let Some(b) = app.try_state::<Bridge>() {
+        b.call("firebase", f).await;
+    }
 }

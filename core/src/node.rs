@@ -4,6 +4,7 @@
 use crate::call::{self, Call};
 use crate::crypto::{Key, Me, kem_open, kem_seal, rand, same};
 use crate::op::{self, Env, File, Invite, Op, Role, Signed, code, tag, uncode};
+use crate::push::Firebase;
 use crate::state::State;
 use crate::store::{self, Log};
 use crate::sync::{self, Admit, Bucket, Hello};
@@ -1163,13 +1164,6 @@ impl Node {
         (shown, false)
     }
 
-    /// Woken by Google with a node running: what the push servers hold.
-    pub async fn fetch_pushed(self: &Arc<Self>) {
-        for news in crate::push::fetch(&self.ep, &self.dir).await {
-            self.deliver(news);
-        }
-    }
-
     /// Whether a push server took our Firebase token.
     pub fn pushing(&self) -> bool {
         !lock(&self.via).0.is_empty()
@@ -1193,8 +1187,38 @@ impl Node {
         self.phonebook();
     }
 
-    /// Our Firebase token and every space's ring token, to each push server
-    /// we know: this build's, and our storage nodes that have Google's key.
+    /// Storage nodes we know: ours, then those keeping our spaces.
+    fn keepers(&self) -> Vec<EndpointAddr> {
+        let mut at: Vec<EndpointAddr> = vec![];
+        let ours = self.stores(&self.own).into_iter().map(|x| x.0);
+        let theirs = self
+            .spaces()
+            .into_iter()
+            .flat_map(|id| self.view(&id, |s| s.holds()).unwrap_or_default());
+        for a in ours.chain(theirs.map(|x| x.0)) {
+            if !at.iter().any(|b| b.id == a.id) {
+                at.push(a);
+            }
+        }
+        at
+    }
+
+    /// The Firebase project of the first push server among them, and every
+    /// one serving it.
+    pub async fn firebase(&self) -> Option<(Firebase, Vec<EndpointAddr>)> {
+        let asks = self.keepers().into_iter().map(|a| async {
+            let f = crate::push::firebase(&self.ep, a.clone()).await;
+            f.ok().map(|f| (f, a))
+        });
+        let got: Vec<_> = n0_future::join_all(asks).await;
+        let got: Vec<_> = got.into_iter().flatten().collect();
+        let f = got.first()?.0.clone();
+        let at = got.into_iter().filter(|g| g.0 == f).map(|g| g.1).collect();
+        Some((f, at))
+    }
+
+    /// Our Firebase token, every space's ring token and the key pushes are
+    /// sealed to, to each push server of that project.
     async fn register(self: &Arc<Self>) {
         let push = lock(&self.prefs).push.clone();
         let Some(fcm) = push.as_deref().and_then(|u| u.strip_prefix("fcm:"))
@@ -1207,23 +1231,15 @@ impl Node {
             let t = tag(&lock(&sp.book).key(inv).0);
             rings.extend(crate::wake::push_token(&self.dir, &sp.id, &t));
         }
-        let mut at = crate::push::defaults();
-        for (a, _) in self.stores(&self.own) {
-            if !at.iter().any(|b| b.id == a.id) {
-                at.push(a);
-            }
-        }
-        let Ok(mailbox) = crate::wake::mailbox(&self.dir) else { return };
+        let at = self.firebase().await.map(|f| f.1).unwrap_or_default();
+        let Ok(key) = crate::wake::push_key(&self.dir) else { return };
         let tries = at.into_iter().map(|a| {
-            let ep = &self.ep;
-            let go = crate::push::register(ep, a.clone(), fcm, &rings, mailbox);
+            let go =
+                crate::push::register(&self.ep, a.clone(), fcm, &rings, key);
             async move { go.await.map(|_| a) }
         });
         let took = n0_future::join_all(tries).await.into_iter().flatten();
-        let took: Vec<_> = took.collect();
-        // Where to fetch from, once woken.
-        let _ = store::save(&self.dir.join("pushers"), &took);
-        *lock(&self.via) = (took, rings);
+        *lock(&self.via) = (took.collect(), rings);
     }
 
     /// Our push, as this space's members should have it: a doorbell's

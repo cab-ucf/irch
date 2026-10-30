@@ -149,15 +149,8 @@ async fn main() -> Result<()> {
     let code_file = dir.join("code");
     let big =
         c.big_password.or_else(|| std::env::var("IRCH_BIG_PASSWORD").ok());
-    let push = serve && dir.join("fcm.json").exists();
     let n =
         Node::start(Config { dir, name, net, link, serve, notes, big }).await?;
-    if push {
-        println!(
-            "Push server (IRCH_PUSH, for the app's build): {}",
-            n.device()
-        );
-    }
     if let Some(code) = n.storage_code().await {
         // Which one it is, as the app lists it: not secret, unlike its code.
         let (name, id) = (irch_core::host_name(), n.device());

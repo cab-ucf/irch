@@ -8,7 +8,11 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import com.google.firebase.FirebaseApp
+import com.google.firebase.FirebaseOptions
 import com.google.firebase.messaging.FirebaseMessaging
+import com.google.firebase.FirebaseApp
+import com.google.firebase.FirebaseOptions
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import org.json.JSONArray
@@ -33,8 +37,8 @@ object Wake {
   /** Our Firebase token to irch's push servers; false if none took it. */
   @JvmStatic external fun fcm(ctx: Context, dir: String, token: String): Boolean
 
-  /** Google woke us: what the push servers hold, as `rung` tells it. */
-  @JvmStatic external fun rang(ctx: Context, dir: String): String
+  /** What Google brought, sealed to us, as `rung` tells it. */
+  @JvmStatic external fun rang(ctx: Context, dir: String, data: String): String
 
   /** Hand Android's context back before the activity's runtime takes it. */
   @JvmStatic external fun release()
@@ -62,20 +66,47 @@ fun wake(ctx: Context, push: String?) {
   }
 }
 
-/** Google's push, through irch's push servers (core/src/push.rs), where
- *  this build has both: no connection of irch's own held open. Google
- *  carries an empty "wake"; the sealed rings come from the push server. */
+/** Google's push, through a push server among our storage nodes (core/
+ *  src/push.rs): no connection of irch's own held open. Each carries a
+ *  ring sealed to this phone, always the same size. */
 class IrchFcm : FirebaseMessagingService() {
   override fun onNewToken(token: String) {
     register(this, token)
   }
 
-  // Google's message says nothing: it only wakes us to fetch.
   override fun onMessageReceived(m: RemoteMessage) {
-    if (show(this, Wake.rang(applicationContext, dataDir.absolutePath))) {
+    val r = m.data["r"] ?: return
+    if (show(this, Wake.rang(applicationContext, dataDir.absolutePath, r))) {
       wake(this, null)
     }
   }
+
+  // Google dropped some, for a phone off too long: caught up instead.
+  override fun onDeletedMessages() = wake(this, null)
+}
+
+/** Firebase as a storage node told it (IrchPlugin.firebase), from the
+ *  start of every process: a push may be what starts it. */
+class IrchApp : android.app.Application() {
+  override fun onCreate() {
+    super.onCreate()
+    startFirebase(this)
+  }
+}
+
+fun startFirebase(ctx: Context): Boolean {
+  if (FirebaseApp.getApps(ctx).isNotEmpty()) return true
+  val p = ctx.getSharedPreferences("irch", 0)
+  val app = p.getString("fb_app", null) ?: return false
+  return runCatching {
+    FirebaseApp.initializeApp(ctx, FirebaseOptions.Builder()
+      .setApplicationId(app)
+      .setApiKey(p.getString("fb_key", "")!!)
+      .setProjectId(p.getString("fb_project", ""))
+      .setGcmSenderId(p.getString("fb_sender", ""))
+      .build())
+    true
+  }.getOrDefault(false)
 }
 
 /** A ring's notices shown; true if irch must catch up for it (a message
@@ -190,7 +221,8 @@ class IrchLive : Service() {
           Thread { runCatching { Wake.moved() } }.start()
       })
       Thread {
-        while (true) {
+        // Until Google's push takes over.
+        while (!google(this)) {
           val dir = dataDir.absolutePath
           // Caught up beside it, if need be: the doorbell listens at once.
           if (show(this, Wake.rung(applicationContext, dir)) &&
@@ -198,6 +230,7 @@ class IrchLive : Service() {
             try { catchUp(this, null) } finally { catching.set(false) }
           }.start()
         }
+        stopSelf()
       }.start()
     }
     return START_STICKY
