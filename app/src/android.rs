@@ -188,16 +188,16 @@ fn text(env: &mut JNIEnv, s: &JString) -> Option<String> {
     (!s.is_null()).then(|| env.get_string(s).ok().map(Into::into))?
 }
 
-fn reply(
+fn reply<T: Serialize + Default>(
     env: JNIEnv,
     ctx: JObject,
-    f: impl Future<Output = anyhow::Result<Vec<Notice>>>,
+    f: impl Future<Output = anyhow::Result<T>>,
 ) -> jstring {
     hold(&env, &ctx);
     let r = tauri::async_runtime::block_on(f);
     let r =
         r.inspect_err(|e| tracing::warn!("wake: {e:#}")).unwrap_or_default();
-    let json = serde_json::to_string(&r).unwrap_or_else(|_| "[]".into());
+    let json = serde_json::to_string(&r).unwrap_or_default();
     env.new_string(json).map_or(std::ptr::null_mut(), |s| s.into_raw())
 }
 
@@ -296,9 +296,9 @@ async fn node(dir: PathBuf) -> anyhow::Result<std::sync::Arc<Node>> {
     Ok(n)
 }
 
-/// Until the doorbell rings, or half an hour in case a ring was missed.
-/// Never deaf: a running node is handed the news too.
-async fn rung(dir: PathBuf) -> anyhow::Result<Vec<Notice>> {
+/// Until the doorbell rings (or half an hour, to look again). Never deaf:
+/// a running node is handed the news too.
+async fn rung(dir: PathBuf) -> anyhow::Result<Shown> {
     static TOLD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
     let net = crate::config(dir.clone(), None, None)?.net;
     let url = wake::doorbell(&dir, &net).await?;
@@ -315,22 +315,32 @@ async fn rung(dir: PathBuf) -> anyhow::Result<Vec<Notice>> {
     let half = Duration::from_secs(30 * 60);
     let Ok(news) = tokio::time::timeout(half, wake::rung(&dir, &net)).await
     else {
-        return Ok(vec![]);
+        return Ok(Shown::default());
     };
-    let Some(news) = news? else { return Ok(vec![]) };
+    let Some(news) = news? else { return Ok(Shown::default()) };
     Ok(shown(&dir, news))
 }
 
-/// A ring's call, to show now (unless irch is in sight); its news, for
-/// a running node or the catching up after.
-fn shown(dir: &std::path::Path, news: News) -> Vec<Notice> {
-    let hide = dir.join("private").exists();
-    let shown = Node::peek(dir, &news).filter(|_| !crate::FG.load(SeqCst));
-    match crate::running() {
-        Some(n) => n.deliver(news),
-        None => NEWS.lock().unwrap_or_else(|e| e.into_inner()).push(news),
+/// What a ring brings, to show now, and whether to catch up for it. With
+/// irch in use its node takes it; else no node starts (`Node::woken`).
+#[derive(serde::Serialize, Default)]
+struct Shown {
+    show: Vec<Notice>,
+    catch: bool,
+}
+
+fn shown(dir: &std::path::Path, news: News) -> Shown {
+    if let Some(n) = crate::running() {
+        n.deliver(news);
+        return Shown::default();
     }
-    shown.into_iter().map(|x| crate::veil(x, hide)).collect()
+    let (n, catch) = Node::woken(dir, &news);
+    if catch {
+        NEWS.lock().unwrap_or_else(|e| e.into_inner()).push(news);
+    }
+    let hide = dir.join("private").exists();
+    let n = n.filter(|_| !crate::FG.load(SeqCst));
+    Shown { show: n.into_iter().map(|x| crate::veil(x, hide)).collect(), catch }
 }
 
 /// Firebase: our token to the push servers. False if none took it.

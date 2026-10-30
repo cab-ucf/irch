@@ -743,8 +743,9 @@ async fn a_call_shows_on_a_sleeping_phone_at_once() {
     let t = std::time::Instant::now();
     a.call(Some((dm, DM))).await.unwrap();
     let news = phone.await.unwrap().unwrap().expect("the call, sealed");
-    let n = Node::peek(&db, &news).expect("shown at once");
-    let ms = t.elapsed().as_millis();
+    let (n, node_needed) = Node::woken(&db, &news);
+    let (n, ms) = (n.expect("shown at once"), t.elapsed().as_millis());
+    assert!(!node_needed, "no node needed");
     assert!(ms < 2000, "{ms} ms");
     assert!(n.ring && !n.hush, "rings");
     assert_eq!((n.space, n.room), (dm, DM));
@@ -755,7 +756,44 @@ async fn a_call_shows_on_a_sleeping_phone_at_once() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     a.call(None).await.unwrap();
     let news = phone.await.unwrap().unwrap().expect("its end");
-    assert!(Node::peek(&db, &news).expect("hushed").hush);
+    assert!(Node::woken(&db, &news).0.expect("hushed").hush);
+}
+
+/// A message to a sleeping phone shows from its ring alone and is kept
+/// unopened: once b starts again, it is there before any peer is, and not
+/// told a second time.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_shows_and_keeps_on_a_sleeping_phone() {
+    use irch_core::wake;
+    let db = dir("b");
+    let a = node("a").await;
+    let b = start(&db, "b", None, false).await;
+    let id = a.create("hub").await.unwrap();
+    let ch = general(&a, &id);
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let url = wake::doorbell(&db, &Net::Direct).await.unwrap();
+    b.set_push(Some(url)).await;
+    let ring = |p: &(iroh::EndpointId, String)| p.1.starts_with("irch:ring:");
+    let told = || a.view(&id, |s| s.pushes_of(None).iter().any(ring));
+    until("a knows b's doorbell", || told() == Some(true)).await;
+    b.shutdown().await;
+    drop(b);
+
+    let d = db.clone();
+    let phone = tokio::spawn(async move { wake::rung(&d, &Net::Direct).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    say(&a, &id, ch, "lunch?").await;
+    let news = phone.await.unwrap().unwrap().expect("the message, sealed");
+    let (n, node_needed) = Node::woken(&db, &news);
+    let n = n.expect("shown at once");
+    assert_eq!((&n.title[..], &n.body[..]), ("a in #general (hub)", "lunch?"));
+    assert!(!n.ring && n.room == ch && !node_needed, "kept, no node needed");
+
+    a.shutdown().await;
+    drop(a);
+    let b = start(&db, "b", None, false).await;
+    assert_eq!(texts(&b, &id, &ch), ["lunch?"], "from its own log");
+    assert!(b.notices().is_empty(), "told once");
 }
 
 /// Google's token and send endpoints, as plain http here: each message
@@ -855,7 +893,7 @@ async fn a_push_server_rings_a_phone_through_google() {
     );
     let r = BASE64.decode(m["data"]["r"].as_str().unwrap().as_bytes()).unwrap();
     let news = (Id(r[..32].try_into().unwrap()), r[32..].to_vec());
-    let n = Node::peek(&db, &news).expect("shown from the phonebook");
+    let n = Node::woken(&db, &news).0.expect("shown from the phonebook");
     assert!(n.ring && n.space == dm);
     assert_eq!((&n.title[..], &n.body[..]), ("a", "is calling you"));
 }

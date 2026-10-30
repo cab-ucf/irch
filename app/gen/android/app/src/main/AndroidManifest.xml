@@ -33,6 +33,12 @@
         android:label="@string/app_name"
         android:theme="@style/Theme.irch_app"
         android:usesCleartextTraffic="${usesCleartextTraffic}">
+        <!-- No usage reports: not the web view's, not Firebase's. -->
+        <meta-data android:name="android.webkit.WebView.MetricsOptOut"
+            android:value="true" />
+        <meta-data
+            android:name="delivery_metrics_exported_to_big_query_enabled"
+            android:value="false" />
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
             android:launchMode="singleTask"

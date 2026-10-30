@@ -112,24 +112,26 @@ space = a grow-only set of envs;   state = a deterministic fold of it
 - **Voice messages are Opus in Ogg**, played by decoding them in the app:
   the same in every web view, seekable, the right length.
 - **Sync** compares per-day fingerprints, then sends only missing envs.
-- **Phones sleep**: out of sight for a minute, the node stops and a
-  doorbell (an iroh endpoint with no connections) waits. Whoever writes
-  rings it, handing over the sealed message, so the phone notifies at once.
-  Android must let irch run unrestricted; irch says so until it does. With
-  a UnifiedPush app such as ntfy, that app wakes irch instead. iPhones
-  have no such door: irch catches up when opened, and a call keeps it up.
-- **Push servers** spare Android phones that doorbell, and its battery: a
-  storage node holding a Firebase key wakes them through Google. A phone
-  tells it its Firebase token and one ring token per space and epoch; a
-  member rings with one as with a doorbell; Google gets only the sealed
-  ring, and the phone shows the call from what its node left asleep.
-  Members ring a phone's every route at once. To offer it (once, for
-  whoever builds irch): a Firebase project with the Android app
-  `dev.irch.chat`; its public settings as the repository's variables
-  `FIREBASE_APP_ID`, `_API_KEY`, `_PROJECT_ID`, `_SENDER_ID`; a service
-  account's key as `fcm.json` in a storage node's data folder
-  (`/var/lib/irch/data` on NixOS); the id it then prints as `IRCH_PUSH`
-  (several, comma-separated). Phones without Google keep the doorbell.
+- **Phones sleep, holding nothing open.** Out of sight a minute, the
+  node stops. Whoever writes or calls rings each member's phone with the
+  sealed op itself, and the phone shows it from a phonebook its node left
+  (each space's key, names, levels) and keeps it for the node to fold
+  later: a wake starts no node and opens no connection. Android phones
+  are rung through Google's push, by a push server (below); with a
+  UnifiedPush app such as ntfy, through it; else, at a battery's cost,
+  through irch's own doorbell, kept open on a relay. iPhones catch up when
+  opened, and a call keeps irch up.
+- **Push servers**: a storage node holding a Firebase key. A phone tells
+  it its Firebase token and one ring token per space and epoch; members
+  ring with those as with a doorbell; Google gets only the sealed ring.
+  Members ring a phone's every route at once. To offer it, once, for
+  whoever builds irch: in Firebase, a project with the Android app
+  `dev.irch.chat`; commit the `google-services.json` it gives as
+  `app/google-services.json`; put its service account's key on a storage
+  node (`sudo install -o irch -m 600 key.json /var/lib/irch/data/fcm.json`
+  on NixOS, then restart `irch`); set the repository variable `IRCH_PUSH`
+  to the id it prints (several: comma-separated). Every phone running that
+  build is then rung through it; nothing else to set up.
 
 | network | terminal (app env) | who else is involved |
 |---|---|---|

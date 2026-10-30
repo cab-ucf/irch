@@ -15,6 +15,13 @@ pub struct Log {
 
 pub type Rec = (u64, u8, Vec<u8>);
 
+/// One unchecked record onto a log no node has open, without reading it.
+pub fn append(path: &Path, b: &[u8]) -> Result<()> {
+    let mut f = OpenOptions::new().append(true).open(path)?;
+    let len = (b.len() as u32).to_le_bytes();
+    Ok(f.write_all(&[&len[..], &[0], b].concat())?)
+}
+
 impl Log {
     pub fn open(path: &Path) -> Result<(Self, Vec<Rec>)> {
         fs::create_dir_all(path.parent().expect("in a dir"))?;

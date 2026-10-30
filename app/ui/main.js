@@ -2476,8 +2476,9 @@ function notifyCheck() {
       row(a.calls, "calls may fill the screen when the phone is locked"),
       h("p", { class: "note" }, a.push
         ? `Whoever writes wakes it through ${a.push}: no battery to speak of.`
-        : "It stays connected, shown by a quiet notification. A " +
-          "UnifiedPush app such as ntfy costs less battery."),
+        : "It stays connected through a relay, shown by a quiet " +
+          "notification, which costs battery: a UnifiedPush app such as " +
+          "ntfy costs far less."),
       h("div", { class: "row" },
         !(a.notify && a.background && a.calls) && h("button",
           { class: "btn", onclick: () => draw("fix") }, "Allow"),

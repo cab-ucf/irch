@@ -165,6 +165,9 @@ struct Page {
     name: String,
     dm: bool,
     ring: bool,
+    level: Level,
+    // `@our name`, as messages mention us.
+    tag: String,
     key: Key,
     names: BTreeMap<Id, String>,
     rooms: BTreeMap<Ch, String>,
@@ -609,6 +612,9 @@ pub(crate) fn endpoint(net: &Net) -> iroh::endpoint::Builder {
             .congestion_controller_factory(Arc::new(cc))
             .build(),
     );
+    // A phone's network has no router to map ports on: no probing it.
+    #[cfg(target_os = "android")]
+    let b = b.portmapper_config(iroh::endpoint::PortmapperConfig::Disabled);
     // Desktops: the network's proxy and system roots, as any other https.
     let b = b.proxy_from_env();
     #[cfg(not(target_os = "android"))]
@@ -741,7 +747,14 @@ impl Node {
         let dev =
             SecretKey::from_bytes(&secret(&cfg.dir.join("device"), None)?);
         let mut local: Local = store::load(&cfg.dir.join("local"));
-        let prefs: Prefs = store::load(&cfg.dir.join("prefs"));
+        let mut prefs: Prefs = store::load(&cfg.dir.join("prefs"));
+        // Told while asleep (`peek`): not again.
+        let shown = cfg.dir.join("shown");
+        for (id, ts) in store::load::<BTreeMap<Id, u64>>(&shown) {
+            let t = prefs.told.entry(id).or_default();
+            *t = (*t).max(ts);
+        }
+        let _ = std::fs::remove_file(shown);
         let closed = store::load(&cfg.dir.join("closed"));
         let lookup = MemoryLookup::new();
         local.peers.values().for_each(|a| lookup.add_endpoint_info(a.clone()));
@@ -1051,13 +1064,16 @@ impl Node {
             let (key, locked) = b.key(inv);
             let (s, dm) = (&b.st, b.st.dm.is_some());
             let ring = level != Level::Off && (dm || level == Level::All);
+            let tag = format!("@{}", s.display_name(&me).to_lowercase());
             let page = Page {
                 name: s.name().to_string(),
                 dm,
                 ring: ring && loud,
+                level,
+                tag,
                 key,
                 names,
-                rooms: s.channels().into_iter().collect(),
+                rooms: s.rooms().into_iter().collect(),
             };
             if !locked {
                 pb.insert(sp.id, page);
@@ -1068,41 +1084,83 @@ impl Node {
         }
     }
 
-    /// A ring shown the moment it comes, before any node starts: a call
-    /// that rings here, or its end, if the phonebook knows its space.
-    pub fn peek(
+    /// A ring to a phone with no node running, handled without one: a
+    /// call shown (or hushed); a message shown as our level asks, and kept
+    /// for the node to fold (and check) when it next opens. Also whether
+    /// that node must start now: for what the ring could not carry, from
+    /// someone the phonebook does not know, or a DM only it can take.
+    pub fn woken(
         dir: &Path,
         (space, raw): &crate::wake::News,
-    ) -> Option<Notice> {
+    ) -> (Option<Notice>, bool) {
         let pb: BTreeMap<Id, Page> = store::load(&dir.join("phonebook"));
-        let p = pb.get(space)?;
-        let e: Env = postcard::from_bytes(raw).ok()?;
-        let (s, _) = op::open(space, &p.key, &e, None)?;
-        let who = p.names.get(&s.author)?;
+        let opened = postcard::from_bytes::<Env>(raw).ok().and_then(|e| {
+            let p = pb.get(space)?;
+            let (s, _) = op::open(space, &p.key, &e, None)?;
+            Some((p, e, s))
+        });
+        let Some((p, e, s)) = opened else { return (None, true) };
+        let log = dir.join("spaces").join(format!("{space}.log"));
+        // Live ops (calls) pass; the rest wait in the log.
+        if !e.live && store::append(&log, raw).is_err() {
+            return (None, true);
+        }
+        let Some(who) = p.names.get(&s.author) else { return (None, true) };
         let who = match who.is_empty() {
             true => s.author.to_string()[..8].to_string(),
             false => who.clone(),
         };
-        let Op::Call { channel } = s.op else { return None };
-        let n = |room, title, body: &str, hush: bool| Notice {
+        let room = |ch| p.rooms.get(ch).map_or("call", String::as_str);
+        let at = |ch| match p.dm {
+            true => who.clone(),
+            false => format!("{who} in #{} ({})", room(ch), p.name),
+        };
+        let n = |room, title, body: String, ring, hush| Notice {
             space: *space,
             room,
             title,
-            body: body.into(),
-            ring: !hush,
+            body,
+            ring,
             hush,
         };
-        match channel {
-            None => Some(n(crate::state::DM, String::new(), "", true)),
-            // A minute either way: clocks differ, and late it has ended.
-            Some(_) if !p.ring || e.ts.abs_diff(now()) > 60_000 => None,
-            Some(ch) if p.dm => Some(n(ch, who, "is calling you", false)),
-            Some(ch) => {
-                let room = p.rooms.get(&ch).map_or("call", String::as_str);
-                let title = format!("{who} in #{room} ({})", p.name);
-                Some(n(ch, title, "is calling the channel", false))
+        let shown = match s.op {
+            Op::Post { channel, text, .. } => {
+                let mention = p.dm || text.to_lowercase().contains(&p.tag);
+                let tell = match p.level {
+                    Level::All => true,
+                    Level::Mentions => mention,
+                    Level::Off => false,
+                };
+                // Told now: the node does not tell it again.
+                let f = dir.join("shown");
+                let mut told: BTreeMap<Id, u64> = store::load(&f);
+                let t = told.entry(*space).or_default();
+                *t = (*t).max(e.ts);
+                let _ = store::save(&f, &told);
+                let body = if text.is_empty() { "(file)".into() } else { text };
+                tell.then(|| n(channel, at(&channel), body, false, false))
             }
-        }
+            Op::Call { channel: None } => Some(n(
+                crate::state::DM,
+                String::new(),
+                String::new(),
+                false,
+                true,
+            )),
+            // A minute either way: clocks differ, and late it has ended.
+            Op::Call { channel: Some(ch) }
+                if p.ring && e.ts.abs_diff(now()) < 60_000 =>
+            {
+                let body = match p.dm {
+                    true => "is calling you",
+                    false => "is calling the channel",
+                };
+                Some(n(ch, at(&ch), body.into(), true, false))
+            }
+            Op::Knock { .. } => return (None, true),
+            _ => None,
+        };
+        (shown, false)
     }
 
     /// Whether a push server took our Firebase token.

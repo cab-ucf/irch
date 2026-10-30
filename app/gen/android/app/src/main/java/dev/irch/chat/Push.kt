@@ -27,13 +27,13 @@ object Wake {
 
   @JvmStatic external fun moved()
 
-  /** Waits for the doorbell; a call it brings, as notices to show now. */
+  /** Waits for the doorbell: `{show: notices, catch: whether to catch up}`. */
   @JvmStatic external fun rung(ctx: Context, dir: String): String
 
   /** Our Firebase token to irch's push servers; false if none took it. */
   @JvmStatic external fun fcm(ctx: Context, dir: String, token: String): Boolean
 
-  /** What Google brought: a call, as notices to show now. */
+  /** What Google brought, as `rung` tells it. */
   @JvmStatic external fun rang(ctx: Context, dir: String, data: String): String
 
   /** Hand Android's context back before the activity's runtime takes it. */
@@ -72,13 +72,23 @@ class IrchFcm : FirebaseMessagingService() {
 
   override fun onMessageReceived(m: RemoteMessage) {
     val r = m.data["r"] ?: return
-    runCatching {
-      val got = JSONArray(Wake.rang(applicationContext, dataDir.absolutePath, r))
-      for (k in 0 until got.length()) alert(this, got.getJSONObject(k))
+    if (show(this, Wake.rang(applicationContext, dataDir.absolutePath, r))) {
+      wake(this, null)
     }
-    wake(this, null)
   }
 }
+
+/** A ring's notices shown; true if irch must catch up for it (a message
+ *  too big to carry, a DM to take): most need no node at all. */
+fun show(ctx: Context, json: String): Boolean = runCatching {
+  val got = org.json.JSONObject(json)
+  val show = got.getJSONArray("show")
+  for (k in 0 until show.length()) alert(ctx, show.getJSONObject(k))
+  got.getBoolean("catch")
+}.getOrDefault(true)
+
+/** Rung through Google: a push server took our Firebase token. */
+fun google(ctx: Context) = ctx.getSharedPreferences("irch", 0).getBoolean("fcm", false)
 
 fun register(ctx: Context, token: String): Boolean {
   val ok = runCatching {
@@ -171,12 +181,7 @@ class IrchLive : Service() {
       startForeground(3, n)
     }
     if (running.compareAndSet(false, true)) {
-      // Relays drop clients that miss a ping (~18 s) by 5 s; asleep, a
-      // phone often does, silencing the doorbell for minutes. So the CPU
-      // idles awake, which Android honors while irch runs unrestricted.
-      val pm = getSystemService(android.os.PowerManager::class.java)
-      awake = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "irch:doorbell")
-        .apply { setReferenceCounted(false) }
+      // No wake lock held: a ring's packets wake the phone themselves.
       // Native code cannot see the network change; the doorbell must.
       val cm = getSystemService(android.net.ConnectivityManager::class.java)
       cm.registerDefaultNetworkCallback(object :
@@ -186,13 +191,10 @@ class IrchLive : Service() {
       })
       Thread {
         while (true) {
-          awake?.acquire(40 * 60_000L) // the doorbell waits at most 30 min
-          runCatching {
-            val got = JSONArray(Wake.rung(applicationContext, dataDir.absolutePath))
-            for (k in 0 until got.length()) alert(this, got.getJSONObject(k))
-          }
-          // Caught up beside it: the doorbell listens again at once.
-          if (catching.compareAndSet(false, true)) Thread {
+          val dir = dataDir.absolutePath
+          // Caught up beside it, if need be: the doorbell listens at once.
+          if (show(this, Wake.rung(applicationContext, dir)) &&
+            catching.compareAndSet(false, true)) Thread {
             try { catchUp(this, null) } finally { catching.set(false) }
           }.start()
         }
@@ -201,15 +203,9 @@ class IrchLive : Service() {
     return START_STICKY
   }
 
-  override fun onDestroy() {
-    awake?.release()
-    super.onDestroy()
-  }
-
   companion object {
     val running = java.util.concurrent.atomic.AtomicBoolean(false)
     val catching = java.util.concurrent.atomic.AtomicBoolean(false)
-    var awake: android.os.PowerManager.WakeLock? = null
   }
 }
 
@@ -218,8 +214,7 @@ class Boot : android.content.BroadcastReceiver() {
     if (i.action != Intent.ACTION_BOOT_COMPLETED) return
     val pushed = org.unifiedpush.android.connector.UnifiedPush
       .getAckDistributor(ctx) != null
-    val google = ctx.getSharedPreferences("irch", 0).getBoolean("fcm", false)
-    if (!pushed && !google) live(ctx)
+    if (!pushed && !google(ctx)) live(ctx)
   }
 }
 

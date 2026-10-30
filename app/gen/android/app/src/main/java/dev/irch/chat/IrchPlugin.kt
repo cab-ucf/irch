@@ -102,9 +102,10 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     }
     invoke.resolve(JSObject()
       .put("notify", notificationsAllowed(activity))
-      .put("background", unrestricted(activity))
+      // Woken by a push, irch needs no leave to run in the background.
+      .put("background", push != null || google(activity) || unrestricted(activity))
       .put("calls", fullScreen(activity))
-      .put("push", label))
+      .put("push", label ?: "Google's push".takeIf { google(activity) }))
   }
 
   @Command
@@ -114,7 +115,7 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
         .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE,
           activity.packageName)
       activity.startActivity(i)
-    } else if (!unrestricted(activity)) unrestrict()
+    } else if (!unrestricted(activity) && !google(activity)) unrestrict()
     else if (!fullScreen(activity)) runCatching {
       val uri = android.net.Uri.parse("package:" + activity.packageName)
       activity.startActivity(Intent(

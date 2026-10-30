@@ -21,8 +21,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   TAG: ${{ inputs.tag || github.ref_name }}
-  # Push servers phones register with: their endpoint ids, as `irch --serve`
-  # prints them beside fcm.json (Settings › Variables; none: no push).
+  # Push servers phones register with: the ids `irch --serve` prints beside
+  # fcm.json (Settings › Secrets and variables › Actions › Variables).
   IRCH_PUSH: ${{ vars.IRCH_PUSH }}
 
 jobs:
@@ -152,23 +152,21 @@ jobs:
           grep -qx "version = \"${TAG#v}\"" Cargo.toml
           v='"version": "'${TAG#v}'"'
           sed -i "s/\"version\": \"[^\"]*\"/$v/" app/tauri.conf.json
-      # Google's push, once Firebase's (public) settings are variables:
-      # FIREBASE_APP_ID, _API_KEY, _PROJECT_ID, _SENDER_ID.
+      # Google's push, once `app/google-services.json` is committed: the
+      # public settings Firebase gives for the app dev.irch.chat.
       - name: Firebase's settings
-        if: vars.FIREBASE_APP_ID != ''
-        env:
-          APP: ${{ vars.FIREBASE_APP_ID }}
-          KEY: ${{ vars.FIREBASE_API_KEY }}
-          PROJECT: ${{ vars.FIREBASE_PROJECT_ID }}
-          SENDER: ${{ vars.FIREBASE_SENDER_ID }}
         run: |
+          f=app/google-services.json
+          [ -f $f ] || exit 0
+          c='.client[] | select(.client_info.android_client_info.package_name == "dev.irch.chat")'
+          v() { jq -er "$1" $f; }
           cat > app/gen/android/app/src/main/res/values/firebase.xml <<EOF
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
-            <string name="google_app_id" translatable="false">$APP</string>
-            <string name="google_api_key" translatable="false">$KEY</string>
-            <string name="project_id" translatable="false">$PROJECT</string>
-            <string name="gcm_defaultSenderId" translatable="false">$SENDER</string>
+            <string name="google_app_id" translatable="false">$(v "$c.client_info.mobilesdk_app_id")</string>
+            <string name="google_api_key" translatable="false">$(v "$c.api_key[0].current_key")</string>
+            <string name="project_id" translatable="false">$(v .project_info.project_id)</string>
+            <string name="gcm_defaultSenderId" translatable="false">$(v .project_info.project_number)</string>
           </resources>
           EOF
       - working-directory: app
