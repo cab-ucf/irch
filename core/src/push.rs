@@ -2,24 +2,30 @@
 //! data) wakes phones through Google the moment a member rings, as their
 //! doorbell would, so no phone holds a connection open for it. A phone tells
 //! it its Firebase token and a ring token per space and epoch (wake.rs);
-//! members ring with those; Google is handed only the sealed ring.
+//! members ring with those. Google is told nothing but "wake": the same
+//! empty message every time. The phone, woken, fetches the sealed rings
+//! from the push server, which holds them for it a while.
 
-use crate::wake::{HEAD, MAX};
-use crate::{node::lock, store};
+use crate::wake::{HEAD, MAX, News};
+use crate::{Id, Net, node::lock, store};
 use anyhow::{Context, Result, ensure};
 use data_encoding::{BASE64, BASE64URL_NOPAD};
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
 use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair};
-use std::collections::BTreeMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub const ALPN: &[u8] = b"irch/push/1";
+pub const ALPN: &[u8] = b"irch/push/2";
 /// Ring tokens a phone may have here: one per space it is in.
 const MOST: usize = 4096;
+/// Rings held for a phone, at most, and for at most a day.
+const HELD: usize = 64;
+const DAY: Duration = Duration::from_secs(24 * 3600);
 const SLOW: Duration = Duration::from_secs(15);
 
 /// This build's push servers (`IRCH_PUSH`: endpoint ids), at irch's relay.
@@ -33,30 +39,67 @@ pub fn defaults() -> Vec<EndpointAddr> {
     ids.map(at).collect()
 }
 
-/// Tells a push server our Firebase token and ring tokens.
+#[derive(Serialize, Deserialize)]
+enum Ask {
+    /// Our Firebase token, ring tokens, and the key to our mailbox.
+    Register(String, Vec<[u8; 16]>, [u8; 16]),
+    /// What the mailbox holds, emptied.
+    Fetch([u8; 16]),
+}
+
+async fn ask(ep: &Endpoint, to: EndpointAddr, a: &Ask) -> Result<Vec<u8>> {
+    let go = async {
+        let c = ep.connect(to, ALPN).await?;
+        let (mut tx, mut rx) = c.open_bi().await?;
+        tx.write_all(&postcard::to_allocvec(a)?).await?;
+        tx.finish()?;
+        let got = crate::sync::rest(&mut rx, HELD * (MAX + 64)).await?;
+        c.close(0u8.into(), b"");
+        Ok(got)
+    };
+    tokio::time::timeout(SLOW, go).await?
+}
+
 pub async fn register(
     ep: &Endpoint,
     to: EndpointAddr,
     fcm: &str,
     rings: &[[u8; 16]],
+    mailbox: [u8; 16],
 ) -> Result<()> {
-    let go = async {
-        let c = ep.connect(to, ALPN).await?;
-        let (mut tx, mut rx) = c.open_bi().await?;
-        tx.write_all(&postcard::to_allocvec(&(fcm, rings))?).await?;
-        tx.finish()?;
-        let ok = rx.read_to_end(1).await?;
-        c.close(0u8.into(), b"");
-        ensure!(ok == [1], "no push here");
-        Ok(())
-    };
-    tokio::time::timeout(SLOW, go).await?
+    let a = Ask::Register(fcm.into(), rings.to_vec(), mailbox);
+    ensure!(ask(ep, to, &a).await? == [1], "no push here");
+    Ok(())
 }
 
-type Phones = BTreeMap<EndpointId, (String, Vec<[u8; 16]>)>;
+/// What our push servers (as last registered) hold for us.
+pub async fn fetch(ep: &Endpoint, dir: &Path) -> Vec<News> {
+    let at: Vec<EndpointAddr> = store::load(&dir.join("pushers"));
+    let Ok(mailbox) = crate::wake::mailbox(dir) else { return vec![] };
+    let a = &Ask::Fetch(mailbox);
+    let got = n0_future::join_all(at.into_iter().map(|to| ask(ep, to, a)));
+    let got = got.await.into_iter().flatten();
+    let got = got.flat_map(|b| postcard::from_bytes::<Vec<Vec<u8>>>(&b));
+    let news = got.flatten().filter_map(|r| {
+        let (space, raw) = r.split_first_chunk::<32>()?;
+        Some((Id(*space), raw.to_vec()))
+    });
+    news.collect()
+}
+
+/// The same, with no node running: one brief endpoint of its own.
+pub async fn fetch_asleep(dir: &Path, net: &Net) -> Result<Vec<News>> {
+    let ep = crate::node::endpoint(net).bind().await?;
+    let news = fetch(&ep, dir).await;
+    ep.close().await;
+    Ok(news)
+}
+
+type Phones = BTreeMap<EndpointId, (String, Vec<[u8; 16]>, [u8; 16])>;
+type Boxes = HashMap<[u8; 16], VecDeque<(Instant, Vec<u8>)>>;
 
 #[derive(Clone)]
-pub struct Server(Arc<(PathBuf, Mutex<Phones>, Google)>);
+pub struct Server(Arc<(PathBuf, Mutex<Phones>, Mutex<Boxes>, Google)>);
 
 impl Server {
     pub fn open(dir: &Path) -> Result<Option<Self>> {
@@ -66,48 +109,58 @@ impl Server {
         let google = Google::new(&json).context("fcm.json")?;
         let file = dir.join("phones");
         let phones = Mutex::new(store::load(&file));
-        Ok(Some(Self(Arc::new((file, phones, google)))))
+        let boxes = Mutex::default();
+        Ok(Some(Self(Arc::new((file, phones, boxes, google)))))
     }
 
-    async fn register(&self, c: &Connection) -> Result<()> {
+    async fn asked(&self, c: &Connection) -> Result<()> {
         let (mut tx, mut rx) = c.accept_bi().await?;
         let b = crate::sync::rest(&mut rx, 1024 + 17 * MOST).await?;
-        let phone: (String, Vec<[u8; 16]>) = postcard::from_bytes(&b)?;
-        ensure!(phone.0.len() <= 1024 && phone.1.len() <= MOST, "too big");
-        let (file, phones, _) = &*self.0;
-        {
-            let mut p = lock(phones);
-            p.insert(c.remote_id(), phone);
-            store::save(file, &*p)?;
-        }
-        tx.write_all(&[1]).await?;
+        let (file, phones, boxes, _) = &*self.0;
+        let reply = match postcard::from_bytes(&b)? {
+            Ask::Register(fcm, rings, mailbox) => {
+                ensure!(fcm.len() <= 1024 && rings.len() <= MOST, "too big");
+                let mut p = lock(phones);
+                p.insert(c.remote_id(), (fcm, rings, mailbox));
+                store::save(file, &*p)?;
+                vec![1]
+            }
+            Ask::Fetch(mailbox) => {
+                let held = lock(boxes).remove(&mailbox).unwrap_or_default();
+                let held = held.into_iter().filter(|(t, _)| t.elapsed() < DAY);
+                postcard::to_allocvec(&held.map(|x| x.1).collect::<Vec<_>>())?
+            }
+        };
+        tx.write_all(&reply).await?;
         tx.finish()?;
         let _ = tokio::time::timeout(SLOW, c.closed()).await;
         Ok(())
     }
 
-    /// A doorbell's ring, for whichever phones hold its token.
+    /// A doorbell's ring, held for whichever phones hold its token, which
+    /// Google then wakes.
     async fn ring(&self, c: &Connection) -> Result<()> {
         let (mut tx, mut rx) = c.accept_bi().await?;
         let mut head = [0u8; HEAD];
         rx.read_exact(&mut head).await?;
         let raw = crate::sync::rest(&mut rx, MAX).await?;
-        let (_, phones, google) = &*self.0;
-        let to: Vec<String> = lock(phones)
+        let (_, phones, boxes, google) = &*self.0;
+        let to: Vec<(String, [u8; 16])> = lock(phones)
             .values()
             .filter(|p| p.1.iter().any(|t| t[..] == head[..16]))
-            .map(|p| p.0.clone())
+            .map(|p| (p.0.clone(), p.2))
             .collect();
-        // The space and its sealed ring, if Google's 4 KB take it.
-        let mut r = head[16..48].to_vec();
-        if raw.len() <= 2800 {
-            r.extend_from_slice(&raw);
-        }
-        let live =
-            postcard::from_bytes::<crate::op::Env>(&raw).is_ok_and(|e| e.live);
+        let ring = [&head[16..48], &raw[..]].concat();
         let mut ok = false;
-        for t in to {
-            let sent = google.send(&t, &BASE64.encode(&r), live).await;
+        for (fcm, mailbox) in to {
+            {
+                let mut b = lock(boxes);
+                let held = b.entry(mailbox).or_default();
+                held.retain(|(t, _)| t.elapsed() < DAY);
+                held.truncate(HELD - 1);
+                held.push_front((Instant::now(), ring.clone()));
+            }
+            let sent = google.wake(&fcm).await;
             ok |= sent.inspect_err(|e| tracing::warn!("fcm: {e:#}")).is_ok();
         }
         tx.write_all(&[ok as u8]).await?;
@@ -126,7 +179,7 @@ impl std::fmt::Debug for Server {
 impl ProtocolHandler for Server {
     async fn accept(&self, c: Connection) -> Result<(), AcceptError> {
         let r = match c.alpn() {
-            ALPN => self.register(&c).await,
+            ALPN => self.asked(&c).await,
             _ => self.ring(&c).await,
         };
         r.map_err(|e| {
@@ -227,13 +280,13 @@ impl Google {
         Ok(t.0.clone())
     }
 
-    /// High priority: it wakes a phone from its deepest sleep. A call's
-    /// ring is no use after a minute; other news keeps a day.
-    async fn send(&self, to: &str, r: &str, live: bool) -> Result<()> {
-        let ttl = if live { "60s" } else { "86400s" };
+    /// "Wake", and nothing more: the same each time, so Google learns only
+    /// when. High priority wakes a phone from its deepest sleep; one key
+    /// folds wakes waiting on a phone that is off into one.
+    async fn wake(&self, to: &str) -> Result<()> {
         let m = serde_json::json!({ "message": {
-            "token": to, "data": { "r": r },
-            "android": { "priority": "high", "ttl": ttl },
+            "token": to, "data": { "w": "" },
+            "android": { "priority": "high", "collapse_key": "w" },
         }});
         let url =
             format!("{}/v1/projects/{}/messages:send", self.fcm, self.project);

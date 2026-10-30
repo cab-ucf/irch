@@ -68,6 +68,12 @@ pub fn push_token(dir: &Path, space: &Id, tag: &[u8; 8]) -> Result<[u8; 16]> {
     Ok(token(&k[32..].try_into()?, space, tag))
 }
 
+/// The key to our mailbox on push servers, from the same secret.
+pub fn mailbox(dir: &Path) -> Result<[u8; 16]> {
+    let k = kept(dir)?;
+    Ok(kdf("irch mailbox", &[&k[32..]])[..16].try_into()?)
+}
+
 pub async fn moved() {
     let bells = BELLS.lock().await.clone().unwrap_or_default();
     for (ep, _) in bells.values() {

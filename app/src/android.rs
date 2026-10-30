@@ -368,24 +368,28 @@ pub extern "system" fn Java_dev_irch_chat_Wake_fcm<'l>(
     ok.unwrap_or(false).into()
 }
 
-/// What Google brought (push.rs): the space, then its sealed ring.
+/// Google woke us, saying nothing: what the push servers hold, fetched.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_irch_chat_Wake_rang<'l>(
     mut env: JNIEnv<'l>,
     _: JClass<'l>,
     ctx: JObject<'l>,
     dir: JString<'l>,
-    data: JString<'l>,
 ) -> jstring {
-    use data_encoding::BASE64;
-    let (dir, data) = (text(&mut env, &dir), text(&mut env, &data));
-    let dir =
-        irch_core::profile(std::path::Path::new(&dir.unwrap_or_default()));
-    let r =
-        BASE64.decode(data.unwrap_or_default().as_bytes()).unwrap_or_default();
+    let dir = text(&mut env, &dir).unwrap_or_default();
+    let dir = irch_core::profile(std::path::Path::new(&dir));
     reply(env, ctx, async move {
-        let (space, raw) = r.split_at_checked(32).unwrap_or_default();
-        let space = irch_core::Id(space.try_into()?);
-        Ok(shown(&dir, (space, raw.to_vec())))
+        if let Some(n) = crate::running() {
+            n.fetch_pushed().await;
+            return Ok(Shown::default());
+        }
+        let net = crate::config(dir.clone(), None, None)?.net;
+        let mut all = Shown::default();
+        for news in irch_core::push::fetch_asleep(&dir, &net).await? {
+            let s = shown(&dir, news);
+            all.show.extend(s.show);
+            all.catch |= s.catch;
+        }
+        Ok(all)
     })
 }

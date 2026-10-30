@@ -1163,6 +1163,13 @@ impl Node {
         (shown, false)
     }
 
+    /// Woken by Google with a node running: what the push servers hold.
+    pub async fn fetch_pushed(self: &Arc<Self>) {
+        for news in crate::push::fetch(&self.ep, &self.dir).await {
+            self.deliver(news);
+        }
+    }
+
     /// Whether a push server took our Firebase token.
     pub fn pushing(&self) -> bool {
         !lock(&self.via).0.is_empty()
@@ -1206,12 +1213,17 @@ impl Node {
                 at.push(a);
             }
         }
+        let Ok(mailbox) = crate::wake::mailbox(&self.dir) else { return };
         let tries = at.into_iter().map(|a| {
-            let go = crate::push::register(&self.ep, a.clone(), fcm, &rings);
+            let ep = &self.ep;
+            let go = crate::push::register(ep, a.clone(), fcm, &rings, mailbox);
             async move { go.await.map(|_| a) }
         });
         let took = n0_future::join_all(tries).await.into_iter().flatten();
-        *lock(&self.via) = (took.collect(), rings);
+        let took: Vec<_> = took.collect();
+        // Where to fetch from, once woken.
+        let _ = store::save(&self.dir.join("pushers"), &took);
+        *lock(&self.via) = (took, rings);
     }
 
     /// Our push, as this space's members should have it: a doorbell's

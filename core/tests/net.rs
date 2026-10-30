@@ -847,11 +847,10 @@ async fn fake_google() -> (String, tokio::sync::mpsc::UnboundedReceiver<String>)
 }
 
 /// A storage node with a Firebase key rings a sleeping phone through
-/// Google: the phone registered there, a call goes out as one message to
-/// its token, and it is shown from the phonebook the moment it lands.
+/// Google, which carries only an empty "wake": the phone, registered there,
+/// fetches the sealed call from it and shows it from its phonebook.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_push_server_rings_a_phone_through_google() {
-    use data_encoding::BASE64;
     use irch_core::state::DM;
     let (google, mut sent) = fake_google().await;
     let sd = dir("s");
@@ -884,18 +883,20 @@ async fn a_push_server_rings_a_phone_through_google() {
     let req = req.await.expect("sent within seconds").unwrap();
     assert!(req.starts_with("POST /v1/projects/p/messages:send"), "{req}");
     assert!(req.to_lowercase().contains("authorization: bearer t"));
+    // Google is told "wake" and nothing else: not the space, not the call.
     let body = &req[req.find("\r\n\r\n").unwrap() + 4..];
     let m: serde_json::Value = serde_json::from_str(body).unwrap();
-    let m = &m["message"];
-    assert_eq!(
-        (&m["token"], &m["android"]["priority"]),
-        (&"TOKEN".into(), &"high".into())
-    );
-    let r = BASE64.decode(m["data"]["r"].as_str().unwrap().as_bytes()).unwrap();
-    let news = (Id(r[..32].try_into().unwrap()), r[32..].to_vec());
-    let n = Node::woken(&db, &news).0.expect("shown from the phonebook");
+    let wake = serde_json::json!({ "token": "TOKEN", "data": { "w": "" },
+        "android": { "priority": "high", "collapse_key": "w" } });
+    assert_eq!(m["message"], wake);
+    // Woken, the phone fetches the sealed ring from the push server.
+    let got = irch_core::push::fetch_asleep(&db, &Net::Direct).await.unwrap();
+    let n = got.iter().find_map(|x| Node::woken(&db, x).0);
+    let n = n.expect("shown from the phonebook");
     assert!(n.ring && n.space == dm);
     assert_eq!((&n.title[..], &n.body[..]), ("a", "is calling you"));
+    let again = irch_core::push::fetch_asleep(&db, &Net::Direct).await;
+    assert!(again.unwrap().is_empty(), "fetched once");
 }
 
 /// A member's photo waits on the space's storage node, though it is not

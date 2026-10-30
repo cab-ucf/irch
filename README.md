@@ -33,6 +33,30 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
   libsoup3, ALSA (libasound2) and, for calls, gstreamer plugins base,
   good, bad and libav.
 
+## Your own build, with push (once, 5 minutes)
+
+With irch's releases there is nothing to set up. To ship your own, with
+Android phones woken through Google (no battery spent holding anything
+open):
+
+1. In the [Firebase console](https://console.firebase.google.com): *Add
+   project*, then *Add app → Android* with the package `dev.irch.chat`.
+   Commit the `google-services.json` it gives as `app/google-services.json`.
+   Then *Project settings → Service accounts → Generate new private key*,
+   saved as `key.json`.
+2. On an always-on server, one command: a storage node, which pushes too.
+   ```sh
+   curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh | sh -s -- --server key.json
+   ```
+   It prints the node's storage code and its push server id. (NixOS:
+   `sudo install -o irch -m 600 key.json /var/lib/irch/data/fcm.json`, then
+   `sudo systemctl restart irch`; the id is in `journalctl -u irch`.)
+3. Set that id as the repository variable `IRCH_PUSH` (*Settings → Secrets
+   and variables → Actions → Variables*) and tag a release.
+
+Every phone on that build is then woken through your push server; people
+just install the app.
+
 ## Features
 
 - Spaces with channels (admins drag them into order), threads and named
@@ -123,8 +147,11 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   opened, and a call keeps irch up.
 - **Push servers**: a storage node holding a Firebase key. A phone tells
   it its Firebase token and one ring token per space and epoch; members
-  ring with those as with a doorbell; Google gets only the sealed ring.
-  Members ring a phone's every route at once. To offer it, once, for
+  ring with those as with a doorbell. The push server holds the sealed
+  ring for the phone (a day at most) and has Google send it "wake", the
+  same empty message every time; the phone, woken, fetches what is held
+  over iroh. Google learns when, and nothing else. Members ring a phone's
+  every route at once. To offer it, once, for
   whoever builds irch: in Firebase, a project with the Android app
   `dev.irch.chat`; commit the `google-services.json` it gives as
   `app/google-services.json`; put its service account's key on a storage
@@ -151,7 +178,9 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   storage nodes see sizes, times and devices. The Mainline DHT says an
   endpoint id is online, to anyone.
 - A member's UnifiedPush server learns when each member writes, and from
-  where. Doorbell codes are per space and die with a rekey.
+  where. A push server learns that much, and which spaces a ring is for;
+  Google, only when a phone is woken. Doorbell codes are per space and
+  die with a rekey.
 - Call frames reach the system web view's video decoders.
 - Calls are for a handful of people; Macs and iPhones need WebKit 26.
 - An iPhone in the background is not told of messages: Apple's push is a

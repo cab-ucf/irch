@@ -33,8 +33,8 @@ object Wake {
   /** Our Firebase token to irch's push servers; false if none took it. */
   @JvmStatic external fun fcm(ctx: Context, dir: String, token: String): Boolean
 
-  /** What Google brought, as `rung` tells it. */
-  @JvmStatic external fun rang(ctx: Context, dir: String, data: String): String
+  /** Google woke us: what the push servers hold, as `rung` tells it. */
+  @JvmStatic external fun rang(ctx: Context, dir: String): String
 
   /** Hand Android's context back before the activity's runtime takes it. */
   @JvmStatic external fun release()
@@ -63,16 +63,16 @@ fun wake(ctx: Context, push: String?) {
 }
 
 /** Google's push, through irch's push servers (core/src/push.rs), where
- *  this build has both: no connection of irch's own held open. A call
- *  shows the moment it lands. */
+ *  this build has both: no connection of irch's own held open. Google
+ *  carries an empty "wake"; the sealed rings come from the push server. */
 class IrchFcm : FirebaseMessagingService() {
   override fun onNewToken(token: String) {
     register(this, token)
   }
 
+  // Google's message says nothing: it only wakes us to fetch.
   override fun onMessageReceived(m: RemoteMessage) {
-    val r = m.data["r"] ?: return
-    if (show(this, Wake.rang(applicationContext, dataDir.absolutePath, r))) {
+    if (show(this, Wake.rang(applicationContext, dataDir.absolutePath))) {
       wake(this, null)
     }
   }

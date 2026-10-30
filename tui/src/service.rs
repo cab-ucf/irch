@@ -97,6 +97,14 @@ pub fn install(exe: &Path) -> Result<()> {
             println!("A storage node runs here from now on, kept up to date.");
             println!("Its code, for the people you store for (irch on this");
             println!("computer pairs with it by itself):\n\n{}", c.trim());
+            let fcm = code.with_file_name("fcm.json").exists();
+            let at = irch_core::op::uncode::<(iroh::EndpointAddr, [u8; 16])>;
+            if let (true, Ok((at, _))) = (fcm, at("host", c.trim())) {
+                println!(
+                    "\nA push server too: its id, as the build's IRCH_PUSH:"
+                );
+                println!("\n{}", at.id);
+            }
             return Ok(());
         }
         std::thread::sleep(Duration::from_secs(1));
