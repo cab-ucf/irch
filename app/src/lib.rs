@@ -746,7 +746,8 @@ pub fn run() {
         sign_out,
         to_loroh,
         open_link,
-        private
+        private,
+        in_call
     ]);
     let app = b.build(tauri::generate_context!()).expect("tauri builds");
     app.run(|app, e| {
@@ -837,6 +838,17 @@ fn alerts(n: &Node, front: bool) -> Vec<Notice> {
     let view = *VIEW.lock().unwrap_or_else(|e| e.into_inner());
     let shown = |x: &Notice| front && view == Some((x.space, x.room));
     n.notices().into_iter().filter(|x| x.ring || !shown(x)).collect()
+}
+
+/// In a call, or ringing for one, or neither: Android's voice path and
+/// the lock screen follow (android.rs, IrchPlugin.kt).
+#[tauri::command]
+async fn in_call(app: AppHandle, on: bool) {
+    #[cfg(target_os = "android")]
+    if let Some(b) = app.try_state::<android::Bridge>() {
+        b.in_call(on).await;
+    }
+    let _ = (app, on);
 }
 
 #[tauri::command]

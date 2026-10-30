@@ -292,7 +292,10 @@ async fn a_dm_call_rings_once() {
     b.call(Some((id, general(&b, &id)))).await.unwrap(); // call waiting
     a.call(Some((dm, irch_core::state::DM))).await.unwrap();
     until("b sees the call", || !b.calls(&dm).is_empty()).await;
-    let rings = |n: &Node| n.notices().into_iter().filter(|n| n.ring).count();
+    // The DM's rings (b's call in the hub, a space of two, rings for a).
+    let rings = |n: &Node| {
+        n.notices().into_iter().filter(|x| x.ring && x.space == dm).count()
+    };
     assert_eq!(rings(&b), 1, "a DM call rings");
     assert_eq!(rings(&b), 0, "once");
     assert_eq!(rings(&a), 0, "not the caller");
@@ -729,4 +732,133 @@ async fn a_photo_waits_on_the_spaces_storage_node() {
     b.shutdown().await;
     drop(b);
     assert_eq!(c.file(&id, &f).await.unwrap(), b"a photo", "from s");
+}
+
+/// A call in a fresh DM: both sides gossip in it, the callee sees the
+/// call, and once it answers, each hears the other.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dm_call_connects_both_ways() {
+    use irch_core::state::DM;
+    let (a, b) = (node("a").await, node("b").await);
+    let id = a.create("hub").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let keyed = || a.view(&id, |s| s.kem(&b.id()).is_some()) == Some(true);
+    until("b's key", keyed).await;
+    let dm = a.dm(&id, &b.id()).await.unwrap();
+    until("b in the DM", || b.spaces().contains(&dm)).await;
+    until("a gossips in the DM", || a.peers(&dm) > 0).await;
+    until("b gossips in the DM", || b.peers(&dm) > 0).await;
+    let (mut at_a, mut at_b) = (a.media(), b.media());
+    a.call(Some((dm, DM))).await.unwrap();
+    until("b sees the call", || !b.calls(&dm).is_empty()).await;
+    b.call(Some((dm, DM))).await.unwrap();
+    let n = |x: &Node| x.calls(&dm).get(&DM).map_or(0, Vec::len);
+    until("both in the call", || n(&a) == 2 && n(&b) == 2).await;
+    let hear = async |from: &Arc<Node>, rx: &mut Receiver<_>| {
+        for _ in 0..200 {
+            from.send_media(&[0, 7]);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            while let Ok((who, f)) = rx.try_recv() {
+                if who == from.id() && f == [0, 7] {
+                    return true;
+                }
+            }
+        }
+        false
+    };
+    assert!(hear(&a, &mut at_b).await, "b hears a");
+    assert!(hear(&b, &mut at_a).await, "a hears b");
+}
+
+/// A DM made while b's phone sleeps: its doorbell wakes it, it takes the
+/// DM, sleeps again; opened later, b and a meet in it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dm_taken_asleep_connects_later() {
+    use irch_core::wake;
+    let db = dir("b");
+    let a = node("a").await;
+    let b = start(&db, "b", None, false).await;
+    let id = a.create("lab").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let url = wake::doorbell(&db, &Net::Direct).await.unwrap();
+    b.set_push(Some(url)).await;
+    let ring = |p: &(iroh::EndpointId, String)| p.1.starts_with("irch:ring:");
+    until("a knows b's doorbell", || {
+        a.view(&id, |s| s.pushes_of(None).iter().any(ring)) == Some(true)
+    })
+    .await;
+    let keyed = || a.view(&id, |s| s.kem(&b.id()).is_some()) == Some(true);
+    until("b's key", keyed).await;
+    let b_id = b.id();
+    b.shutdown().await;
+    drop(b);
+    // Asleep: a opens a DM; b's doorbell takes the knock.
+    let d = db.clone();
+    let phone = tokio::spawn(async move { wake::rung(&d, &Net::Direct).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let dm = a.dm(&id, &b_id).await.unwrap();
+    let news = tokio::time::timeout(Duration::from_secs(10), phone).await;
+    let news = news.unwrap().unwrap().unwrap().expect("the knock");
+    // Woken for a moment, as Android's service does, then asleep again.
+    let b = start(&db, "b", None, false).await;
+    b.deliver(news);
+    until("b takes the DM", || b.spaces().contains(&dm)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    b.shutdown().await;
+    drop(b);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Opened: both in the DM's gossip.
+    let b = start(&db, "b", None, false).await;
+    until("b gossips in the DM", || b.peers(&dm) > 0).await;
+    until("a gossips in the DM", || a.peers(&dm) > 0).await;
+}
+
+/// Both open a DM with the other at once: they end up in one, the same.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_dms_at_once_become_one() {
+    use irch_core::state::DM;
+    let (a, b) = (node("a").await, node("b").await);
+    let id = a.create("hub").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let ka = || a.view(&id, |s| s.kem(&b.id()).is_some()) == Some(true);
+    let kb = || b.view(&id, |s| s.kem(&a.id()).is_some()) == Some(true);
+    until("keys both ways", || ka() && kb()).await;
+    let (ia, ib) = (a.id(), b.id());
+    let (da, db) = tokio::join!(a.dm(&id, &ib), b.dm(&id, &ia));
+    assert_ne!(da.unwrap(), db.unwrap(), "two DMs, as before");
+    // Asked again, each names the same one, and both are in it.
+    let same = async || {
+        for _ in 0..400 {
+            let (x, y) = (a.dm(&id, &ib).await, b.dm(&id, &ia).await);
+            if let (Ok(x), Ok(y)) = (x, y)
+                && x == y
+                && a.peers(&x) > 0
+            {
+                return Some(x);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    };
+    let dm = same().await.expect("one DM for both");
+    say(&a, &dm, DM, "found you").await;
+    until("b reads it", || texts(&b, &dm, &DM) == ["found you"]).await;
+}
+
+/// A call in a small space's channel rings like a DM's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_small_spaces_call_rings() {
+    let (a, b) = (node("a").await, node("b").await);
+    let id = a.create("friends").await.unwrap();
+    let ch = general(&a, &id);
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let keyed = || a.view(&id, |s| s.kem(&b.id()).is_some()) == Some(true);
+    until("b's key", keyed).await;
+    until("b gossips", || b.peers(&id) > 0).await;
+    b.notices();
+    a.call(Some((id, ch))).await.unwrap();
+    until("b sees the call", || !b.calls(&id).is_empty()).await;
+    let rings: Vec<_> = b.notices().into_iter().filter(|n| n.ring).collect();
+    assert_eq!(rings.len(), 1, "it rings");
+    assert!(b.loud(&id));
 }

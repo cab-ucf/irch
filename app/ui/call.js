@@ -89,6 +89,8 @@ export async function join(space, channel, rpc) {
     tuned = true;
   }
   await rpc("ring", { space, channel });
+  // A phone's call mode: its echo canceller both ways, screen on.
+  quiet(core.invoke("in_call", { on: true }));
   call.on = { space, channel };
   call.since = Date.now();
   call.met = false;
@@ -123,6 +125,7 @@ export async function join(space, channel, rpc) {
 export async function leave(rpc) {
   if (!call.on) return;
   call.on = null;
+  quiet(core.invoke("in_call", { on: false }));
   clearInterval(said);
   await video(null);
   mic?.getTracks().forEach((t) => t.stop());
@@ -186,9 +189,12 @@ export async function video(kind) {
     // Frames from a canvas, where a video element gives none.
     const canvas = h0("canvas");
     let sw = 0, sh = 0, crop = false;
+    // A phone's camera gives landscape frames marked "turn 90°", which an
+    // encoder ignores: drawn on a canvas, they come out as seen.
+    const phone = matchMedia("(pointer: coarse)").matches;
     const frame = (t) => {
       try {
-        if (crop) throw 0;
+        if (crop || phone) throw 0;
         return new VideoFrame(v, { timestamp: t });
       } catch {
         [canvas.width, canvas.height] = [w, h];

@@ -105,6 +105,10 @@ impl Bridge {
         self.call("hush", serde_json::json!({})).await;
     }
 
+    pub async fn in_call(&self, on: bool) {
+        self.call("inCall", serde_json::json!({ "on": on })).await;
+    }
+
     pub async fn share(&self, text: &str) {
         self.call("share", Text { text }).await;
     }
@@ -248,9 +252,8 @@ async fn told(
         for x in v.iter().filter(|x| x.ring) {
             n.ringing(&x.space, x.room).await;
         }
-        let dm = |s: &Id| n.view(s, |s| s.dm.is_some()) == Some(true);
         let ended =
-            spaces.into_iter().filter(|s| dm(s) && n.calls(s).is_empty());
+            spaces.into_iter().filter(|s| n.loud(s) && n.calls(s).is_empty());
         v.extend(ended.map(|space| Notice {
             space,
             room: irch_core::state::DM,

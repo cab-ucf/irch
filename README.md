@@ -154,6 +154,11 @@ Optional, and only if they stay simple:
   leaked key would then reveal little before or after it.
 - Safety numbers to compare in person; per-device keys, so one lost
   phone can be removed alone.
+- A password lock on a space, on this device (its view and its keys at
+  rest).
+- Spaces apart: today each has its own keys, gossip, storage and doorbell,
+  but one identity and device id across all, so members of two spaces can
+  tell it is the same person (Profiles keep identities apart).
 - An outside audit.
 
 ## Layout

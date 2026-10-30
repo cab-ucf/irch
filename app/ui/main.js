@@ -960,6 +960,7 @@ function incoming(sid, ch, who) {
   if (calling) return;
   const ids = callOf(sid, ch)?.call ?? [];
   who ??= ids.length ? nameOf(ids[0]) : "Someone";
+  who = who.split(" in #")[0]; // a channel's notice names the room too
   // On screen, the page rings (Android's own ring put away, not doubled),
   // and the caller hears that it rings here.
   const ring = () => {
@@ -978,7 +979,8 @@ function incoming(sid, ch, who) {
   }, 2000);
   calling = modal((finish) => h("div", {},
     h("div", { class: "m-body" }, h("h2", {}, who),
-      h("p", { class: "sub" }, "is calling you")),
+      h("p", { class: "sub" }, S.spaces.find((x) => x.id === sid)?.dm
+        ? "is calling you" : `is calling #${callOf(sid, ch)?.name ?? "a channel"}`)),
     foot(h("button", { class: "btn link", onclick: () => finish(false) },
       "Decline"),
     h("button", { class: "btn green", onclick: () => finish(true) },
@@ -990,6 +992,8 @@ function incoming(sid, ch, who) {
     calling = null;
     quiet(invoke("hush"));
     if (yes) answer(sid, ch);
+    // Not answered: off the lock screen again.
+    else if (!av.call.on) quiet(invoke("in_call", { on: false }));
   });
 }
 
