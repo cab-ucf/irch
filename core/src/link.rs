@@ -6,7 +6,8 @@ use crate::op::{Link, clip};
 use anyhow::{Result, bail, ensure};
 use std::collections::HashMap;
 
-const PAGE: usize = 512 << 10;
+// YouTube's tags come after 750 KB of scripts; reading stops at </head>.
+const PAGE: usize = 2 << 20;
 const IMAGE: usize = 2 << 20;
 
 /// The first https link in a message.
@@ -69,11 +70,16 @@ async fn get(
         bail!("not {kind}: {ct}");
     }
     let mut b = vec![];
+    let html = kind == "text/html";
     while let Some(c) = r.chunk().await? {
         b.extend_from_slice(&c);
+        let tail = &b[b.len().saturating_sub(c.len() + 6)..];
+        if html && tail.windows(7).any(|w| w.eq_ignore_ascii_case(b"</head>")) {
+            break;
+        }
         if b.len() > max {
             // A page's head is enough; an image cut short is none.
-            ensure!(kind == "text/html", "too big");
+            ensure!(html, "too big");
             b.truncate(max);
             break;
         }
