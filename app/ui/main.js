@@ -3024,7 +3024,7 @@ function wire() {
   addEventListener("touchstart", (e) => {
     const t = e.touches[0];
     const skip = e.touches.length > 1 || $("modal").open ||
-      e.target.closest?.("textarea, input, pre");
+      e.target.closest?.("textarea, input, pre, table");
     touch = skip ? null : [t.clientX, t.clientY];
   }, { passive: true });
   addEventListener("touchend", (e) => {
