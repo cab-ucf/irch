@@ -21,9 +21,9 @@ use tokio::time::timeout;
 pub const ALPN: &[u8] = b"irch/wake/1";
 const SLOW: Duration = Duration::from_secs(15);
 /// A space's id and one sealed op.
-const MAX: usize = 64 * 1024;
+pub(crate) const MAX: usize = 64 * 1024;
 /// token ‖ space ‖ epoch tag
-const HEAD: usize = 16 + 32 + 8;
+pub(crate) const HEAD: usize = 16 + 32 + 8;
 
 pub type News = (crate::Id, Vec<u8>);
 
@@ -38,23 +38,34 @@ async fn bell(dir: &Path, net: &Net) -> Result<Bell> {
     if let Some(b) = bells.get(dir) {
         return Ok(b.clone());
     }
-    // Kept, so the address holds.
-    let f = dir.join("bell");
-    let k = match std::fs::read(&f) {
-        Ok(k) if k.len() == 48 => k,
-        _ => {
-            std::fs::create_dir_all(dir)?;
-            let k = crate::crypto::rand::<48>().to_vec();
-            crate::store::write(&f, &k)?;
-            k
-        }
-    };
+    let k = kept(dir)?;
     let key = SecretKey::from_bytes(&k[..32].try_into()?);
     let b = crate::node::endpoint(net).secret_key(key);
     let ep = b.alpns(vec![ALPN.to_vec()]).bind().await?;
     let bell = (ep, k[32..].try_into()?);
     bells.insert(dir.into(), bell.clone());
     Ok(bell)
+}
+
+/// The doorbell's key and secret, kept so its address and codes hold.
+fn kept(dir: &Path) -> Result<Vec<u8>> {
+    let f = dir.join("bell");
+    match std::fs::read(&f) {
+        Ok(k) if k.len() == 48 => Ok(k),
+        _ => {
+            std::fs::create_dir_all(dir)?;
+            let k = crate::crypto::rand::<48>().to_vec();
+            crate::store::write(&f, &k)?;
+            Ok(k)
+        }
+    }
+}
+
+/// A space's ring token for a push server to know us by, from the same
+/// secret: a rekey retires it as it does the doorbell's.
+pub fn push_token(dir: &Path, space: &Id, tag: &[u8; 8]) -> Result<[u8; 16]> {
+    let k = kept(dir)?;
+    Ok(token(&k[32..].try_into()?, space, tag))
 }
 
 pub async fn moved() {

@@ -21,6 +21,9 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   TAG: ${{ inputs.tag || github.ref_name }}
+  # Push servers phones register with: their endpoint ids, as `irch --serve`
+  # prints them beside fcm.json (Settings › Variables; none: no push).
+  IRCH_PUSH: ${{ vars.IRCH_PUSH }}
 
 jobs:
   # Nothing is built, signed or published unless irch's own tests pass.
@@ -149,6 +152,25 @@ jobs:
           grep -qx "version = \"${TAG#v}\"" Cargo.toml
           v='"version": "'${TAG#v}'"'
           sed -i "s/\"version\": \"[^\"]*\"/$v/" app/tauri.conf.json
+      # Google's push, once Firebase's (public) settings are variables:
+      # FIREBASE_APP_ID, _API_KEY, _PROJECT_ID, _SENDER_ID.
+      - name: Firebase's settings
+        if: vars.FIREBASE_APP_ID != ''
+        env:
+          APP: ${{ vars.FIREBASE_APP_ID }}
+          KEY: ${{ vars.FIREBASE_API_KEY }}
+          PROJECT: ${{ vars.FIREBASE_PROJECT_ID }}
+          SENDER: ${{ vars.FIREBASE_SENDER_ID }}
+        run: |
+          cat > app/gen/android/app/src/main/res/values/firebase.xml <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+            <string name="google_app_id" translatable="false">$APP</string>
+            <string name="google_api_key" translatable="false">$KEY</string>
+            <string name="project_id" translatable="false">$PROJECT</string>
+            <string name="gcm_defaultSenderId" translatable="false">$SENDER</string>
+          </resources>
+          EOF
       - working-directory: app
         # Phones only: x86_64 is for emulators, which build their own.
         run: NDK_HOME="$ANDROID_NDK_LATEST_HOME" cargo tauri android build

@@ -56,7 +56,8 @@ async fn node(name: &str) -> Arc<Node> {
 }
 
 async fn until(what: &str, f: impl Fn() -> bool) {
-    for _ in 0..400 {
+    // Forty seconds: a busy machine runs every test at once.
+    for _ in 0..800 {
         if f() {
             return;
         }
@@ -755,6 +756,108 @@ async fn a_call_shows_on_a_sleeping_phone_at_once() {
     a.call(None).await.unwrap();
     let news = phone.await.unwrap().unwrap().expect("its end");
     assert!(Node::peek(&db, &news).expect("hushed").hush);
+}
+
+/// Google's token and send endpoints, as plain http here: each message
+/// sent comes out of the receiver, request and all.
+async fn fake_google() -> (String, tokio::sync::mpsc::UnboundedReceiver<String>)
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Ok((mut c, _)) = l.accept().await {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let (mut b, mut buf) = (vec![], [0; 4096]);
+                let mut want = usize::MAX;
+                while b.len() < want {
+                    let n = c.read(&mut buf).await.unwrap();
+                    b.extend_from_slice(&buf[..n]);
+                    let end = b.windows(4).position(|w| w == b"\r\n\r\n");
+                    if let Some(i) = end.filter(|_| want == usize::MAX) {
+                        let head =
+                            String::from_utf8_lossy(&b[..i]).to_lowercase();
+                        let len = head.lines().find_map(|l| {
+                            l.strip_prefix("content-length:")?
+                                .trim()
+                                .parse()
+                                .ok()
+                        });
+                        want = i + 4 + len.unwrap_or(0);
+                    }
+                }
+                let req = String::from_utf8_lossy(&b).to_string();
+                let reply = match req.starts_with("POST /token") {
+                    true => r#"{"access_token":"t","expires_in":3600}"#,
+                    false => {
+                        let _ = tx.send(req);
+                        "{}"
+                    }
+                };
+                let r = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\
+                     connection: close\r\n\r\n{reply}",
+                    reply.len()
+                );
+                c.write_all(r.as_bytes()).await.unwrap();
+            });
+        }
+    });
+    (url, rx)
+}
+
+/// A storage node with a Firebase key rings a sleeping phone through
+/// Google: the phone registered there, a call goes out as one message to
+/// its token, and it is shown from the phonebook the moment it lands.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_push_server_rings_a_phone_through_google() {
+    use data_encoding::BASE64;
+    use irch_core::state::DM;
+    let (google, mut sent) = fake_google().await;
+    let sd = dir("s");
+    std::fs::create_dir_all(&sd).unwrap();
+    let account = serde_json::json!({
+        "project_id": "p", "client_email": "irch@p",
+        "private_key": include_str!("data/test-key.pem"),
+        "token_uri": format!("{google}/token"), "fcm_uri": google,
+    });
+    std::fs::write(sd.join("fcm.json"), account.to_string()).unwrap();
+    let s = start(&sd, "s", None, true).await;
+    let db = dir("b");
+    let (a, b) = (node("a").await, start(&db, "b", None, false).await);
+    let id = a.create("hub").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    pair(&b, &s, &[]).await;
+    let keyed = || a.view(&id, |s| s.kem(&b.id()).is_some()) == Some(true);
+    until("b's key", keyed).await;
+    let dm = a.dm(&id, &b.id()).await.unwrap();
+    until("b in the DM", || b.spaces().contains(&dm)).await;
+    b.set_push(Some("fcm:TOKEN".into())).await;
+    let ring = |p: &(iroh::EndpointId, String)| p.1.starts_with("irch:ring:");
+    let told = || a.view(&dm, |s| s.pushes_of(None).iter().any(ring));
+    until("a knows b's push server", || told() == Some(true)).await;
+    b.shutdown().await;
+    drop(b);
+
+    a.call(Some((dm, DM))).await.unwrap();
+    let req = tokio::time::timeout(Duration::from_secs(10), sent.recv());
+    let req = req.await.expect("sent within seconds").unwrap();
+    assert!(req.starts_with("POST /v1/projects/p/messages:send"), "{req}");
+    assert!(req.to_lowercase().contains("authorization: bearer t"));
+    let body = &req[req.find("\r\n\r\n").unwrap() + 4..];
+    let m: serde_json::Value = serde_json::from_str(body).unwrap();
+    let m = &m["message"];
+    assert_eq!(
+        (&m["token"], &m["android"]["priority"]),
+        (&"TOKEN".into(), &"high".into())
+    );
+    let r = BASE64.decode(m["data"]["r"].as_str().unwrap().as_bytes()).unwrap();
+    let news = (Id(r[..32].try_into().unwrap()), r[32..].to_vec());
+    let n = Node::peek(&db, &news).expect("shown from the phonebook");
+    assert!(n.ring && n.space == dm);
+    assert_eq!((&n.title[..], &n.body[..]), ("a", "is calling you"));
 }
 
 /// A member's photo waits on the space's storage node, though it is not

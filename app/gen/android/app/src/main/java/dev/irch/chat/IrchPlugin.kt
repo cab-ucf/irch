@@ -74,9 +74,12 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     if (!notificationsAllowed(activity) && Build.VERSION.SDK_INT >= 33) {
       ActivityCompat.requestPermissions(activity, arrayOf(POST_NOTIFICATIONS), 1)
     }
-    // A push app costs almost no battery; else a service keeps a doorbell.
-    UnifiedPush.tryUseCurrentOrDefaultDistributor(activity) { ok ->
-      if (ok) UnifiedPush.register(activity) else live(activity)
+    // Google's push through irch's push servers; else a push app; else
+    // a service keeps irch's own doorbell. The first costs no battery.
+    fcm(activity) { google ->
+      if (!google) UnifiedPush.tryUseCurrentOrDefaultDistributor(activity) { ok ->
+        if (ok) UnifiedPush.register(activity) else live(activity)
+      }
     }
   }
 

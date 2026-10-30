@@ -193,6 +193,17 @@ fn reply(
     ctx: JObject,
     f: impl Future<Output = anyhow::Result<Vec<Notice>>>,
 ) -> jstring {
+    hold(&env, &ctx);
+    let r = tauri::async_runtime::block_on(f);
+    let r =
+        r.inspect_err(|e| tracing::warn!("wake: {e:#}")).unwrap_or_default();
+    let json = serde_json::to_string(&r).unwrap_or_else(|_| "[]".into());
+    env.new_string(json).map_or(std::ptr::null_mut(), |s| s.into_raw())
+}
+
+/// Android's context for native code, where the activity's runtime has
+/// not set it.
+fn hold(env: &JNIEnv, ctx: &JObject) {
     if !TAO.load(SeqCst)
         && !OURS.load(SeqCst)
         && let (Ok(vm), Ok(g)) = (env.get_java_vm(), env.new_global_ref(ctx))
@@ -203,11 +214,6 @@ fn reply(
         std::mem::forget(g);
         OURS.store(true, SeqCst);
     }
-    let r = tauri::async_runtime::block_on(f);
-    let r =
-        r.inspect_err(|e| tracing::warn!("wake: {e:#}")).unwrap_or_default();
-    let json = serde_json::to_string(&r).unwrap_or_else(|_| "[]".into());
-    env.new_string(json).map_or(std::ptr::null_mut(), |s| s.into_raw())
 }
 
 /// The activity is starting, and tao brings its own context.
@@ -312,11 +318,64 @@ async fn rung(dir: PathBuf) -> anyhow::Result<Vec<Notice>> {
         return Ok(vec![]);
     };
     let Some(news) = news? else { return Ok(vec![]) };
+    Ok(shown(&dir, news))
+}
+
+/// A ring's call, to show now (unless irch is in sight); its news, for
+/// a running node or the catching up after.
+fn shown(dir: &std::path::Path, news: News) -> Vec<Notice> {
     let hide = dir.join("private").exists();
-    let shown = Node::peek(&dir, &news).filter(|_| !crate::FG.load(SeqCst));
+    let shown = Node::peek(dir, &news).filter(|_| !crate::FG.load(SeqCst));
     match crate::running() {
         Some(n) => n.deliver(news),
         None => NEWS.lock().unwrap_or_else(|e| e.into_inner()).push(news),
     }
-    Ok(shown.into_iter().map(|x| crate::veil(x, hide)).collect())
+    shown.into_iter().map(|x| crate::veil(x, hide)).collect()
+}
+
+/// Firebase: our token to the push servers. False if none took it.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_irch_chat_Wake_fcm<'l>(
+    mut env: JNIEnv<'l>,
+    _: JClass<'l>,
+    ctx: JObject<'l>,
+    dir: JString<'l>,
+    token: JString<'l>,
+) -> jboolean {
+    hold(&env, &ctx);
+    let (dir, token) = (text(&mut env, &dir), text(&mut env, &token));
+    let dir =
+        irch_core::profile(std::path::Path::new(&dir.unwrap_or_default()));
+    let ok = tauri::async_runtime::block_on(async {
+        let n = node(dir).await?;
+        n.set_push(Some(format!("fcm:{}", token.unwrap_or_default()))).await;
+        tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            crate::nap().await;
+        });
+        anyhow::Ok(n.pushing())
+    });
+    ok.unwrap_or(false).into()
+}
+
+/// What Google brought (push.rs): the space, then its sealed ring.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_irch_chat_Wake_rang<'l>(
+    mut env: JNIEnv<'l>,
+    _: JClass<'l>,
+    ctx: JObject<'l>,
+    dir: JString<'l>,
+    data: JString<'l>,
+) -> jstring {
+    use data_encoding::BASE64;
+    let (dir, data) = (text(&mut env, &dir), text(&mut env, &data));
+    let dir =
+        irch_core::profile(std::path::Path::new(&dir.unwrap_or_default()));
+    let r =
+        BASE64.decode(data.unwrap_or_default().as_bytes()).unwrap_or_default();
+    reply(env, ctx, async move {
+        let (space, raw) = r.split_at_checked(32).unwrap_or_default();
+        let space = irch_core::Id(space.try_into()?);
+        Ok(shown(&dir, (space, raw.to_vec())))
+    })
 }

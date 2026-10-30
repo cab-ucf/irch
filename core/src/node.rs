@@ -45,7 +45,7 @@ const RINGS: usize = 10;
 const ONLINE: Duration = Duration::from_secs(150);
 // Someone in a call says so every 15 s.
 const CALLER: Duration = Duration::from_secs(45);
-const RELAYS: [&str; 2] =
+pub(crate) const RELAYS: [&str; 2] =
     ["https://iroh.cxn.center./", "https://use1-1.relay.n0.iroh.link./"];
 pub use crate::op::{MAX_NAME, MAX_TEXT};
 /// What storage nodes keep without their password.
@@ -243,7 +243,7 @@ async fn hold(dir: &Path) -> Result<std::fs::File> {
     bail!("another irch is using {}", dir.display())
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -525,6 +525,8 @@ pub struct Node {
     wake: Mutex<HashMap<String, (Option<Instant>, bool)>>,
     rang: Mutex<HashSet<(Id, Id, Ch)>>,
     push: OnceLock<reqwest::Client>,
+    // Push servers that took our Firebase token, and the ring tokens.
+    via: Mutex<(Vec<EndpointAddr>, Vec<[u8; 16]>)>,
     name: Mutex<String>,
     events: broadcast::Sender<Event>,
     clock: AtomicU64,
@@ -800,6 +802,7 @@ impl Node {
             wake: Mutex::default(),
             rang: Mutex::default(),
             push: OnceLock::new(),
+            via: Mutex::default(),
             name: Mutex::new(cfg.name),
             events: broadcast::channel(1024).0,
             clock: AtomicU64::new(0),
@@ -816,13 +819,20 @@ impl Node {
             media: broadcast::channel(128).0,
         });
         let gate = Some(gate(Arc::downgrade(&n)));
-        let router = Router::builder(n.ep.clone())
+        let mut router = Router::builder(n.ep.clone())
             .accept(iroh_blobs::ALPN, BlobsProtocol::new(&n.files, gate))
             .accept(iroh_gossip::ALPN, n.gossip.clone())
             .accept(sync::ALPN, Proto(Arc::downgrade(&n)))
             .accept(BLOB, Proto(Arc::downgrade(&n)))
-            .accept(call::ALPN, Proto(Arc::downgrade(&n)))
-            .spawn();
+            .accept(call::ALPN, Proto(Arc::downgrade(&n)));
+        // With a Firebase key, a storage node rings phones through Google.
+        if serve.is_some()
+            && let Some(p) = crate::push::Server::open(&n.dir)?
+        {
+            let r = router.accept(crate::push::ALPN, p.clone());
+            router = r.accept(crate::wake::ALPN, p);
+        }
+        let router = router.spawn();
         let _ = n.router.set(router);
         n.persist();
         n.save_hosts();
@@ -1095,14 +1105,21 @@ impl Node {
         }
     }
 
+    /// Whether a push server took our Firebase token.
+    pub fn pushing(&self) -> bool {
+        !lock(&self.via).0.is_empty()
+    }
+
     pub fn pushed(&self) -> bool {
         lock(&self.prefs).push.is_some()
     }
 
     /// Our UnifiedPush endpoint, or none: sealed to every space we are in.
+    /// `fcm:TOKEN` for Firebase, through whichever push servers take it.
     pub async fn set_push(self: &Arc<Self>, url: Option<String>) {
         lock(&self.prefs).push = url;
         self.save_prefs();
+        self.register().await;
         // Every time, not only when it changed: each space's code must be
         // the one a sender accepts now (0.1.0 changed its form).
         for id in self.spaces() {
@@ -1111,19 +1128,57 @@ impl Node {
         self.phonebook();
     }
 
+    /// Our Firebase token and every space's ring token, to each push server
+    /// we know: this build's, and our storage nodes that have Google's key.
+    async fn register(self: &Arc<Self>) {
+        let push = lock(&self.prefs).push.clone();
+        let Some(fcm) = push.as_deref().and_then(|u| u.strip_prefix("fcm:"))
+        else {
+            return;
+        };
+        let mut rings = vec![];
+        for sp in self.all() {
+            let Some(inv) = &sp.inv else { continue };
+            let t = tag(&lock(&sp.book).key(inv).0);
+            rings.extend(crate::wake::push_token(&self.dir, &sp.id, &t));
+        }
+        let mut at = crate::push::defaults();
+        for (a, _) in self.stores(&self.own) {
+            if !at.iter().any(|b| b.id == a.id) {
+                at.push(a);
+            }
+        }
+        let tries = at.into_iter().map(|a| {
+            let go = crate::push::register(&self.ep, a.clone(), fcm, &rings);
+            async move { go.await.map(|_| a) }
+        });
+        let took = n0_future::join_all(tries).await.into_iter().flatten();
+        *lock(&self.via) = (took.collect(), rings);
+    }
+
     /// Our push, as this space's members should have it: a doorbell's
     /// code made for the space and its epoch, retired by the next rekey.
     async fn tell_push(self: &Arc<Self>, id: &Id) -> Result<()> {
         let Some(url) = lock(&self.prefs).push.clone() else { return Ok(()) };
         let sp = self.get(id)?;
         let Some(inv) = &sp.inv else { return Ok(()) };
-        let url = match url.starts_with("irch:wake:") {
-            true => {
-                let t = tag(&lock(&sp.book).key(inv).0);
-                crate::wake::allow(&self.dir, id, &t)?;
-                crate::wake::for_space(&url, id, &t).context("bad doorbell")?
+        let t = tag(&lock(&sp.book).key(inv).0);
+        let url = if url.starts_with("irch:wake:") {
+            crate::wake::allow(&self.dir, id, &t)?;
+            crate::wake::for_space(&url, id, &t).context("bad doorbell")?
+        } else if url.starts_with("fcm:") {
+            // A ring code for each push server; a new one (a space joined,
+            // rekeyed) registered first.
+            let k = crate::wake::push_token(&self.dir, id, &t)?;
+            if !lock(&self.via).1.contains(&k) {
+                self.register().await;
             }
-            false => url,
+            let at = lock(&self.via).0.clone();
+            ensure!(!at.is_empty(), "no push server took us");
+            let codes = at.into_iter().map(|a| code("ring", &(a, t, k)));
+            codes.collect::<Vec<_>>().join(" ")
+        } else {
+            url
         };
         let (me, dev) = (self.id(), self.ep.id());
         let has = self.view(id, |s| s.push(&me, &dev).map(str::to_string));
@@ -1155,8 +1210,13 @@ impl Node {
         for (d, url) in
             urls.into_iter().filter(|u| u.0 != dev && pushable(&u.1))
         {
-            if url.starts_with("irch:ring:") {
-                let (n, news) = (Arc::downgrade(self), news.clone());
+            // Each of a phone's routes at once (its doorbell, push servers):
+            // the first through rings it.
+            for url in
+                url.split_whitespace().filter(|_| url.starts_with("irch:ring:"))
+            {
+                let (n, news, url) =
+                    (Arc::downgrade(self), news.clone(), url.to_string());
                 tokio::spawn(async move {
                     // No answer (a phone between networks): retry for a minute.
                     for wait in [0, 3, 10, 45] {
@@ -1171,6 +1231,8 @@ impl Node {
                         }
                     }
                 });
+            }
+            if url.starts_with("irch:ring:") {
                 continue;
             }
             let wait = {
@@ -3301,7 +3363,7 @@ pub fn http() -> reqwest::Client {
     client().build().expect("HTTP client")
 }
 
-fn client() -> reqwest::ClientBuilder {
+pub(crate) fn client() -> reqwest::ClientBuilder {
     #[cfg(not(target_os = "android"))]
     let ca = iroh::tls::CaTlsConfig::system();
     #[cfg(target_os = "android")]

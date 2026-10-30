@@ -8,6 +8,9 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import com.google.firebase.messaging.FirebaseMessaging
+import com.google.firebase.messaging.FirebaseMessagingService
+import com.google.firebase.messaging.RemoteMessage
 import org.json.JSONArray
 import org.unifiedpush.android.connector.FailedReason
 import org.unifiedpush.android.connector.PushService
@@ -27,6 +30,12 @@ object Wake {
   /** Waits for the doorbell; a call it brings, as notices to show now. */
   @JvmStatic external fun rung(ctx: Context, dir: String): String
 
+  /** Our Firebase token to irch's push servers; false if none took it. */
+  @JvmStatic external fun fcm(ctx: Context, dir: String, token: String): Boolean
+
+  /** What Google brought: a call, as notices to show now. */
+  @JvmStatic external fun rang(ctx: Context, dir: String, data: String): String
+
   /** Hand Android's context back before the activity's runtime takes it. */
   @JvmStatic external fun release()
 }
@@ -34,23 +43,63 @@ object Wake {
 /** UnifiedPush: the ping carries nothing; irch fetches from peers. */
 class IrchPush : PushService() {
   override fun onNewEndpoint(endpoint: PushEndpoint, instance: String) =
-    wake(endpoint.url)
+    wake(this, endpoint.url)
 
-  override fun onMessage(message: PushMessage, instance: String) = wake(null)
+  override fun onMessage(message: PushMessage, instance: String) =
+    wake(this, null)
 
-  override fun onUnregistered(instance: String) = wake("")
+  override fun onUnregistered(instance: String) = wake(this, "")
 
   override fun onRegistrationFailed(reason: FailedReason, instance: String) {}
+}
 
-  private fun wake(push: String?) {
-    val i = Intent(this, IrchWake::class.java).putExtra("push", push)
-    // The distributor lends a few foreground seconds to start a service;
-    // refused (Android 12+, battery optimized), catch up in those seconds.
-    runCatching { startForegroundService(i) }.onFailure {
-      Thread {
-        catchUp(this, push)
-      }.start()
+/** A push lends a few foreground seconds to start a service; refused
+ *  (Android 12+, battery optimized), irch catches up in those seconds. */
+fun wake(ctx: Context, push: String?) {
+  val i = Intent(ctx, IrchWake::class.java).putExtra("push", push)
+  runCatching { ctx.startForegroundService(i) }.onFailure {
+    Thread { catchUp(ctx, push) }.start()
+  }
+}
+
+/** Google's push, through irch's push servers (core/src/push.rs), where
+ *  this build has both: no connection of irch's own held open. A call
+ *  shows the moment it lands. */
+class IrchFcm : FirebaseMessagingService() {
+  override fun onNewToken(token: String) {
+    register(this, token)
+  }
+
+  override fun onMessageReceived(m: RemoteMessage) {
+    val r = m.data["r"] ?: return
+    runCatching {
+      val got = JSONArray(Wake.rang(applicationContext, dataDir.absolutePath, r))
+      for (k in 0 until got.length()) alert(this, got.getJSONObject(k))
     }
+    wake(this, null)
+  }
+}
+
+fun register(ctx: Context, token: String): Boolean {
+  val ok = runCatching {
+    Wake.fcm(ctx.applicationContext, ctx.dataDir.absolutePath, token)
+  }.getOrDefault(false)
+  ctx.getSharedPreferences("irch", 0).edit().putBoolean("fcm", ok).apply()
+  return ok
+}
+
+/** Firebase's token to the push servers; `done(false)` where this build
+ *  or phone has no Firebase, or no push server took it. */
+fun fcm(ctx: Context, done: (Boolean) -> Unit) {
+  val main = android.os.Handler(android.os.Looper.getMainLooper())
+  val t = runCatching { FirebaseMessaging.getInstance().token }.getOrNull()
+    ?: return done(false)
+  t.addOnCompleteListener { r ->
+    val token = if (r.isSuccessful) r.result else null
+    Thread {
+      val ok = token != null && register(ctx, token)
+      main.post { done(ok) }
+    }.start()
   }
 }
 
@@ -169,7 +218,8 @@ class Boot : android.content.BroadcastReceiver() {
     if (i.action != Intent.ACTION_BOOT_COMPLETED) return
     val pushed = org.unifiedpush.android.connector.UnifiedPush
       .getAckDistributor(ctx) != null
-    if (!pushed) live(ctx)
+    val google = ctx.getSharedPreferences("irch", 0).getBoolean("fcm", false)
+    if (!pushed && !google) live(ctx)
   }
 }
 

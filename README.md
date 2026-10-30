@@ -118,6 +118,18 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   Android must let irch run unrestricted; irch says so until it does. With
   a UnifiedPush app such as ntfy, that app wakes irch instead. iPhones
   have no such door: irch catches up when opened, and a call keeps it up.
+- **Push servers** spare Android phones that doorbell, and its battery: a
+  storage node holding a Firebase key wakes them through Google. A phone
+  tells it its Firebase token and one ring token per space and epoch; a
+  member rings with one as with a doorbell; Google gets only the sealed
+  ring, and the phone shows the call from what its node left asleep.
+  Members ring a phone's every route at once. To offer it (once, for
+  whoever builds irch): a Firebase project with the Android app
+  `dev.irch.chat`; its public settings as the repository's variables
+  `FIREBASE_APP_ID`, `_API_KEY`, `_PROJECT_ID`, `_SENDER_ID`; a service
+  account's key as `fcm.json` in a storage node's data folder
+  (`/var/lib/irch/data` on NixOS); the id it then prints as `IRCH_PUSH`
+  (several, comma-separated). Phones without Google keep the doorbell.
 
 | network | terminal (app env) | who else is involved |
 |---|---|---|
