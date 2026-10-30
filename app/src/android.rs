@@ -52,7 +52,6 @@ pub async fn notify_check(
     let b = app.try_state::<Bridge>().context("no bridge")?;
     let cmd = match ask {
         "fix" => Some("allowAlerts"),
-        "background" => Some("askBackground"),
         "test" => Some("testAlert"),
         _ => None,
     };

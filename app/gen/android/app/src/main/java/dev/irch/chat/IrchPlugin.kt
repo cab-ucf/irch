@@ -122,12 +122,6 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
   }
 
   @Command
-  fun askBackground(invoke: Invoke) {
-    if (!unrestricted(activity)) unrestrict()
-    invoke.resolve()
-  }
-
-  @Command
   fun testAlert(invoke: Invoke) {
     postMessage(activity, "test", "irch", "Notifications reach this phone.")
     invoke.resolve()

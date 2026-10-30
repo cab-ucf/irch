@@ -142,6 +142,8 @@ space = a grow-only set of envs;   state = a deterministic fold of it
 - Calls are for a handful of people; Macs and iPhones need WebKit 26.
 - An iPhone in the background is not told of messages: Apple's push is a
   server.
+- Android's installer takes full-screen calls back from an app installed
+  from a file, updates too: irch asks again after each update.
 - Any member can have the space's storage nodes keep sealed files up to
   25 MB each, 4 GB a day for the space; a ban stops them.
 - A storage code is a password. A first install trusts GitHub's TLS

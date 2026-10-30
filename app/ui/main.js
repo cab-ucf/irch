@@ -562,10 +562,12 @@ const badge = (n) =>
   n ? h("span", { class: "badge" }, String(Math.min(n, 99))) : null;
 
 function renderSidebar() {
-  // Asleep, a restricted Android app cannot ring: ask once.
-  if (android && S.spaces.length && !store.get("askedBg")) {
-    store.set("askedBg", "1");
-    quiet(invoke("notify_check", { ask: "background" }));
+  // At first, and after each update (Android's installer takes back
+  // full-screen calls from apps it installs from a file): ask together.
+  const v = S.me?.version;
+  if (android && v && store.get("asked") !== v && !$("modal").open) {
+    store.set("asked", v);
+    askAlerts();
   }
   put($("server-header"), h("span", { class: "brand" }, "irch"),
     h("button", { title: "Add a space (create or join)", onclick: addSpace },
@@ -2447,6 +2449,16 @@ async function health(ask = "") {
 }
 document.addEventListener("visibilitychange",
   () => !document.hidden && health());
+
+async function askAlerts() {
+  const a = await invoke("notify_check", { ask: "" }).catch(() => null);
+  if (!a || (a.notify && a.background && a.calls)) return;
+  modal((finish) => h("div", {},
+    h("div", { class: "m-body" },
+      h("h2", {}, "So calls and messages reach you"), notifyCheck()),
+    foot(h("button", { class: "btn grey", onclick: () => finish() },
+      "Later"))));
+}
 
 function notifyCheck() {
   const box = h("div", { class: "checks" });
