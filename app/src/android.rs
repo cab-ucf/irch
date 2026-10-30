@@ -2,7 +2,7 @@
 
 use anyhow::Context;
 use irch_core::wake::{self, News};
-use irch_core::{Id, Node, Notice};
+use irch_core::{Node, Notice};
 use jni::JNIEnv;
 use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jboolean, jstring};
