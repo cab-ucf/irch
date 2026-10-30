@@ -27,6 +27,8 @@ pub struct Call {
     pub channel: Ch,
     pub run: u64,
     peers: HashMap<EndpointId, Peer>,
+    #[cfg(feature = "voice")]
+    pub voice: Option<crate::voice::Voice>,
 }
 
 struct Peer {
@@ -45,7 +47,11 @@ impl Drop for Peer {
 
 impl Call {
     pub fn new(space: Id, channel: Ch, run: u64) -> Self {
-        Self { space, channel, run, peers: HashMap::new() }
+        let peers = HashMap::new();
+        #[cfg(feature = "voice")]
+        return Self { space, channel, run, peers, voice: None };
+        #[cfg(not(feature = "voice"))]
+        Self { space, channel, run, peers }
     }
 
     pub fn has(&self, d: &EndpointId) -> bool {

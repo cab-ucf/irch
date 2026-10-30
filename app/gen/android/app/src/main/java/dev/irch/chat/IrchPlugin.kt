@@ -19,8 +19,11 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import app.tauri.PermissionState
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
+import app.tauri.annotation.Permission
+import app.tauri.annotation.PermissionCallback
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Channel
 import app.tauri.plugin.Invoke
@@ -57,7 +60,15 @@ class FileArgs {
   var path = ""
 }
 
-@TauriPlugin
+@InvokeArg
+class OnArgs {
+  var on = false
+}
+
+@TauriPlugin(permissions = [
+  Permission(strings = [android.Manifest.permission.RECORD_AUDIO],
+    alias = "microphone"),
+])
 class IrchPlugin(private val activity: Activity) : Plugin(activity) {
   override fun load(webView: WebView) {
     if (!notificationsAllowed(activity) && Build.VERSION.SDK_INT >= 33) {
@@ -111,12 +122,6 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
   }
 
   @Command
-  fun askBackground(invoke: Invoke) {
-    if (!unrestricted(activity)) unrestrict()
-    invoke.resolve()
-  }
-
-  @Command
   fun testAlert(invoke: Invoke) {
     postMessage(activity, "test", "irch", "Notifications reach this phone.")
     invoke.resolve()
@@ -160,6 +165,20 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     hush(activity)
     invoke.resolve()
   }
+
+  /** A call: the screen on, over the lock screen, and the microphone
+   *  allowed before irch's own voice opens it. */
+  @Command
+  fun inCall(invoke: Invoke) {
+    val on = invoke.parseArgs(OnArgs::class.java).on
+    activity.runOnUiThread { (activity as? MainActivity)?.overLock(on) }
+    if (on && getPermissionState("microphone") != PermissionState.GRANTED) {
+      requestPermissionForAlias("microphone", invoke, "allowed")
+    } else invoke.resolve()
+  }
+
+  @PermissionCallback
+  private fun allowed(invoke: Invoke) = invoke.resolve()
 
   @Command
   fun share(invoke: Invoke) {

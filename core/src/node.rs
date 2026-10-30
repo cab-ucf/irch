@@ -40,6 +40,8 @@ const SKEW: u64 = 600_000;
 const GOSSIP_MAX: usize = 128 << 10;
 const BEAT: Duration = Duration::from_secs(60);
 const ALONE: Duration = Duration::from_secs(8);
+/// Spaces up to this many ring for a call in any channel.
+const RINGS: usize = 10;
 const ONLINE: Duration = Duration::from_secs(150);
 // Someone in a call says so every 15 s.
 const CALLER: Duration = Duration::from_secs(45);
@@ -977,16 +979,17 @@ impl Node {
                     true => (who, "is calling you".into()),
                     false => (
                         format!("{who} in #{room} ({name})"),
-                        "started a call".into(),
+                        "is calling the channel".into(),
                     ),
                 };
+                let ring = self.loud(&id);
                 let (space, room) = (id, ch);
                 out.push(Notice {
                     space,
                     room,
                     title,
                     body,
-                    ring: dm,
+                    ring,
                     hush: false,
                 });
             }
@@ -1404,12 +1407,9 @@ impl Node {
         for inv in knocks {
             let known =
                 self.view(&self.own, |s| s.spaces().contains_key(&inv.id()));
-            // One DM per person: a flood of knocks opens no more.
-            let with = |sp: &Arc<Space>| {
-                self.view(&sp.id, |s| s.peer(&me) == Some(inv.owner))
-                    == Some(true)
-            };
-            if known != Some(false) || self.all().iter().any(with) {
+            // One DM per person: once both are in one, knocks open no more.
+            // Before that (two made at once, or one lost), take theirs.
+            if known != Some(false) || self.dm_of(&inv.owner).is_some() {
                 continue;
             }
             // All news: its first message came before we were in it.
@@ -1421,6 +1421,12 @@ impl Node {
         }
         if sp.id == self.own {
             self.reconcile().await;
+        }
+        // A DM that another, the one both sides pick, replaced: put away.
+        let peer = self.view(&sp.id, |s| s.peer(&me)).flatten();
+        let pick = peer.and_then(|p| self.dm_of(&p));
+        if pick.is_some_and(|p| p.id != sp.id) && !self.hidden(&sp.id) {
+            self.hide(&sp.id, true);
         }
         // Members came or went: our storage nodes hear at once whom to take.
         let n = sp.devices().len();
@@ -1723,14 +1729,15 @@ impl Node {
     }
 
     /// A direct-message space with `user`, announced to them in `via`.
+    /// The DM with `user` here: the one both are in (the lowest id, so
+    /// both sides agree), else one of ours they never took, knocked
+    /// again, else a new one.
     pub async fn dm(self: &Arc<Self>, via: &Id, user: &Id) -> Result<Id> {
         ensure!(*user != self.id(), "that is you");
         let me = self.id();
-        for sp in self.all() {
-            if self.view(&sp.id, |s| s.peer(&me) == Some(*user)) == Some(true) {
-                self.hide(&sp.id, false);
-                return Ok(sp.id);
-            }
+        if let Some(sp) = self.dm_of(user) {
+            self.hide(&sp.id, false);
+            return Ok(sp.id);
         }
         let them = self.view(via, |s| {
             (s.kem(user).map(<[u8]>::to_vec), s.display_name(user))
@@ -1738,16 +1745,47 @@ impl Node {
         let (Some(pk), name) = them.context("not in that space")? else {
             bail!("they have not shared a key yet");
         };
-        let mut inv = Invite::new(me, &name, Some(*user));
+        // Ours, never taken (their phone asleep, or theirs crossed it).
+        let ours =
+            |sp: &Arc<Space>| sp.inv.as_ref().is_some_and(|i| i.owner == me);
+        let lonely = self.dms_with(user).into_iter().map(|x| x.0).find(ours);
+        let (id, mut inv) = match lonely {
+            Some(sp) => (sp.id, sp.inv.clone().expect("ours")),
+            None => {
+                let inv = Invite::new(me, &name, Some(*user));
+                let (epoch, id) =
+                    (tag(&inv.key), self.enter(inv.clone()).await?);
+                let rekey = Op::Rekey { epoch, boxes: vec![] };
+                self.post(&self.get(&id)?, rekey).await?;
+                (id, inv)
+            }
+        };
+        self.hide(&id, false);
         inv.peers = vec![self.addr().await];
         let sealed = kem_seal(&pk, &via.0, &postcard::to_allocvec(&inv)?)
             .context("bad key")?;
-        let (epoch, id) = (tag(&inv.key), self.enter(inv).await?);
-        self.post(&self.get(&id)?, Op::Rekey { epoch, boxes: vec![] }).await?;
         let knock = self.send(&self.get(via)?, Op::Knock { sealed }).await?;
         // Their sleeping phones: woken to take it, and what follows.
         self.wake_who(via, Some(user), Some(knock.1));
         Ok(id)
+    }
+
+    /// Our DMs with `user`, each with whether they are in it.
+    fn dms_with(&self, user: &Id) -> Vec<(Arc<Space>, bool)> {
+        let me = self.id();
+        let with = |sp: Arc<Space>| {
+            let (dm, here) = self.view(&sp.id, |s| {
+                (s.peer(&me) == Some(*user), s.profile(user).is_some())
+            })?;
+            dm.then_some((sp, here))
+        };
+        self.all().into_iter().filter_map(with).collect()
+    }
+
+    /// The DM both are in: of several, the lowest id, as both sides pick.
+    fn dm_of(&self, user: &Id) -> Option<Arc<Space>> {
+        let both = self.dms_with(user).into_iter().filter(|x| x.1);
+        both.map(|x| x.0).min_by_key(|sp| sp.id)
     }
 
     pub async fn set_name(self: &Arc<Self>, name: &str) -> Result<()> {
@@ -1799,8 +1837,8 @@ impl Node {
             sp.iter().for_each(|sp| self.emit(Event::Call { space: sp.id }));
             if let Ok(sp) = sp {
                 let raw = self.signal(&sp, Op::Call { channel: None }).await;
-                // A DM's phones, ringing: hung up, they stop.
-                if self.view(&sp.id, |s| s.dm.is_some()) == Some(true) {
+                // Phones ringing for it: hung up, they stop.
+                if self.loud(&sp.id) {
                     self.wake(&sp.id, raw);
                 }
             }
@@ -1809,7 +1847,21 @@ impl Node {
         let sp = self.get(&id)?;
         ensure!(!self.locked(&id), LOCKED);
         let run = u64::from_le_bytes(rand());
-        *lock(&self.call) = Some(Call::new(id, ch, run));
+        #[allow(unused_mut)]
+        let mut call = Call::new(id, ch, run);
+        #[cfg(feature = "voice")]
+        {
+            let n = Arc::downgrade(self);
+            let send = move |f: Vec<u8>| {
+                n.upgrade().iter().for_each(|n| n.send_media(&f))
+            };
+            let media = self.media();
+            let start = move || crate::voice::Voice::start(send, media);
+            let v = tokio::task::spawn_blocking(start).await?;
+            // No devices here: the page's audio, as before.
+            call.voice = v.inspect_err(|e| warn!("voice: {e:#}")).ok();
+        }
+        *lock(&self.call) = Some(call);
         let raw = self.signal(&sp, Op::Call { channel: Some(ch) }).await;
         self.emit(Event::Call { space: id });
         self.wake(&id, raw); // sleeping phones: someone is calling
@@ -1824,6 +1876,17 @@ impl Node {
     pub fn note(&self, file: &str, md: &str) -> Result<()> {
         let dir = self.notes.as_deref().context("no notes folder here")?;
         crate::notes::append(dir, file, md)
+    }
+
+    /// A call here rings like a phone: a DM, or a space small enough to be
+    /// a group of friends. A big one is told of it quietly.
+    pub fn loud(&self, id: &Id) -> bool {
+        let n = self.view(id, |s| {
+            let ms = s.members();
+            let few = ms.iter().filter(|m| m.role != Role::Banned).count();
+            s.dm.is_some() || few <= RINGS
+        });
+        n == Some(true)
     }
 
     pub fn in_call(&self) -> Option<(Id, Ch)> {
@@ -1842,6 +1905,31 @@ impl Node {
             v.entry(ch).or_default().insert(0, self.id());
         }
         v
+    }
+
+    /// Whether the call's voice is ours, not the page's.
+    pub fn native(&self) -> bool {
+        #[cfg(feature = "voice")]
+        return lock(&self.call).as_ref().is_some_and(|c| c.voice.is_some());
+        #[cfg(not(feature = "voice"))]
+        false
+    }
+
+    pub fn mute(&self, _on: bool) {
+        #[cfg(feature = "voice")]
+        if let Some(v) =
+            lock(&self.call).as_ref().and_then(|c| c.voice.as_ref())
+        {
+            v.mute(_on);
+        }
+    }
+
+    /// Ours and each peer's who spoke lately, while the voice is ours.
+    pub fn levels(&self) -> Option<(f32, Vec<(Id, f32)>)> {
+        #[cfg(feature = "voice")]
+        return lock(&self.call).as_ref()?.voice.as_ref().map(|v| v.levels());
+        #[cfg(not(feature = "voice"))]
+        None
     }
 
     pub fn send_media(&self, f: &[u8]) {
@@ -1887,9 +1975,8 @@ impl Node {
                 let raw =
                     self.signal(&sp, Op::Call { channel: Some(ch) }).await;
                 // A DM still ringing: wake its phones again; late ones hear it.
-                let dm = self.view(&id, |s| s.dm.is_some()) == Some(true);
                 let alone = want.iter().all(|w| w.2 == self.id());
-                if dm && alone && i <= 45 {
+                if self.loud(&id) && alone && i <= 45 {
                     self.wake(&id, raw);
                 }
             }

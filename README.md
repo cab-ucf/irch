@@ -30,7 +30,8 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
   storage node); `cd app && cargo tauri dev` or
   `cargo tauri android build --apk`; on a Mac, `cargo tauri ios init`,
   then `cargo tauri ios dev`. Linux needs webkit2gtk-4.1, gtk3,
-  libsoup3 and, for calls, gstreamer plugins base and good.
+  libsoup3, ALSA (libasound2) and, for calls, gstreamer plugins base,
+  good, bad and libav.
 
 ## Features
 
@@ -105,6 +106,9 @@ space = a grow-only set of envs;   state = a deterministic fold of it
 - **Calls are a mesh** over QUIC: Opus datagrams; video in the newest
   codec every listener decodes (AV1, VP9, then VP8 or H.264), one stream
   per group of pictures, so a slow peer skips to the newest keyframe.
+- **A call's voice is native** (not on iPhones): WebRTC's echo canceller
+  (sonora) hears exactly what plays, so both sides talk at once on a
+  speaker; a web view's cannot. Opus in the page's frames: they mix.
 - **Voice messages are Opus in Ogg**, played by decoding them in the app:
   the same in every web view, seekable, the right length.
 - **Sync** compares per-day fingerprints, then sends only missing envs.
@@ -138,6 +142,8 @@ space = a grow-only set of envs;   state = a deterministic fold of it
 - Calls are for a handful of people; Macs and iPhones need WebKit 26.
 - An iPhone in the background is not told of messages: Apple's push is a
   server.
+- Android's installer takes full-screen calls back from an app installed
+  from a file, updates too: irch asks again after each update.
 - Any member can have the space's storage nodes keep sealed files up to
   25 MB each, 4 GB a day for the space; a ban stops them.
 - A storage code is a password. A first install trusts GitHub's TLS
@@ -154,6 +160,11 @@ Optional, and only if they stay simple:
   leaked key would then reveal little before or after it.
 - Safety numbers to compare in person; per-device keys, so one lost
   phone can be removed alone.
+- A password lock on a space, on this device (its view and its keys at
+  rest).
+- Spaces apart: today each has its own keys, gossip, storage and doorbell,
+  but one identity and device id across all, so members of two spaces can
+  tell it is the same person (Profiles keep identities apart).
 - An outside audit.
 
 ## Layout
