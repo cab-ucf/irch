@@ -930,8 +930,12 @@ async fn notify(app: &AppHandle, x: &Notice) {
 fn log_to(dir: &std::path::Path) {
     let _ = std::fs::create_dir_all(dir);
     let Ok(f) = std::fs::File::create(dir.join("irch.log")) else { return };
+    // irch's warnings; of its libraries, errors: a phone's network is a
+    // stream of warnings, each a write.
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "warn,n0_mainline=off".into());
+        .unwrap_or_else(|_| {
+            "error,irch_core=warn,irch_app=warn,irch=warn".into()
+        });
     let log =
         tracing_subscriber::fmt().with_ansi(false).with_env_filter(filter);
     let _ = log.with_writer(std::sync::Mutex::new(f)).try_init();

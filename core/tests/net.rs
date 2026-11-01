@@ -181,7 +181,8 @@ async fn ban_rekeys_and_history_survives() {
     a.ban(&id, &b.id(), false).await.unwrap();
     assert!(b.locked(&id), "unbanned, b still lacks the key");
     b.join(&a.invite(&id).await.unwrap()).await.unwrap();
-    assert!(!b.locked(&id), "a fresh invite carries it");
+    // An admin's rekey, jittered, may land just after: its box then does.
+    until("a fresh invite carries it", || !b.locked(&id)).await;
     until("b reads on", || texts(&b, &id, &ch) == ["before", "after"]).await;
 }
 

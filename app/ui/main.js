@@ -3014,9 +3014,16 @@ function wire() {
   $("mic-btn").onclick = voice;
   $("mic-btn").classList.toggle("hidden", !window.AudioWorkletNode);
   $("call-btn").onclick = ring;
-  av.call.changed = renderCall;
-  setInterval(renderTiles, 400);
-  setInterval(dial, 1000);
+  // A clock only in a call: its tiles and its dial tone want one.
+  let ticks = [];
+  av.call.changed = () => {
+    if (!!av.call.on !== !!ticks.length) {
+      ticks.forEach(clearInterval);
+      ticks = av.call.on
+        ? [setInterval(renderTiles, 400), setInterval(dial, 1000)] : [];
+    }
+    renderCall();
+  };
   const showMembers = (on) => {
     $("members").classList.toggle("hidden-panel", !on);
     $("members-btn").classList.toggle("on", on);
@@ -3194,8 +3201,20 @@ async function start() {
       members.t = setTimeout(() => ((members.t = 0), members()), wait);
     }
   };
+  // Out of sight (not in a call), nothing is fetched or drawn: it all
+  // comes at once when irch is seen again.
+  let stale = false;
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden || !stale) return;
+    stale = false;
+    schedule("side");
+    schedule("msgs");
+    members();
+  });
   await T.event.listen("irch", ({ payload: e }) => {
-    if (e.t === "changed") {
+    if (document.hidden && !av.call.on) {
+      stale = true;
+    } else if (e.t === "changed") {
       schedule("side");
       if (!e.space || e.space === S.sid) {
         schedule("msgs");

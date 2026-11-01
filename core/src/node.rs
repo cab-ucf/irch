@@ -40,7 +40,9 @@ const DAY: u64 = 86_400_000;
 const SKEW: u64 = 600_000;
 const GOSSIP_MAX: usize = 128 << 10;
 const BEAT: Duration = Duration::from_secs(60);
-const ALONE: Duration = Duration::from_secs(8);
+// Alone in a space, redial backing off to this; a network change or irch
+// in sight again redials at once (`resume`).
+const ALONE: Duration = Duration::from_secs(300);
 /// Spaces up to this many ring for a call in any channel.
 const RINGS: usize = 10;
 const ONLINE: Duration = Duration::from_secs(150);
@@ -957,6 +959,7 @@ impl Node {
     /// Per channel or thread, the newest unread (by level), once across wakes.
     pub fn notices(&self) -> Vec<Notice> {
         let (me, mut out, mut live) = (self.id(), vec![], HashSet::new());
+        let was = lock(&self.prefs).told.clone();
         for id in self.spaces() {
             let (level, mark) = {
                 let mut p = lock(&self.prefs);
@@ -1033,7 +1036,10 @@ impl Node {
             p.insert(id, mark.max(newest.unwrap_or(0).min(now())));
         }
         lock(&self.rang).retain(|c| live.contains(c));
-        self.save_prefs();
+        // On disk only when it moved: this runs on every change.
+        if lock(&self.prefs).told != was {
+            self.save_prefs();
+        }
         out
     }
 
@@ -3529,20 +3535,23 @@ async fn heartbeat(n: Weak<Node>) {
         last = now();
         for sp in n.all() {
             let nb = sp.nbrs();
-            match (nb.get(i as usize % nb.len().max(1)), sp.tx()) {
-                (None, Some(tx)) => drop(tx.join_peers(n.bootstrap(&sp)).await),
-                (Some(p), _) if i % 2 == 0 => n.sync(&sp, *p),
-                _ => {}
-            }
-            // One device we know but gossip does not reach, in turn: two
-            // halves of a split mesh find each other within minutes.
-            let far: Vec<_> = n
-                .bootstrap(&sp)
-                .into_iter()
-                .filter(|p| !nb.contains(p))
-                .collect();
-            if let Some(p) = far.get(i as usize % far.len().max(1)) {
-                n.sync(&sp, *p);
+            // Gossip carries what is new; every five minutes, a check that
+            // nothing slipped by (a neighbor), one device gossip does not
+            // reach (two halves of a split mesh meet), or, alone, a redial.
+            if i % 5 == 0 {
+                match (nb.get(i as usize / 5 % nb.len().max(1)), sp.tx()) {
+                    (None, Some(tx)) => {
+                        drop(tx.join_peers(n.bootstrap(&sp)).await)
+                    }
+                    (Some(p), _) => n.sync(&sp, *p),
+                    _ => {}
+                }
+                let far =
+                    n.bootstrap(&sp).into_iter().filter(|p| !nb.contains(p));
+                let far: Vec<_> = far.collect();
+                if let Some(p) = far.get(i as usize / 5 % far.len().max(1)) {
+                    n.sync(&sp, *p);
+                }
             }
             n.signal(&sp, Op::Here).await;
             n.emit(Event::Presence { space: sp.id });
