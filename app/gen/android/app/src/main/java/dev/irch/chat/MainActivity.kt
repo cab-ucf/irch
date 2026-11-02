@@ -1,5 +1,6 @@
 package dev.irch.chat
 
+import android.app.KeyguardManager
 import android.content.Intent
 import android.graphics.Color
 import android.os.Build
@@ -14,6 +15,8 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 
 class MainActivity : TauriActivity() {
+  private var web: WebView? = null
+
   override fun onCreate(savedInstanceState: Bundle?) {
     // The UI is dark: light system-bar icons whatever the system theme.
     val bars = SystemBarStyle.dark(Color.TRANSPARENT)
@@ -41,6 +44,13 @@ class MainActivity : TauriActivity() {
     super.onNewIntent(intent)
   }
 
+  // Out of sight, off the lock screen: back over it only as a call rings
+  // or the page, in a call, says so again.
+  override fun onStop() {
+    overLock(false)
+    super.onStop()
+  }
+
   private fun ringing(i: Intent?) = i?.data?.let {
     it.scheme == "irch" && (it.host == "ring" || it.host == "call")
   } == true
@@ -59,11 +69,17 @@ class MainActivity : TauriActivity() {
     }
     val keep = WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
     if (on) window.addFlags(keep) else window.clearFlags(keep)
+    // Over a locked phone, the call alone: no way into the rest of irch.
+    val locked = on && getSystemService(KeyguardManager::class.java)
+      .isKeyguardLocked
+    web?.evaluateJavascript(
+      "document.documentElement.classList.toggle('lockscreen', $locked)", null)
   }
 
   // Back closes what the page has open; else irch goes to the background,
   // as finishing would stop the node.
   override fun onWebViewCreate(webView: WebView) {
+    web = webView
     val back = object : OnBackPressedCallback(true) {
       override fun handleOnBackPressed() {
         webView.evaluateJavascript("window.irchBack?.() === true") { handled ->

@@ -50,6 +50,24 @@ which keeps a phone's radio awake, so for the battery saving give the
 storage node irpush's patched relay:
 `IRCH_PUSH_RELAY=https://irpush.you.example#TOKEN` (default: irch's relays).
 
+## On the web
+
+```sh
+irch --web    # or --web 0.0.0.0:4724; with --headless's other flags
+```
+
+Your own node serves the app's page to your browser, and keeps the keys:
+the browser holds only a token, in the link's `#`, which never reaches a
+server. It prints two links (to a terminal; else into `web` in its
+folder): `http://127.0.0.1:4724/#TOKEN` on that computer, and
+`https://cab-ucf.github.io/#ID;t=TOKEN` from any browser, through
+[irp](https://github.com/cab-ucf/irp)'s static page, whose service worker
+reaches the node over iroh (end to end, by relay, no open port). Both
+are as good as your account: delete `web-key` there for new ones. Calls
+work in a browser that has WebCodecs; Typst math shows as TeX. The page
+holds nothing open while hidden (except in a call), so nothing rings
+there then; the node itself is an always-on device of yours (`--link`).
+
 ## Features
 
 - Spaces with channels (admins drag them into order), threads and named
@@ -219,7 +237,7 @@ Optional, and only if they stay simple:
 | | |
 |---|---|
 | `core/` | ops, crypto, fold, logs, sync, node, the app's JSON API |
-| `tui/` | `irch`: terminal client, `--serve`, `--install` |
+| `tui/` | `irch`: terminal client, `--serve`, `--install`, `--web` |
 | `app/` | Tauri 2 shell; `ui/` the page; `gen/android` the Android project; `gen/apple`, generated |
 
 Prior art: Quiet, Keet, Briar, Cwtch, SimpleX, Jami, p2panda;

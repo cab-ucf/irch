@@ -12,5 +12,6 @@ test("Opus packets go into Ogg and come back out whole", async () => {
   const o = unogg(b);
   assert.deepEqual([o.channels, o.skip], [1, 312]);
   assert.deepEqual(o.packets, packets);
+  assert.deepEqual(unogg(b, 60).packets, packets.slice(0, 60), "capped");
   assert.equal(unogg(new Uint8Array(40)), null, "not Ogg");
 });

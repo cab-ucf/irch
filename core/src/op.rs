@@ -81,6 +81,7 @@ pub const MAX_NAME: usize = 64;
 /// would stall everyone's screen.
 pub fn fits(op: &Op) -> bool {
     let file = |f: &File| f.name.len() <= 255;
+    let addr = |a: &EndpointAddr| a.addrs.len() <= 16;
     match op {
         Op::Post { text, files, .. } => {
             text.len() <= MAX_TEXT
@@ -99,6 +100,17 @@ pub fn fits(op: &Op) -> bool {
             name.as_ref().is_none_or(|n| n.len() <= 256)
         }
         Op::Label { name, .. } => name.len() <= 256,
+        Op::Knock { sealed } => sealed.len() <= 4096,
+        // A few thousand members, each a key sealed to theirs.
+        Op::Rekey { boxes, .. } => {
+            boxes.len() <= 3000 && boxes.iter().all(|b| b.1.len() <= 1216)
+        }
+        Op::Host { node: a, .. } | Op::Storage { addr: a, .. } => addr(a),
+        Op::Joined { invite: i } => {
+            i.name.len() <= 256
+                && i.peers.len() <= 16
+                && i.peers.iter().all(addr)
+        }
         Op::Preview { link: l, .. } => {
             l.url.len() <= 2048
                 && l.title.len() <= 400

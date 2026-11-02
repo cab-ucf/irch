@@ -52,11 +52,13 @@ export function ogg(packets) {
   return new Blob(out, { type: "audio/ogg" });
 }
 
-/** Its Opus packets and channels, or null if it is not Ogg Opus. */
-export function unogg(b) {
+/** Its Opus packets (the first `most`) and channels, or null if it is
+ * not Ogg Opus. */
+export function unogg(b, most = Infinity) {
   const packets = [];
   let part = [];
-  for (let at = 0; at + 27 <= b.length;) {
+  // Two more: its head and tags.
+  for (let at = 0; at + 27 <= b.length && packets.length < most + 2;) {
     if (b[at] !== 0x4f || b[at + 1] !== 0x67) return null;
     const n = b[at + 26];
     let data = at + 27 + n;
@@ -79,5 +81,5 @@ export function unogg(b) {
   }
   packets.shift(); // OpusTags
   const skip = new DataView(head.buffer, head.byteOffset).getUint16(10, true);
-  return { channels: head[9], skip, packets };
+  return { channels: head[9], skip, packets: packets.slice(0, most) };
 }

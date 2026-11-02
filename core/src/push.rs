@@ -13,14 +13,18 @@ use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const ALPN: &[u8] = b"irch/push/4";
 /// Ring tokens a phone may have here: one per space it is in.
 const MOST: usize = 4096;
+/// Phones kept here, and ring tokens in all: past either, the one longest
+/// unregistered goes.
+const PHONES: usize = 1024;
+const RINGS: usize = 1 << 16;
 const SLOW: Duration = Duration::from_secs(15);
 /// irpush's address for irch on a phone.
 const APP: &str = "dev.irch.chat";
@@ -62,7 +66,36 @@ pub async fn register(
     Ok(())
 }
 
-type Phones = BTreeMap<EndpointId, (String, Vec<[u8; 16]>)>;
+type Phone = (String, Vec<[u8; 16]>);
+
+/// Each phone's route and tokens (kept on disk), whose each token is, and
+/// when each last registered (since we started; before, oldest).
+#[derive(Default)]
+struct Phones {
+    by: BTreeMap<EndpointId, Phone>,
+    rings: HashMap<[u8; 16], HashSet<EndpointId>>,
+    at: HashMap<EndpointId, Instant>,
+}
+
+impl Phones {
+    fn set(&mut self, d: EndpointId, p: Option<Phone>) {
+        for t in self.by.remove(&d).into_iter().flat_map(|p| p.1) {
+            if let Some(s) = self.rings.get_mut(&t)
+                && s.remove(&d)
+                && s.is_empty()
+            {
+                self.rings.remove(&t);
+            }
+        }
+        self.at.remove(&d);
+        let Some(p) = p else { return };
+        for t in &p.1 {
+            self.rings.entry(*t).or_default().insert(d);
+        }
+        self.at.insert(d, Instant::now());
+        self.by.insert(d, p);
+    }
+}
 
 #[derive(Clone)]
 pub struct Server(Arc<(PathBuf, Mutex<Phones>, Arc<irpush::Node>)>);
@@ -71,8 +104,11 @@ impl Server {
     pub fn open(dir: &Path, net: &Net) -> Result<Option<Self>> {
         let Some(irpush) = host(dir, net)? else { return Ok(None) };
         let file = dir.join("phones");
-        let phones = Mutex::new(store::load(&file));
-        Ok(Some(Self(Arc::new((file, phones, irpush)))))
+        let mut phones = Phones::default();
+        let kept: BTreeMap<EndpointId, Phone> = store::load(&file);
+        kept.into_iter().for_each(|(d, p)| phones.set(d, Some(p)));
+        phones.at.clear();
+        Ok(Some(Self(Arc::new((file, Mutex::new(phones), irpush)))))
     }
 
     async fn asked(&self, c: &Connection) -> Result<()> {
@@ -87,9 +123,19 @@ impl Server {
                 let d = to.strip_prefix("irpush:").unwrap_or_default();
                 let ok = irpush.peers().iter().any(|p| p.0.to_string() == d);
                 if ok {
+                    // A second apart each, so none rewrites the file flat out.
+                    let (d, second) = (c.remote_id(), Duration::from_secs(1));
+                    let last = lock(phones).at.get(&d).copied();
+                    let wait = last.map(|t| second.saturating_sub(t.elapsed()));
+                    tokio::time::sleep(wait.unwrap_or_default()).await;
                     let mut p = lock(phones);
-                    p.insert(c.remote_id(), (to, rings));
-                    store::save(file, &*p)?;
+                    p.set(d, Some((to, rings)));
+                    while p.by.len() > PHONES || p.rings.len() > RINGS {
+                        let old = p.by.keys().min_by_key(|d| p.at.get(*d));
+                        let old = *old.expect("some");
+                        p.set(old, None);
+                    }
+                    store::save(file, &p.by)?;
                 }
                 vec![ok as u8]
             }
@@ -108,11 +154,12 @@ impl Server {
         rx.read_exact(&mut head).await?;
         let raw = crate::sync::rest(&mut rx, MAX).await?;
         let (_, phones, irpush) = &*self.0;
-        let to: Vec<String> = lock(phones)
-            .values()
-            .filter(|p| p.1.iter().any(|t| t[..] == head[..16]))
-            .map(|p| p.0.clone())
-            .collect();
+        let t: [u8; 16] = head[..16].try_into()?;
+        let to: Vec<String> = {
+            let p = lock(phones);
+            let to = p.rings.get(&t).into_iter().flatten();
+            to.filter_map(|d| Some(p.by.get(d)?.0.clone())).collect()
+        };
         let ring = [&head[16..48], &raw[..]].concat();
         let r =
             if ring.len() <= irpush::BODY { &ring[..] } else { &ring[..32] };

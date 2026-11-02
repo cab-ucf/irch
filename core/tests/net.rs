@@ -292,6 +292,15 @@ async fn a_contact_code_starts_a_dm() {
         texts(&a, &dm, &irch_core::state::DM) == ["found you"]
     })
     .await;
+    // Another holder gets a DM too, and learns nothing of b.
+    let c = node("c").await;
+    c.join(&code).await.unwrap();
+    let theirs = || c.spaces().into_iter().find(|s| !c.card(s) && *s != card);
+    until("c has a DM", || theirs().is_some()).await;
+    let met = |s: &irch_core::state::State| {
+        s.profile(&b.id()).is_some() || !s.devices_of(&b.id()).is_empty()
+    };
+    assert_eq!(c.view(&card, met), Some(false), "holders never meet");
     b.leave(&dm).await.unwrap();
     assert!(!b.spaces().contains(&card), "the card went with it");
 }
