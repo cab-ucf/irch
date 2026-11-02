@@ -370,8 +370,9 @@ async fn a_ring_tells_a_sleeping_phone_what_rang() {
     let ended = tokio::time::timeout(ten, phone).await.unwrap().unwrap();
     let ended = ended.unwrap().expect("hanging up rings too");
 
-    // Up again, b tells of both at once: a call is said only every 15 s,
-    // so it can only have come with the ring.
+    // Up again with a away (else a tells b at once it is in no call), b
+    // tells of both: they can only have come with the rings.
+    a.shutdown().await;
     let b = start(&db, "b", None, false).await;
     let rings = |n: &Node| n.notices().into_iter().filter(|n| n.ring).count();
     assert_eq!(rings(&b), 0, "not yet");
@@ -979,6 +980,26 @@ async fn a_storage_node_rings_a_phone_through_irpush() {
     let news = news.await.expect("pushed within seconds").unwrap();
     let n = Node::woken(&db, &news).0.expect("shown from the phonebook");
     assert_eq!((n.space, &n.body[..]), (id, "hi"));
+}
+
+/// Presence costs one op per change, never a timer: `Here` as a device
+/// joins the mesh, answered once by each device there (with its call, if
+/// any); `Gone` as it leaves.
+#[tokio::test(flavor = "multi_thread")]
+async fn presence_rides_on_state_changes() {
+    let (a, b) = (node("a").await, node("b").await);
+    let id = a.create("hub").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let on = |x: &Node, u: &Node| x.online(&id).contains(&u.id());
+    until("each sees the other", || on(&a, &b) && on(&b, &a)).await;
+    a.call(Some((id, general(&a, &id)))).await.unwrap();
+    until("b sees a's call", || !b.calls(&id).is_empty()).await;
+    let c = node("c").await;
+    c.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let late = || on(&c, &a) && on(&c, &b) && !c.calls(&id).is_empty();
+    until("c, late, hears who is here and the call", late).await;
+    b.shutdown().await;
+    until("b gone", || !on(&a, &b) && !on(&c, &b)).await;
 }
 
 /// A member's photo waits on the space's storage node, though it is not

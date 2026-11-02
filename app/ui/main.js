@@ -966,9 +966,9 @@ function incoming(sid, ch, who) {
   who ??= ids.length ? nameOf(ids[0]) : "Someone";
   who = who.split(" in #")[0]; // a channel's notice names the room too
   // On screen, the page rings (Android's own ring put away, not doubled),
-  // and the caller hears that it rings here.
+  // and the caller hears, once, that it rings here.
+  quiet(rpc("ringing", { space: sid, channel: ch }));
   const ring = () => {
-    quiet(rpc("ringing", { space: sid, channel: ch }));
     if (document.visibilityState !== "visible") return;
     if (android) quiet(invoke("hush"));
     ringing();

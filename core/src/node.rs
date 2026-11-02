@@ -39,15 +39,16 @@ const DAY: u64 = 86_400_000;
 /// How far ahead a clock may run: later ops wait (sync brings them again).
 const SKEW: u64 = 600_000;
 const GOSSIP_MAX: usize = 128 << 10;
+// Local only (no packets): a late tick means we slept; storage budgets.
 const BEAT: Duration = Duration::from_secs(60);
-// Alone in a space, redial backing off to this; a network change or irch
-// in sight again redials at once (`resume`).
-const ALONE: Duration = Duration::from_secs(300);
+// Alone in a space, redial backing off to this, then wait: whoever comes
+// online dials us, and a network change or irch in sight redials (`resume`).
+const ALONE: Duration = Duration::from_secs(64);
+const QUIET: Duration = Duration::from_secs(365 * 86400);
 /// Spaces up to this many ring for a call in any channel.
 const RINGS: usize = 10;
-const ONLINE: Duration = Duration::from_secs(150);
-// Someone in a call says so every 15 s.
-const CALLER: Duration = Duration::from_secs(45);
+// A callee says once that it rings; its caller hears ringback this long.
+const RANG: Duration = Duration::from_secs(45);
 pub(crate) const RELAYS: [&str; 2] =
     ["https://iroh.cxn.center./", "https://use1-1.relay.n0.iroh.link./"];
 pub use crate::op::{MAX_NAME, MAX_TEXT};
@@ -176,16 +177,21 @@ struct Page {
     rooms: BTreeMap<Ch, String>,
 }
 
+/// A member's call (or none), its device, and when it was said.
+type Said = (Option<Ch>, EndpointId, u64);
+
 pub struct Space {
     pub id: Id,
     inv: Option<Invite>,
     book: Mutex<Book>,
     tx: Mutex<Option<GossipSender>>,
     nbrs: Mutex<HashSet<EndpointId>>,
-    seen: Mutex<HashMap<Id, Instant>>,
+    // Per member's device: here (said `Here`, or answered one) or `Gone`,
+    // and when it said so last: older news changes nothing.
+    seen: Mutex<HashMap<(Id, EndpointId), (bool, u64)>>,
     // Live ops already taken, so none is taken twice.
     heard: Mutex<HashMap<Id, Instant>>,
-    calls: Mutex<HashMap<Id, (Ch, EndpointId, Instant)>>,
+    calls: Mutex<HashMap<Id, Said>>,
     // Syncing with now; true: asked again meanwhile, so once more after.
     busy: Mutex<HashMap<EndpointId, bool>>,
     // Devices our storage nodes were last told they may take from.
@@ -504,12 +510,6 @@ impl Space {
     fn nbrs(&self) -> Vec<EndpointId> {
         lock(&self.nbrs).iter().copied().collect()
     }
-
-    /// Heard live; true if they were not online already.
-    fn saw(&self, user: Id) -> bool {
-        let last = lock(&self.seen).insert(user, Instant::now());
-        last.is_none_or(|t| t.elapsed() > ONLINE)
-    }
 }
 
 pub struct Node {
@@ -609,10 +609,17 @@ pub(crate) fn endpoint(net: &Net) -> iroh::endpoint::Builder {
     // BBRv3, as loss is the norm: at 0.1% and 50 ms Cubic moves 1.1 MB/s a
     // stream, BBRv3 23; a 2 MiB window, 16 MB/s at 130 ms (default: 10).
     let cc = noq_proto::congestion::Bbr3Config::default();
+    // Idle links: a keepalive every 25 s (iroh's: 5), as seldom as a NAT's
+    // 30 s for UDP allows; the timeouts outlast it. Traffic needs none.
+    let (alive, idle) = (Duration::from_secs(25), Duration::from_secs(60));
     let b = b.transport_config(
         iroh::endpoint::QuicTransportConfig::builder()
             .stream_receive_window((2u32 << 20).into())
             .congestion_controller_factory(Arc::new(cc))
+            .keep_alive_interval(alive)
+            .default_path_keep_alive_interval(alive)
+            .default_path_max_idle_timeout(idle)
+            .max_idle_timeout(Some(idle.try_into().expect("60 s")))
             .build(),
     );
     // A phone's network has no router to map ports on: no probing it.
@@ -1464,15 +1471,12 @@ impl Node {
         near.into_iter().map(|d| (d, who(&d))).collect()
     }
 
-    /// Members heard from in the last few minutes, and us unless invisible.
+    /// Members with a device here, and us unless invisible.
     pub fn online(&self, id: &Id) -> HashSet<Id> {
         let Ok(sp) = self.get(id) else { return HashSet::new() };
         let seen = lock(&sp.seen);
-        let mut v: HashSet<_> = seen
-            .iter()
-            .filter(|(_, t)| t.elapsed() < ONLINE)
-            .map(|(u, _)| *u)
-            .collect();
+        let mut v: HashSet<_> =
+            seen.iter().filter(|s| s.1.0).map(|s| s.0.0).collect();
         if !self.invisible() {
             v.insert(self.id());
         }
@@ -1488,7 +1492,10 @@ impl Node {
         lock(&self.local).invisible = on;
         self.persist();
         for sp in self.all() {
-            self.signal(&sp, if on { Op::Gone } else { Op::Here }).await;
+            match on {
+                true => drop(self.signal(&sp, Op::Gone).await),
+                false => self.here(&sp).await,
+            }
         }
     }
 
@@ -2231,7 +2238,7 @@ impl Node {
         self.media.subscribe()
     }
 
-    /// Who says they are in a call (`ch`'s, if given): members, heard lately.
+    /// Who says they are in a call (`ch`'s, if given): members.
     fn callers(&self, sp: &Space, ch: Option<Ch>) -> Vec<(EndpointId, Ch, Id)> {
         // Keys moved on without us (a ban, say): out of every call.
         if self.locked(&sp.id) {
@@ -2239,16 +2246,16 @@ impl Node {
         }
         let calls = lock(&sp.calls).clone();
         let ok = |u: &Id| self.view(&sp.id, |s| s.role(u) != Role::Banned);
-        let live = |c: &Ch, t: &Instant| {
-            t.elapsed() < CALLER && ch.is_none_or(|ch| ch == *c)
-        };
-        let v = calls
-            .into_iter()
-            .filter(|(u, (c, _, t))| live(c, t) && ok(u) == Some(true));
-        v.map(|(u, (c, d, _))| (d, c, u)).collect()
+        let v = calls.into_iter().filter_map(|(u, (c, d, _))| Some((d, c?, u)));
+        v.filter(|(_, c, u)| {
+            ch.is_none_or(|ch| ch == *c) && ok(u) == Some(true)
+        })
+        .collect()
     }
 
-    /// In a call: say so every 15 s; one link per device in it, lower id dials.
+    /// In a call: one link per device in it, lower id dials. Said as it
+    /// starts, and, unanswered, at 3 and 10 s (a mesh still forming drops
+    /// what is said); newcomers hear it in answer to their `Here`.
     async fn ring(self: Arc<Self>, run: u64) {
         let mut t = tokio::time::interval(Duration::from_secs(1));
         for i in 1u64.. {
@@ -2262,14 +2269,8 @@ impl Node {
             let Some((id, ch)) = cur else { return };
             let Ok(sp) = self.get(&id) else { return };
             let want = self.callers(&sp, Some(ch));
-            if i % 15 == 0 {
-                let raw =
-                    self.signal(&sp, Op::Call { channel: Some(ch) }).await;
-                // A DM still ringing: wake its phones again; late ones hear it.
-                let alone = want.iter().all(|w| w.2 == self.id());
-                if self.loud(&id) && alone && i <= 45 {
-                    self.wake(&id, raw);
-                }
+            if (i == 3 || i == 10) && want.iter().all(|w| w.2 == self.id()) {
+                self.signal(&sp, Op::Call { channel: Some(ch) }).await;
             }
             let dial: HashSet<_> = {
                 let mut c = lock(&self.call);
@@ -3198,7 +3199,7 @@ impl Node {
     pub fn rings(&self, id: &Id, user: &Id, ch: &Ch) -> bool {
         let Ok(sp) = self.get(id) else { return false };
         let r = lock(&sp.ringing);
-        r.get(&(*user, *ch)).is_some_and(|t| t.elapsed() < CALLER)
+        r.get(&(*user, *ch)).is_some_and(|t| t.elapsed() < RANG)
     }
 
     /// A call to us rings here: its caller hears so, and hears ringback.
@@ -3276,8 +3277,9 @@ impl Node {
         let (n, sp) = (self.clone(), sp.clone());
         tokio::spawn(async move {
             // Twice: ops broadcast while we were joining reach neither side.
+            // The mesh changed: here, once (with our call); who knew, stays.
             n.clone().sync_with(sp.clone(), peer.into()).await;
-            n.signal(&sp, Op::Here).await;
+            n.here(&sp).await;
             tokio::time::sleep(Duration::from_secs(5)).await;
             n.clone().sync_with(sp.clone(), peer.into()).await;
             let Some(info) = n.ep.remote_info(peer).await else { return };
@@ -3342,22 +3344,36 @@ impl Node {
             return;
         }
         drop(heard);
-        let gone = s.op == Op::Gone;
-        if gone && lock(&sp.seen).remove(&s.author).is_some()
-            || !gone && sp.saw(s.author)
-        {
+        let (who, here) = ((s.author, s.device), s.op != Op::Gone);
+        let changed = {
+            let mut seen = lock(&sp.seen);
+            let was = seen.get(&who).copied();
+            let fresh = was.is_none_or(|w| w.1 < s.ts);
+            if fresh {
+                seen.insert(who, (here, s.ts));
+            }
+            fresh && was.is_some_and(|w| w.0) != here
+        };
+        if changed {
             self.emit(Event::Presence { space: sp.id });
+        }
+        // Gone, or back: a call it said before is over (if still on, it
+        // says so again, after).
+        if matches!(s.op, Op::Gone | Op::Here) {
+            self.said(sp, (s.author, s.device, s.ts), None, true);
         }
         match s.op {
             Op::Typing { channel } => {
                 let user = s.author;
                 self.emit(Event::Typing { space: sp.id, channel, user });
             }
-            // Back from sleep: tell it of our call now, or it misses the ring.
+            // New here, or back from sleep: answered once with our call
+            // (none, mostly), which says we are here without asking back.
             Op::Here => {
-                if let Some((_, ch)) = self.in_call().filter(|c| c.0 == sp.id) {
+                let ch = self.in_call().filter(|c| c.0 == sp.id).map(|c| c.1);
+                if (changed && !self.invisible()) || ch.is_some() {
                     let (n, sp) = (self.clone(), sp.clone());
-                    let call = Op::Call { channel: Some(ch) };
+                    let call = Op::Call { channel: ch };
                     tokio::spawn(async move { n.signal(&sp, call).await });
                 }
             }
@@ -3369,23 +3385,31 @@ impl Node {
                 }
             }
             Op::Call { channel } => {
-                // Aged as said: a ring retried late is not still ringing.
-                let age = Duration::from_millis(now().saturating_sub(s.ts));
-                let at = Instant::now().checked_sub(age);
-                let mut c = lock(&sp.calls);
-                let was = match channel {
-                    Some(ch) => {
-                        let at = at.unwrap_or_else(Instant::now);
-                        c.insert(s.author, (ch, s.device, at))
-                    }
-                    None => c.remove(&s.author),
-                };
-                drop(c);
-                if was.map(|w| w.0) != channel {
-                    self.emit(Event::Call { space: sp.id });
-                }
+                self.said(sp, (s.author, s.device, s.ts), channel, false);
             }
             _ => {}
+        }
+    }
+
+    /// A member's call as said at a time: older news (a ring come late)
+    /// changes nothing; a device back or gone (`own`) ends only its own.
+    fn said(
+        &self,
+        sp: &Space,
+        (u, d, ts): (Id, EndpointId, u64),
+        ch: Option<Ch>,
+        own: bool,
+    ) {
+        let mut c = lock(&sp.calls);
+        let was = c.get(&u).copied();
+        if was.is_some_and(|w| w.2 >= ts) || own && was.is_none_or(|w| w.1 != d)
+        {
+            return;
+        }
+        c.insert(u, (ch, d, ts));
+        drop(c);
+        if was.and_then(|w| w.0) != ch {
+            self.emit(Event::Call { space: sp.id });
         }
     }
 
@@ -3398,7 +3422,19 @@ impl Node {
             if let Some(tx) = sp.tx() {
                 let _ = tx.join_peers(peers).await;
             }
-            self.signal(&sp, Op::Here).await;
+            self.here(&sp).await;
+        }
+    }
+
+    /// Here (a state change: started, back, another network): one `Here`,
+    /// and our call, if any, for whoever missed it.
+    async fn here(&self, sp: &Space) {
+        if self.get(&sp.id).is_err() {
+            return; // shutting down
+        }
+        self.signal(sp, Op::Here).await;
+        if let Some((_, ch)) = self.in_call().filter(|c| c.0 == sp.id) {
+            self.signal(sp, Op::Call { channel: Some(ch) }).await;
         }
     }
 
@@ -3408,10 +3444,14 @@ impl Node {
         if let Some(sp) = call.and_then(|c| self.get(&c.space).ok()) {
             self.signal(&sp, Op::Call { channel: None }).await;
         }
-        for sp in self.all() {
+        // Out of every space first: nothing says `Here` after `Gone`.
+        let all = self.all();
+        self.spaces.write().unwrap_or_else(|e| e.into_inner()).clear();
+        for sp in all {
             self.signal(&sp, Op::Gone).await;
         }
-        self.spaces.write().unwrap_or_else(|e| e.into_inner()).clear();
+        // Gossip sends after `broadcast` returns: a moment for `Gone` to go.
+        tokio::time::sleep(Duration::from_millis(200)).await;
         if let Some(r) = self.router.get() {
             let _ = r.shutdown().await;
         }
@@ -3461,8 +3501,8 @@ async fn pump(n: Arc<Node>, sp: Weak<Space>, boot: Vec<EndpointId>) {
                     if s.nbrs().is_empty() {
                         let _ = tx.join_peers(n.bootstrap(&s)).await;
                     }
-                    // Alone, a peer coming back is found within seconds.
-                    wait = (wait * 2).min(ALONE);
+                    // Alone: a few redials, then quiet until dialed.
+                    wait = if wait < ALONE { wait * 2 } else { QUIET };
                     continue;
                 }
             };
@@ -3563,12 +3603,15 @@ impl reqwest::dns::Resolve for Public {
     }
 }
 
-/// Presence; re-dial if alone; reconcile; a late tick means we slept.
+/// Local, sending only what changed: a late tick means we slept (so, as
+/// any state change, `resume`); catching up once as we start; our storage
+/// nodes named where we became admin. Presence and new ops ride on state
+/// changes and gossip, never on a timer.
 async fn heartbeat(n: Weak<Node>) {
     let mut t = tokio::time::interval(BEAT);
     t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last = now();
-    for i in 1u64.. {
+    for i in 0u64.. {
         t.tick().await;
         let Some(n) = n.upgrade() else { return };
         if now().saturating_sub(last) > 2 * BEAT.as_millis() as u64 {
@@ -3576,29 +3619,11 @@ async fn heartbeat(n: Weak<Node>) {
         }
         last = now();
         for sp in n.all() {
-            let nb = sp.nbrs();
-            // Gossip carries what is new; every five minutes, a check that
-            // nothing slipped by (a neighbor), one device gossip does not
-            // reach (two halves of a split mesh meet), or, alone, a redial.
-            if i % 5 == 0 {
-                match (nb.get(i as usize / 5 % nb.len().max(1)), sp.tx()) {
-                    (None, Some(tx)) => {
-                        drop(tx.join_peers(n.bootstrap(&sp)).await)
-                    }
-                    (Some(p), _) => n.sync(&sp, *p),
-                    _ => {}
-                }
-                let far =
-                    n.bootstrap(&sp).into_iter().filter(|p| !nb.contains(p));
-                let far: Vec<_> = far.collect();
-                if let Some(p) = far.get(i as usize / 5 % far.len().max(1)) {
-                    n.sync(&sp, *p);
-                }
+            if i == 0 {
+                n.bootstrap(&sp).iter().take(3).for_each(|p| n.sync(&sp, *p));
             }
-            n.signal(&sp, Op::Here).await;
-            n.emit(Event::Presence { space: sp.id });
             // Pairings from before `Hold`, and admins since made.
-            if i % 10 == 1 {
+            if i % 10 == 0 {
                 for (addr, _) in n.stores(&sp.id) {
                     n.list(&sp, &addr).await;
                 }
