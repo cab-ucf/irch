@@ -22,7 +22,7 @@ use iroh_gossip::{Gossip, TopicId};
 use n0_future::StreamExt;
 use n0_future::task::AbortOnDropHandle;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{
@@ -71,6 +71,8 @@ fn limit() -> u64 {
 const PREVIEW: usize = 25 << 20;
 const BLOB: &[u8] = b"irch/blob/1";
 const PARKED: usize = 32 << 20;
+/// Refused ops a space remembers, so sync brings none again.
+const REJECTED: usize = 4096;
 const LOCKED: &str = "keys changed without you: ask for a new invite";
 
 #[derive(Clone, Debug, Default)]
@@ -232,6 +234,9 @@ struct Book {
     knocks: Vec<Invite>,
     // A member said our key is one a later epoch left us out of.
     out: bool,
+    // Refused, oldest first: indexed as had, never served.
+    rejected: VecDeque<(Id, u32)>,
+    rejects: u64,
 }
 
 /// (author, (ts, id), epoch, key, via `Back` rather than `Rekey`).
@@ -286,11 +291,33 @@ impl Book {
             st,
             knocks,
             out: false,
+            rejected: VecDeque::new(),
+            rejects: 0,
         }
     }
 
-    fn has(&self, i: &Id) -> bool {
-        self.at.contains_key(i) || self.pending.contains_key(i)
+    fn has(&self, i: &Id, ts: u64) -> bool {
+        let day = (ts / DAY) as u32;
+        self.idx.get(&day).is_some_and(|d| d.contains(i))
+            || self.pending.contains_key(i)
+    }
+
+    /// Counted as had in sync, so neither asked for again nor served;
+    /// remembered if it came from the network.
+    fn reject(&mut self, i: Id, day: u32, net: bool) {
+        if !net {
+            self.at.remove(&i);
+            return;
+        }
+        if self.rejected.len() >= REJECTED
+            && let Some((o, d)) = self.rejected.pop_front()
+            && !self.at.contains_key(&o)
+        {
+            self.idx.get_mut(&d).map(|s| s.remove(&o));
+        }
+        self.idx.entry(day).or_default().insert(i);
+        self.rejected.push_back((i, day));
+        self.rejects += 1;
     }
 
     fn index(&mut self, i: Id, ts: u64, at: u64, len: usize) {
@@ -337,19 +364,33 @@ impl Book {
                     Src::Log(v) => Some(v),
                     Src::Net(_, true) => Some(2),
                 };
+                let net = matches!(src, Src::Net(..));
+                let day = (e.ts / DAY) as u32;
                 let Some((s, v)) = op::open(sp, &key, &e, known) else {
+                    self.reject(i, day, net);
                     continue;
                 };
+                // A contact card carries its owner's ops alone; a holder's
+                // knock reaches the owner, kept nowhere: holders never meet.
+                let (st, my) = (&self.st, me.id());
+                let alien = st.dm == Some(st.owner)
+                    && s.author != st.owner
+                    && s.author != my;
+                let knock = matches!(s.op, Op::Knock { .. });
                 // Banned, cut off or retired: dropped, or it fills every
                 // member's disk.
                 let at = (s.ts, s.id);
-                if self.st.role(&s.author) == Role::Banned
-                    || self.st.stale(&e.epoch, &at, &s.author)
-                    || self.st.burned_after(&at, &s.author)
+                if st.role(&s.author) == Role::Banned
+                    || st.stale(&e.epoch, &at, &s.author)
+                    || st.burned_after(&at, &s.author)
+                    || alien && (my != st.owner || !knock)
                 {
+                    self.reject(i, day, net);
                     continue;
                 }
-                if let Src::Net(raw, ours) = &src {
+                if let Src::Net(raw, ours) = &src
+                    && !alien
+                {
                     if !self.store(i, e.ts, raw, v, *ours) {
                         continue;
                     }
@@ -366,16 +407,6 @@ impl Book {
                         .filter(|k| tag(k) == *epoch)
                         .map(|k| (k, false)),
                     Op::Back { key } => Some((*key, true)),
-                    Op::Knock { .. }
-                        if self.st.role(&s.author) == Role::Banned
-                            || self.st.stale(
-                                &e.epoch,
-                                &(s.ts, s.id),
-                                &s.author,
-                            ) =>
-                    {
-                        None
-                    }
                     Op::Knock { sealed } => {
                         let inv = kem_open(&me.kem, &sp.0, sealed);
                         let inv = inv.and_then(|b| {
@@ -388,11 +419,26 @@ impl Book {
                     }
                     _ => None,
                 };
+                if alien {
+                    // Kept nowhere, but news: its knock.
+                    self.reject(i, day, net);
+                    kept += 1;
+                    continue;
+                }
                 if let Some((k, back)) = key {
-                    if self.offered.len() >= 1024 {
-                        self.offered.remove(0);
-                    }
-                    self.offered.push((s.author, at, e.epoch, k, back));
+                    // 16 an author, 4096 in all: non-admins' go first.
+                    let (o, st) = (&mut self.offered, &self.st);
+                    let theirs = |x: &Offered| x.0 == s.author;
+                    let gone = match o.iter().filter(|x| theirs(x)).count() {
+                        16.. => o.iter().position(theirs),
+                        _ if o.len() >= 4096 => o
+                            .iter()
+                            .position(|x| st.role(&x.0) != Role::Admin)
+                            .or(Some(0)),
+                        _ => None,
+                    };
+                    gone.map(|i| o.remove(i));
+                    o.push((s.author, at, e.epoch, k, back));
                 }
                 ops.push(s);
             }
@@ -558,7 +604,12 @@ pub struct Node {
     budget: Mutex<BTreeMap<Id, (u64, u64)>>,
     hosts: Mutex<BTreeMap<Id, Host>>,
     // Devices whose users proved them theirs (sync, calls).
-    verified: Mutex<HashMap<EndpointId, Id>>,
+    verified: Mutex<HashMap<EndpointId, (Id, Instant)>>,
+    // Small files we asked a space's storage node to hold, newest last.
+    asked: Mutex<VecDeque<(EndpointId, Id)>>,
+    // Sync sessions answered now, by whom and for which space.
+    pub(crate) talks:
+        (tokio::sync::Semaphore, Mutex<HashSet<(EndpointId, Id)>>),
     shared: Mutex<BTreeMap<Id, Shared>>,
     // When each peer last synced with us, either way.
     synced: Mutex<HashMap<EndpointId, u64>>,
@@ -853,6 +904,8 @@ impl Node {
             budget: Mutex::new(budget),
             hosts: Mutex::new(hosts),
             verified: Mutex::default(),
+            asked: Mutex::default(),
+            talks: (tokio::sync::Semaphore::new(32), Mutex::default()),
             shared: Mutex::new(shared),
             synced: Mutex::default(),
             call: Mutex::new(None),
@@ -1545,15 +1598,19 @@ impl Node {
         if let Ok(sp) = self.get(&id) {
             return Ok(sp);
         }
-        let (log, recs) = Log::open(&self.log(&id))?;
+        let (mut work, mut at) = (vec![], vec![]);
+        let log = Log::open(&self.log(&id), |o, checked, raw| {
+            let Ok(e) = postcard::from_bytes::<Env>(&raw) else { return };
+            let i = Id(blake3::hash(&raw).into());
+            at.push((i, e.ts, o, raw.len()));
+            work.push((i, e, Src::Log(checked)));
+        })?;
         let st = inv.as_ref().map(State::new).unwrap_or_default();
         let mut b = Book::new(log, st);
-        let mut work = vec![];
-        for (o, checked, raw) in recs {
-            let Ok(e) = postcard::from_bytes::<Env>(&raw) else { continue };
-            let i = Id(blake3::hash(&raw).into());
-            b.index(i, e.ts, o, raw.len());
-            work.push((i, e, Src::Log(checked)));
+        at.into_iter().for_each(|(i, ts, o, l)| b.index(i, ts, o, l));
+        let rej: Vec<(Id, u32)> = store::load(&self.rejected(&id));
+        for (i, d) in rej {
+            b.reject(i, d, true);
         }
         if let Some(i) = &inv {
             b.keys.insert(tag(&i.key), i.key);
@@ -1589,9 +1646,12 @@ impl Node {
             }
             m.insert(id, sp.clone());
         }
-        let boot: Vec<_> = peers.iter().map(|a| a.id).collect();
-        let task = tokio::spawn(pump(self.clone(), Arc::downgrade(&sp), boot));
-        let _ = sp.task.set(AbortOnDropHandle::new(task));
+        // A contact card has no room: its holders meet nobody but its owner.
+        if !sp.inv.as_ref().is_some_and(Invite::card) {
+            let boot = peers.iter().map(|a| a.id).collect();
+            let task = pump(self.clone(), Arc::downgrade(&sp), boot);
+            let _ = sp.task.set(AbortOnDropHandle::new(tokio::spawn(task)));
+        }
         self.bootstrap(&sp).into_iter().take(4).for_each(|p| self.sync(&sp, p));
         self.emit(Event::Changed { space: id });
         tokio::spawn(self.clone().effects(sp.clone()));
@@ -1602,9 +1662,14 @@ impl Node {
         self.dir.join("spaces").join(format!("{id}.log"))
     }
 
+    fn rejected(&self, id: &Id) -> PathBuf {
+        self.log(id).with_extension("rej")
+    }
+
     fn close(&self, id: &Id) {
         drop(self.spaces.write().unwrap_or_else(|e| e.into_inner()).remove(id));
         let _ = std::fs::remove_file(self.log(id));
+        let _ = std::fs::remove_file(self.rejected(id));
         let mut l = lock(&self.local);
         l.read.retain(|(s, _), _| s != id);
         l.joined.remove(id);
@@ -1646,11 +1711,12 @@ impl Node {
         });
         let new = {
             let mut b = lock(&sp.book);
+            let rejects = b.rejects;
             let mut fresh = vec![];
             for raw in raws {
                 let Ok(e) = postcard::from_bytes::<Env>(&raw) else { continue };
                 let i = Id(blake3::hash(&raw).into());
-                if !e.live && e.ts <= now() + SKEW && !b.has(&i) {
+                if !e.live && e.ts <= now() + SKEW && !b.has(&i, e.ts) {
                     fresh.push((i, e, raw));
                 }
             }
@@ -1672,7 +1738,15 @@ impl Node {
                     let w = fresh
                         .into_iter()
                         .map(|(i, e, r)| (i, e, Src::Net(r, mine)));
-                    b.fold(&sp.id, &self.me, w.collect())
+                    let new = b.fold(&sp.id, &self.me, w.collect());
+                    if b.rejects != rejects {
+                        let r: Vec<_> = b.rejected.iter().collect();
+                        if let Err(e) = store::save(&self.rejected(&sp.id), &r)
+                        {
+                            warn!("saving refused ops: {e}");
+                        }
+                    }
+                    new
                 }
             }
         };
@@ -1697,7 +1771,7 @@ impl Node {
         if self.rehome(&sp) && sp.inv.is_some() {
             self.stores(&sp.id).into_iter().for_each(|s| self.sync(&sp, s.0));
             // Our ring code too: the old one, which those cut off hold, dies.
-            if sp.id != self.own && !self.locked(&sp.id) {
+            if sp.id != self.own && !self.locked(&sp.id) && !self.card(&sp.id) {
                 let _ = self.tell_push(&sp.id).await;
             }
         }
@@ -1869,7 +1943,8 @@ impl Node {
             Op::Role { role, .. } => *role != Role::Banned,
             Op::Order { channels } => channels.len() <= 500,
             Op::Edit { .. } | Op::Channel { .. } | Op::Pin { .. } => true,
-            Op::Owner { .. } => true,
+            // A second hand-over forfeits: only the owner sends one.
+            Op::Owner { .. } => self.view(id, State::head) == Some(self.id()),
             _ => false,
         };
         let ok = ok && op::fits(&op);
@@ -1896,10 +1971,17 @@ impl Node {
         mine.peers.insert(0, self.ep.addr());
         self.post(&own, Op::Joined { invite: mine }).await?;
         lock(&self.local).joined.entry(id).or_insert_with(now);
+        // A card's holder says nothing there: its knock is all the owner
+        // needs. Nobody gets a ring code from a card.
+        let (card, ours) = (inv.card(), inv.owner == self.id());
         let sp = self.open(Some(inv), id, vec![])?;
-        let (name, kem) = (self.name(), self.me.pk());
-        self.post(&sp, Op::Profile { name, kem }).await?;
-        let _ = self.tell_push(&id).await;
+        if !card || ours {
+            let (name, kem) = (self.name(), self.me.pk());
+            self.post(&sp, Op::Profile { name, kem }).await?;
+        }
+        if !card {
+            let _ = self.tell_push(&id).await;
+        }
         Ok(id)
     }
 
@@ -2654,6 +2736,13 @@ impl Node {
         for (addr, token) in
             hosts.into_iter().filter(|h| !mine.contains(&h.0.id))
         {
+            {
+                let mut a = lock(&self.asked);
+                if a.len() >= 1024 {
+                    a.pop_front();
+                }
+                a.push_back((addr.id, *hash));
+            }
             let ask = Ask::Hold(*space, token, *hash);
             let ask = self.ask(addr, &ask);
             match tokio::time::timeout(Duration::from_secs(30), ask).await {
@@ -2826,13 +2915,6 @@ impl Node {
         Ok(())
     }
 
-    /// A storage node keeping one of our spaces.
-    fn hosting(&self, d: &EndpointId) -> bool {
-        let has =
-            |id: &Id| self.view(id, |s| s.hosts().iter().any(|a| a.id == *d));
-        self.spaces().iter().any(|id| has(id) == Some(true))
-    }
-
     fn member_device(&self, d: &EndpointId) -> bool {
         let has =
             |id: &Id| self.view(id, |s| s.devices(usize::MAX).contains(d));
@@ -2852,7 +2934,7 @@ impl Node {
             self.passed(space, f);
             return Ok(files.get_bytes(hash).await?.to_vec());
         }
-        let len = crate::crypto::sealed_len(f.size);
+        let len = crate::crypto::sealed_len(f.size).context("no such size")?;
         let ct = match std::fs::read(self.blob(&f.hash)) {
             Ok(ct) => ct,
             Err(_) => match self.pull(space, &f.hash, len).await {
@@ -2908,7 +2990,7 @@ impl Node {
         f: &File,
         to: &Path,
     ) -> Result<()> {
-        let len = crate::crypto::sealed_len(f.size);
+        let len = crate::crypto::sealed_len(f.size).context("no such size")?;
         let files = self.pull(space, &f.hash, len).await?;
         let tmp = self.scratch("out")?;
         files.export(iroh_blobs::Hash::from_bytes(f.hash.0), &tmp).await?;
@@ -3012,7 +3094,7 @@ impl Node {
     /// Members' small files a storage node takes for a space: 25 MB each,
     /// 4 GB a day, so no member fills its disk.
     fn budget(&self, sp: &Id, size: u64) -> Result<(), &'static str> {
-        if size > crate::crypto::sealed_len(PREVIEW as u64) {
+        if Some(size) > crate::crypto::sealed_len(PREVIEW as u64) {
             return Err("over 25 MB: the sender's own storage node keeps it");
         }
         let (mut b, day) = (lock(&self.budget), now() / DAY);
@@ -3056,7 +3138,7 @@ impl Node {
                     blake3::hash(a.as_bytes()) == blake3::hash(b.as_bytes())
                 };
                 let open = self.big.as_deref().zip(pw.as_deref());
-                if size > crate::crypto::sealed_len(limit())
+                if Some(size) > crate::crypto::sealed_len(limit())
                     && !open.is_some_and(|(a, b)| same(a, b))
                 {
                     let no = "over 5 GB: storage nodes keep it only with their password";
@@ -3184,12 +3266,14 @@ impl Node {
         }
     }
 
+    /// Who proved a device theirs; past 4096, the longest unheard goes.
     fn bind(&self, d: EndpointId, u: Id) {
         let mut v = lock(&self.verified);
-        if v.len() >= 4096 {
-            v.clear();
+        if v.len() >= 4096 && !v.contains_key(&d) {
+            let old = v.iter().min_by_key(|x| x.1.1).map(|x| *x.0);
+            old.map(|o| v.remove(&o));
         }
-        v.insert(d, u);
+        v.insert(d, (u, Instant::now()));
     }
 
     /// An owner's devices, room and epochs for a space this node keeps.
@@ -3280,7 +3364,7 @@ impl Node {
     /// A device of someone's has our ops here up to `ts`.
     fn reach_device(&self, id: &Id, d: &EndpointId, ts: u64) {
         let Ok(sp) = self.get(id) else { return };
-        let proven = lock(&self.verified).get(d).copied();
+        let proven = lock(&self.verified).get(d).map(|v| v.0);
         let Some(u) = proven.or_else(|| lock(&sp.book).st.owner_of(d)) else {
             return;
         };
@@ -3317,13 +3401,15 @@ impl Node {
         self.get(id).map(|s| lock(&s.undelivered).clone()).unwrap_or_default()
     }
 
-    /// May `d` have blob `h`? Sealed ones: any member's proven device;
-    /// offered ones: only members of the space they went to.
+    /// May `d` have blob `h`? Sealed ones: any member's proven device, or
+    /// a storage node we asked to hold it; offered ones: only members of
+    /// the space they went to.
     fn may_get(&self, d: &EndpointId, h: &Id) -> bool {
-        if self.serve.is_some() || self.mine(d) || self.hosting(d) {
+        let asked = lock(&self.asked).contains(&(*d, *h));
+        if self.serve.is_some() || self.mine(d) || asked {
             return true;
         }
-        let Some(u) = lock(&self.verified).get(d).copied() else {
+        let Some(u) = lock(&self.verified).get(d).map(|v| v.0) else {
             return false;
         };
         let member = |id: &Id| {
@@ -3417,7 +3503,7 @@ impl Node {
         if sp.inv.is_none() {
             // A storage node can't check gossip: it fetches from who passed it.
             let i = Id(blake3::hash(raw).into());
-            if !e.live && !lock(&sp.book).has(&i) {
+            if !e.live && !lock(&sp.book).has(&i, e.ts) {
                 self.sync(sp, from);
             }
             return;
@@ -3804,7 +3890,7 @@ mod tests {
     fn book(name: &str, owner: Id) -> (Book, PathBuf) {
         let p = std::env::temp_dir().join(format!("irch-{name}-{}", now()));
         let st = State::new(&Invite::new(owner, "", None));
-        (Book::new(Log::open(&p).unwrap().0, st), p)
+        (Book::new(Log::open(&p, |_, _, _| {}).unwrap(), st), p)
     }
 
     #[test]
@@ -3823,6 +3909,20 @@ mod tests {
         }
         assert!(b.parked <= PARKED + (2 << 20) && b.at.is_empty());
         assert_eq!(std::fs::metadata(&p).unwrap().len(), 0);
+        std::fs::remove_file(p).unwrap();
+    }
+
+    #[test]
+    fn refused_ops_count_as_had_and_are_never_served() {
+        let (mut b, p) = book("refused", Id([1; 32]));
+        let k: Key = rand();
+        b.keys.insert(tag(&k), k);
+        let e = Env { epoch: tag(&k), ts: DAY, live: false, ct: vec![7; 64] };
+        let raw = postcard::to_allocvec(&e).unwrap();
+        let i = Id(blake3::hash(&raw).into());
+        let me = Me::new(rand());
+        b.fold(&Id([2; 32]), &me, vec![(i, e, Src::Net(raw, false))]);
+        assert!(b.has(&i, DAY) && b.at.is_empty() && b.rejected.len() == 1);
         std::fs::remove_file(p).unwrap();
     }
 
@@ -3869,7 +3969,8 @@ mod tests {
         let inv = Invite::new(o.id(), "", None);
         let (sp, k0, dev) = (inv.id(), inv.key, SecretKey::generate().public());
         let p = std::env::temp_dir().join(format!("irch-keys-{}", now()));
-        let mut b = Book::new(Log::open(&p).unwrap().0, State::new(&inv));
+        let mut b =
+            Book::new(Log::open(&p, |_, _, _| {}).unwrap(), State::new(&inv));
         b.keys.insert(tag(&k0), k0);
         let (kb, kx): (Key, Key) = (rand(), rand());
         let (ch, n) = (Ch([3; 8]), |t: &str| t.to_string());

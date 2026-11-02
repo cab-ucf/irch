@@ -15,13 +15,13 @@
 
 use crate::Id;
 use crate::crypto::{Key, kdf};
-use crate::node::{Node, Space};
+use crate::node::{Node, Space, lock};
 use anyhow::{Result, anyhow};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::{EndpointId, PublicKey, SecretKey, Signature};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const ALPN: &[u8] = b"irch/sync/2";
@@ -124,25 +124,38 @@ pub async fn initiate(
     Ok(got)
 }
 
-/// Past this many at once, refused (peers retry).
-static SESSIONS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(32);
+/// An admitted remote's turn: one session a space each, 32 in all; past
+/// that, refused (peers sync again on their next event).
+struct Turn<'a>(&'a Mutex<HashSet<(EndpointId, Id)>>, (EndpointId, Id));
 
-pub async fn respond(n: &Arc<Node>, c: &Connection) -> Result<()> {
-    let _turn = SESSIONS.try_acquire().map_err(|_| anyhow!("busy"))?;
-    tokio::time::timeout(LIMIT, session(n, c)).await??;
-    let _ = tokio::time::timeout(Duration::from_secs(5), c.closed()).await;
-    Ok(())
+impl Drop for Turn<'_> {
+    fn drop(&mut self) {
+        lock(self.0).remove(&self.1);
+    }
 }
 
-async fn session(n: &Arc<Node>, c: &Connection) -> Result<()> {
-    // From anyone, before we know the space: small (2,000 devices), and soon.
+pub async fn respond(n: &Arc<Node>, c: &Connection) -> Result<()> {
+    // From anyone, before we know the space: small (2,000 devices), and
+    // soon. A turn only once admitted: the slow hold up nobody.
     let hello = async {
         let (tx, mut rx) = c.accept_bi().await?;
         let b = unframe(&mut rx, 64 << 10).await?;
         anyhow::Ok((tx, rx, postcard::from_bytes::<Hello>(&b)?))
     };
     let ten = Duration::from_secs(10);
-    let (mut tx, mut rx, hello) = tokio::time::timeout(ten, hello).await??;
+    let (tx, rx, hello) = tokio::time::timeout(ten, hello).await??;
+    tokio::time::timeout(LIMIT, session(n, c, tx, rx, hello)).await??;
+    let _ = tokio::time::timeout(Duration::from_secs(5), c.closed()).await;
+    Ok(())
+}
+
+async fn session(
+    n: &Arc<Node>,
+    c: &Connection,
+    mut tx: SendStream,
+    mut rx: RecvStream,
+    hello: Hello,
+) -> Result<()> {
     let sp = match n.find(&hello, c.remote_id()) {
         (Some(sp), Admit::Yes) => sp,
         (_, Admit::Out) => {
@@ -151,6 +164,10 @@ async fn session(n: &Arc<Node>, c: &Connection) -> Result<()> {
         }
         _ => anyhow::bail!("unknown space"),
     };
+    let ((all, each), who) = (&n.talks, (c.remote_id(), sp.id));
+    let _all = all.try_acquire().map_err(|_| anyhow!("busy"))?;
+    anyhow::ensure!(lock(each).insert(who), "busy");
+    let _each = Turn(each, who);
     let mine = sp.buckets();
     if root(&mine) == hello.root {
         write(&mut tx, &Reply::Same).await?;
