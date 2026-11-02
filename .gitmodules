@@ -1,0 +1,3 @@
+[submodule "app/gen/android/irpush"]
+	path = app/gen/android/irpush
+	url = https://github.com/cab-ucf/irpush

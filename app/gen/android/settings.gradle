@@ -1,3 +1,6 @@
 include ':app'
+// irpush's Android library (git submodule): one push device per phone.
+include ':irpush'
+project(':irpush').projectDir = file('irpush/android/irpush')
 
 apply from: 'tauri.settings.gradle'
