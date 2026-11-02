@@ -81,6 +81,7 @@ pub const MAX_NAME: usize = 64;
 /// would stall everyone's screen.
 pub fn fits(op: &Op) -> bool {
     let file = |f: &File| f.name.len() <= 255;
+    let addr = |a: &EndpointAddr| a.addrs.len() <= 16;
     match op {
         Op::Post { text, files, .. } => {
             text.len() <= MAX_TEXT
@@ -99,6 +100,17 @@ pub fn fits(op: &Op) -> bool {
             name.as_ref().is_none_or(|n| n.len() <= 256)
         }
         Op::Label { name, .. } => name.len() <= 256,
+        Op::Knock { sealed } => sealed.len() <= 4096,
+        // A few thousand members, each a key sealed to theirs.
+        Op::Rekey { boxes, .. } => {
+            boxes.len() <= 3000 && boxes.iter().all(|b| b.1.len() <= 1216)
+        }
+        Op::Host { node: a, .. } | Op::Storage { addr: a, .. } => addr(a),
+        Op::Joined { invite: i } => {
+            i.name.len() <= 256
+                && i.peers.len() <= 16
+                && i.peers.iter().all(addr)
+        }
         Op::Preview { link: l, .. } => {
             l.url.len() <= 2048
                 && l.title.len() <= 400
@@ -278,9 +290,6 @@ pub fn tag(key: &Key) -> [u8; 8] {
     kdf("irch epoch", &[key])[..8].try_into().expect("8 bytes")
 }
 
-/// Before this, ops signed without their epoch (v1) still count: history.
-pub const CUTOVER: u64 = 1_794_700_800_000;
-
 /// v2 signs the epoch too, so nobody re-seals an op under another key.
 fn tbs(
     v: u8,
@@ -326,7 +335,8 @@ pub fn seal(
 }
 
 /// Decrypt and verify, or with `known`, re-read one checked as that
-/// version. Returns the version its signature has.
+/// version. Returns the version its signature has. Unsigned epochs (v1)
+/// count only as our log has them: anyone could date one into history.
 pub fn open(
     space: &Id,
     key: &Key,
@@ -338,8 +348,7 @@ pub fn open(
     let pk = PublicKey::from_bytes(&i.author.0).ok()?;
     let msg = |v| tbs(v, space, &e.epoch, e.ts, &i.device, &i.op);
     let ok = |v: &u8| known.is_some() || pk.verify(&msg(*v), &i.sig).is_ok();
-    let old = known.is_some() || e.ts < CUTOVER;
-    let v = known.into_iter().chain([2]).chain(old.then_some(1)).find(ok)?;
+    let v = known.into_iter().chain([2]).find(ok)?;
     if i.op.live() != e.live || !fits(&i.op) {
         return None;
     }
@@ -370,7 +379,7 @@ fn sealed() {
 }
 
 #[test]
-fn old_signatures_count_only_before_the_cutover() {
+fn old_signatures_count_only_from_our_log() {
     let (sk, dev) = (SecretKey::generate(), SecretKey::generate().public());
     let (sp, key) = (Id([1; 32]), crypto::rand());
     let v1 = |ts| {
@@ -386,8 +395,8 @@ fn old_signatures_count_only_before_the_cutover() {
         );
         e
     };
-    assert_eq!(open(&sp, &key, &v1(CUTOVER - 1), None).map(|s| s.1), Some(1));
-    assert!(open(&sp, &key, &v1(CUTOVER), None).is_none());
+    assert!(open(&sp, &key, &v1(1), None).is_none());
+    assert_eq!(open(&sp, &key, &v1(1), Some(1)).map(|s| s.1), Some(1));
     // Too big to show anyone: dropped wherever it lands.
     let big = Op::Post {
         channel: Ch([1; 8]),
