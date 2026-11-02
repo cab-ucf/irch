@@ -36,6 +36,12 @@ in {
         (_: u: u.isNormalUser && lib.hasPrefix "/home/" u.home) config.users.users);
       defaultText = "everyone with a home in /home";
     };
+    # irpush's relay for this node's phones: "https://irpush.you.example#TOKEN"
+    # (irpush's deploy/, `make token`). Unset, irch's relays (15 s pings).
+    services.irch.pushRelay = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+    };
     services.irch.signers = lib.mkOption {
       type = lib.types.lines; default = ""; visible = false;
     };
@@ -123,7 +129,8 @@ in {
           StateDirectory = "irch/data"; StateDirectoryMode = "0700";
           RuntimeDirectory = "irch"; RuntimeDirectoryMode = "0750";
           UMask = "0027";
-          Environment = "IRCH_CODE_FILE=/run/irch/code";
+          Environment = [ "IRCH_CODE_FILE=/run/irch/code" ]
+            ++ lib.optional (cfg.pushRelay != null) "IRCH_PUSH_RELAY=${cfg.pushRelay}";
           ProtectKernelTunables = true; ProtectControlGroups = true;
           RestrictSUIDSGID = true; LockPersonality = true;
           SystemCallArchitectures = "native";
