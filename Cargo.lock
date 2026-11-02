@@ -1737,7 +1737,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -4311,7 +4311,7 @@ dependencies = [
 [[package]]
 name = "irpush"
 version = "0.1.6"
-source = "git+https://github.com/cab-ucf/irpush?rev=aa1b60d#aa1b60d3cb20a9dcbbdc032ddf5b79cb5263bd11"
+source = "git+https://github.com/cab-ucf/irpush?rev=8ec00c5#8ec00c5728ad68eea23e4d41390902a9607e4af0"
 dependencies = [
  "anyhow",
  "chacha20poly1305 0.10.1",
@@ -5504,7 +5504,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 1.3.1",
+ "proc-macro-crate 2.0.2",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -5945,7 +5945,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.45.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

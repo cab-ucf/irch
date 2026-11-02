@@ -31,7 +31,7 @@ postcard = { version = "1", features = ["use-std"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 x-wing = { version = "0.1", features = ["getrandom"] }
 # Phones: one quiet, shared socket; storage nodes push through it.
-irpush = { git = "https://github.com/cab-ucf/irpush", rev = "aa1b60d" }
+irpush = { git = "https://github.com/cab-ucf/irpush", rev = "8ec00c5" }
 
 # A call's voice, native: the echo canceller hears what plays.
 cpal = { version = "0.18", optional = true }
