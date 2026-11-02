@@ -1270,6 +1270,7 @@ img.qr {
 }
 .video .play svg { width: 32px; height: 32px; color: var(--brand); }
 .video.loading .play { opacity: .5; }
+.voice .play { width: 240px; height: 44px; flex-direction: row; }
 .video video { display: block; max-width: 100%; max-height: 320px;
   border-radius: var(--radius); }
 .attachments .image.loading {
@@ -1306,6 +1307,9 @@ img.attachment {
 #empty .note .link { color: var(--link); cursor: pointer; }
 
 /* ===== Calls ===== */
+/* Over a locked phone (MainActivity.kt): the call, nothing else. */
+.lockscreen #app > aside,
+.lockscreen #chat > :not(#call) { display: none !important; }
 #call {
   flex: none;
   max-height: 55%;

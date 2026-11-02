@@ -3,10 +3,10 @@
 # can steal nothing. Only `publish`, in the `release` Environment (Settings
 # › Environments: required reviewers; tags v* protected), signs and uploads.
 # Its secrets: TAURI_SIGNING_PRIVATE_KEY(_PASSWORD), ANDROID_KEYSTORE
-# (base64), ANDROID_KEYSTORE_PASSWORD. Apple signs while building, so its
-# secrets, once they exist, reach the macOS and TestFlight builds: APPLE_
+# (base64), ANDROID_KEYSTORE_PASSWORD. Apple's, once the variable
+# APPLE_TEAM_ID is set, likewise only after a build, in `release`: APPLE_
 # CERTIFICATE (base64 .p12), _CERTIFICATE_PASSWORD, _SIGNING_IDENTITY, _ID,
-# _PASSWORD, _TEAM_ID; APPLE_API_KEY, _API_ISSUER, _API_KEY_P8.
+# _PASSWORD; APPLE_API_KEY, _API_ISSUER, _API_KEY_P8.
 name: release
 on:
   push:
@@ -72,21 +72,7 @@ jobs:
           grep -qx "version = \"${TAG#v}\"" Cargo.toml
           v='"version": "'${TAG#v}'"'
           sed -i.bak "s/\"version\": \"[^\"]*\"/$v/" app/tauri.conf.json
-      - name: Apple's notarization, once its secrets exist (else ad hoc)
-        if: runner.os == 'macOS'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD \
-            APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
-            [ -z "${!v}" ] || echo "$v=${!v}" >> "$GITHUB_ENV"
-          done
-      # Unsigned for updates: `publish` signs every file, holding the key.
+      # Unsigned (macOS: ad hoc): `apple` and `publish` sign, holding keys.
       - name: The app
         working-directory: app
         shell: bash
@@ -195,11 +181,71 @@ jobs:
           path: out/*
           retention-days: 3
 
+  # Developer ID: the built app signed, notarized, stapled; its .dmg made
+  # again around it. The certificate never meets a build.
+  apple:
+    needs: desktop
+    if: vars.APPLE_TEAM_ID != ''
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    runs-on: macos-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: desktop-${{ matrix.target }}
+          path: out
+      - name: Signed by Apple
+        env:
+          P12: ${{ secrets.APPLE_CERTIFICATE }}
+          PW: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          ID: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          TEAM: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          k=$RUNNER_TEMP/irch.keychain-db
+          security create-keychain -p irch "$k"
+          security unlock-keychain -p irch "$k"
+          echo "$P12" | base64 -d > "$RUNNER_TEMP/irch.p12"
+          security import "$RUNNER_TEMP/irch.p12" -k "$k" -P "$PW" \
+            -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/irch.p12"
+          security set-key-partition-list -S apple-tool:,apple: -k irch "$k"
+          security list-keychains -d user -s "$k"
+          cd out
+          tar -xzf irch_*.app.tar.gz
+          codesign --force --deep --timestamp --options runtime \
+            --entitlements ../app/Entitlements.plist -s "$ID" irch.app
+          ditto -c -k --keepParent irch.app irch.zip
+          xcrun notarytool submit irch.zip --wait --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" --team-id "$TEAM"
+          xcrun stapler staple irch.app
+          tar -czf irch_*.app.tar.gz irch.app
+          dmg=$(ls *.dmg) && rm "$dmg" irch.zip
+          mkdir dmg && mv irch.app dmg/ && ln -s /Applications dmg/
+          hdiutil create -volname irch -srcfolder dmg -format UDZO "$dmg"
+          rm -rf dmg
+          security delete-keychain "$k"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-${{ matrix.target }}
+          path: out/*
+          overwrite: true
+          retention-days: 3
+
   # TestFlight, given an App Store Connect key: APPLE_API_KEY (its id),
-  # APPLE_API_ISSUER, APPLE_API_KEY_P8 (the .p8's text), APPLE_TEAM_ID.
+  # APPLE_API_ISSUER, APPLE_API_KEY_P8 (the .p8's text). Apple signs only
+  # as it builds here, so the key waits for `release`'s reviewers.
   testflight:
     needs: ios
+    if: vars.APPLE_TEAM_ID != ''
     runs-on: macos-latest
+    environment: release
     env:
       ASC: ${{ secrets.APPLE_API_KEY_P8 != '' }}
     steps:
@@ -220,7 +266,7 @@ jobs:
         env:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_DEVELOPMENT_TEAM: ${{ vars.APPLE_TEAM_ID }}
           P8: ${{ secrets.APPLE_API_KEY_P8 }}
         run: |
           v='"version": "'${TAG#v}'"'
@@ -241,9 +287,10 @@ jobs:
   # nothing: tauri's signer is installed before the key is in reach.
   # An iPhone build that fails leaves out the IPA, not the release.
   publish:
-    needs: [desktop, android, ios]
+    needs: [desktop, android, ios, apple]
     if: ${{ !cancelled() && needs.desktop.result == 'success'
-      && needs.android.result == 'success' }}
+      && needs.android.result == 'success'
+      && needs.apple.result != 'failure' }}
     runs-on: ubuntu-latest
     environment: release
     permissions:
