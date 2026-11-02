@@ -37,7 +37,9 @@ export const supported = () => typeof AudioEncoder === "function" &&
   typeof VideoDecoder === "function" && !!navigator.mediaDevices;
 export const canShare = () => !!navigator.mediaDevices?.getDisplayMedia;
 
-let ctx, mic, aenc, venc, timer, tuned, levels;
+let ctx, mic, aenc, venc, timer, levels;
+// Each join's own: hung up (or joined again) midway, a join stops there.
+let joins = 0;
 // Codecs this device decodes, once asked.
 let decodes = null;
 
@@ -79,17 +81,19 @@ function send(kind, codec, chunk) {
 
 export async function join(space, channel, rpc) {
   await leave(rpc);
-  ctx = new AudioContext({ sampleRate: RATE });
-  await ctx.audioWorklet.addModule("audio.js");
-  quiet(ctx.resume());
-  if (!tuned) {
-    const ch = new core.Channel();
-    ch.onmessage = heard;
-    await core.invoke("tune", { to: ch });
-    tuned = true;
-  }
+  const me = ++joins;
+  const c = ctx = new AudioContext({ sampleRate: RATE });
+  const gone = () => me !== joins && (shut(c), true);
+  await c.audioWorklet.addModule("audio.js");
+  quiet(c.resume());
+  // Each call: the node may have restarted since (Rust keeps the last).
+  const ch = new core.Channel();
+  ch.onmessage = heard;
+  await core.invoke("tune", { to: ch });
+  if (gone()) return;
   // A phone's call: the microphone allowed, the screen on.
   await quiet(core.invoke("in_call", { on: true }));
+  if (gone()) return;
   // On screen at once, "Calling…"; a failure below hangs up.
   call.on = { space, channel };
   call.since = Date.now();
@@ -98,9 +102,12 @@ export async function join(space, channel, rpc) {
   await rpc("ring", { space, channel });
   // The core's own voice where it has one: its echo canceller hears what
   // plays, so both sides speak at once. Else the web view's, as before.
-  call.native = !!(await rpc("me")).call?.native;
+  const native = !!(await rpc("me")).call?.native;
+  if (gone()) return;
+  call.native = native;
   call.changed();
   decodes ??= await decodable();
+  if (gone()) return;
   sayCodecs(); // and again as each peer appears, not on a timer
   if (call.native) {
     shut(ctx);
@@ -115,9 +122,11 @@ export async function join(space, channel, rpc) {
     }, 150);
     return call.changed();
   }
-  mic = await navigator.mediaDevices.getUserMedia({ audio: {
+  const m = await navigator.mediaDevices.getUserMedia({ audio: {
     echoCancellation: true, noiseSuppression: true, autoGainControl: true,
   } }).catch(() => null);
+  if (gone()) return m?.getTracks().forEach((t) => t.stop());
+  mic = m;
   call.mic = !!mic;
   if (!mic) return call.changed();
   aenc = new AudioEncoder({ output: (c) => send(0, 0, c), error: () => {} });
@@ -141,6 +150,7 @@ export async function join(space, channel, rpc) {
 
 export async function leave(rpc) {
   if (!call.on) return;
+  joins++;
   call.on = null;
   call.native = false;
   quiet(core.invoke("in_call", { on: false }));
@@ -153,6 +163,13 @@ export async function leave(rpc) {
   call.changed();
   await quiet(rpc("hangup"));
 }
+
+// Seen again in a call: Android let go of the lock screen out of sight.
+document.addEventListener("visibilitychange", () => {
+  if (call.on && !document.hidden) {
+    quiet(core.invoke("in_call", { on: true }));
+  }
+});
 
 export async function video(kind) {
   clearInterval(timer);
