@@ -26,8 +26,9 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
   `irch.nixosModules.default` among the modules: the app and a storage
   node, kept up to date (checked against irch's key, built by Nix; the
   newer of the latest release and the flake's own runs).
-  `services.irch.pushRelay = "https://irpush.you.example#TOKEN";` for
-  irpush's relay. `services.irch.enable = false;` leaves the node out (a
+  `services.irch.pushRelayFile = "/run/secrets/irch-push-relay";` for
+  irpush's relay: a root-only file outside the Nix store holding
+  `https://irpush.you.example#TOKEN`. `services.irch.enable = false;` leaves the node out (a
   laptop: keep it on a computer that is always on). Sway: `exec irch-app
   --hidden` in its config (it skips XDG autostart) and a tray in the bar
   (waybar's).
