@@ -8,13 +8,9 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
-import com.google.firebase.FirebaseApp
-import com.google.firebase.FirebaseOptions
-import com.google.firebase.messaging.FirebaseMessaging
-import com.google.firebase.messaging.FirebaseMessagingService
-import com.google.firebase.messaging.RemoteMessage
 import org.json.JSONArray
 import org.unifiedpush.android.connector.FailedReason
+import org.unifiedpush.android.connector.UnifiedPush
 import org.unifiedpush.android.connector.PushService
 import org.unifiedpush.android.connector.data.PushEndpoint
 import org.unifiedpush.android.connector.data.PushMessage
@@ -31,12 +27,6 @@ object Wake {
 
   /** Waits for the doorbell: `{show: notices, catch: whether to catch up}`. */
   @JvmStatic external fun rung(ctx: Context, dir: String): String
-
-  /** Our Firebase token to irch's push servers; false if none took it. */
-  @JvmStatic external fun fcm(ctx: Context, dir: String, token: String): Boolean
-
-  /** What Google brought, sealed to us, as `rung` tells it. */
-  @JvmStatic external fun rang(ctx: Context, dir: String, data: String): String
 
   /** Hand Android's context back before the activity's runtime takes it. */
   @JvmStatic external fun release()
@@ -99,49 +89,6 @@ fun wake(ctx: Context, push: String?) {
   }
 }
 
-/** Google's push, through a push server among our storage nodes (core/
- *  src/push.rs): no connection of irch's own held open. Each carries a
- *  ring sealed to this phone, always the same size. */
-class IrchFcm : FirebaseMessagingService() {
-  override fun onNewToken(token: String) {
-    register(this, token)
-  }
-
-  override fun onMessageReceived(m: RemoteMessage) {
-    val r = m.data["r"] ?: return
-    if (show(this, Wake.rang(applicationContext, dataDir.absolutePath, r))) {
-      wake(this, null)
-    }
-  }
-
-  // Google dropped some, for a phone off too long: caught up instead.
-  override fun onDeletedMessages() = wake(this, null)
-}
-
-/** Firebase as a storage node told it (IrchPlugin.firebase), from the
- *  start of every process: a push may be what starts it. */
-class IrchApp : android.app.Application() {
-  override fun onCreate() {
-    super.onCreate()
-    startFirebase(this)
-  }
-}
-
-fun startFirebase(ctx: Context): Boolean {
-  if (FirebaseApp.getApps(ctx).isNotEmpty()) return true
-  val p = ctx.getSharedPreferences("irch", 0)
-  val app = p.getString("fb_app", null) ?: return false
-  return runCatching {
-    FirebaseApp.initializeApp(ctx, FirebaseOptions.Builder()
-      .setApplicationId(app)
-      .setApiKey(p.getString("fb_key", "")!!)
-      .setProjectId(p.getString("fb_project", ""))
-      .setGcmSenderId(p.getString("fb_sender", ""))
-      .build())
-    true
-  }.getOrDefault(false)
-}
-
 /** A ring's notices shown; true if irch must catch up for it (a message
  *  too big to carry, a DM to take): most need no node at all. */
 fun show(ctx: Context, json: String): Boolean = runCatching {
@@ -150,32 +97,6 @@ fun show(ctx: Context, json: String): Boolean = runCatching {
   for (k in 0 until show.length()) alert(ctx, show.getJSONObject(k))
   got.getBoolean("catch")
 }.getOrDefault(true)
-
-/** Rung through Google: a push server took our Firebase token. */
-fun google(ctx: Context) = ctx.getSharedPreferences("irch", 0).getBoolean("fcm", false)
-
-fun register(ctx: Context, token: String): Boolean {
-  val ok = runCatching {
-    Wake.fcm(ctx.applicationContext, ctx.dataDir.absolutePath, token)
-  }.getOrDefault(false)
-  ctx.getSharedPreferences("irch", 0).edit().putBoolean("fcm", ok).apply()
-  return ok
-}
-
-/** Firebase's token to the push servers; `done(false)` where this build
- *  or phone has no Firebase, or no push server took it. */
-fun fcm(ctx: Context, done: (Boolean) -> Unit) {
-  val main = android.os.Handler(android.os.Looper.getMainLooper())
-  val t = runCatching { FirebaseMessaging.getInstance().token }.getOrNull()
-    ?: return done(false)
-  t.addOnCompleteListener { r ->
-    val token = if (r.isSuccessful) r.result else null
-    Thread {
-      val ok = token != null && register(ctx, token)
-      main.post { done(ok) }
-    }.start()
-  }
-}
 
 /** CPU held awake: asleep, Android would freeze irch mid-sync. */
 fun catchUp(ctx: Context, push: String?) {
@@ -263,8 +184,8 @@ class IrchLive : Service() {
       })
       beat(this, 120L)
       Thread {
-        // Until Google's push takes over.
-        while (!google(this)) {
+        // Until a UnifiedPush app takes over.
+        while (UnifiedPush.getAckDistributor(this) == null) {
           val dir = dataDir.absolutePath
           // Caught up beside it, if need be: the doorbell listens at once.
           if (show(this, Wake.rung(applicationContext, dir)) &&
@@ -287,9 +208,7 @@ class IrchLive : Service() {
 class Boot : android.content.BroadcastReceiver() {
   override fun onReceive(ctx: Context, i: Intent) {
     if (i.action != Intent.ACTION_BOOT_COMPLETED) return
-    val pushed = org.unifiedpush.android.connector.UnifiedPush
-      .getAckDistributor(ctx) != null
-    if (!pushed && !google(ctx)) live(ctx)
+    if (UnifiedPush.getAckDistributor(ctx) == null) live(ctx)
   }
 }
 

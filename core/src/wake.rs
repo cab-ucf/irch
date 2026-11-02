@@ -68,11 +68,6 @@ pub fn push_token(dir: &Path, space: &Id, tag: &[u8; 8]) -> Result<[u8; 16]> {
     Ok(token(&k[32..].try_into()?, space, tag))
 }
 
-/// The key pushes to us are sealed to, from the same secret.
-pub fn push_key(dir: &Path) -> Result<crate::crypto::Key> {
-    Ok(kdf("irch push", &[&kept(dir)?[32..]]))
-}
-
 /// Our doorbell, closed: irpush rings us now.
 pub async fn hush(dir: &Path) {
     let bell = BELLS.lock().await.as_mut().and_then(|b| b.remove(dir));

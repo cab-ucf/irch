@@ -35,31 +35,14 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
 
 ## Push for Android phones
 
-Every storage node is a push server, with no setup: an Android phone
-without Google's push or a UnifiedPush app pairs with one it knows (its
-own first) through [irpush](https://github.com/cab-ucf/irpush), and keeps
-one quiet socket instead of a doorbell. Each ring is sealed end to end
+Every storage node is a push server, with no setup and no Google: an
+Android phone without a UnifiedPush app pairs with one it knows (its own
+first) through [irpush](https://github.com/cab-ucf/irpush), and keeps one
+quiet socket instead of a doorbell. Each ring is sealed end to end
 (post-quantum) and always the same size. Stock iroh relays ping every 15 s,
 which keeps a phone's radio awake, so for the battery saving give the
 storage node irpush's patched relay:
 `IRCH_PUSH_RELAY=https://irpush.you.example#TOKEN` (default: irch's relays).
-
-### Through Google (optional, once per server)
-
-A storage node holding a Firebase project wakes Android phones through
-Google, so they hold nothing open. Phones in the spaces it keeps, or paired
-with it, find it by themselves: no app setting, no build of your own.
-
-1. In the [Firebase console](https://console.firebase.google.com): *Add
-   project*; *Add app → Android*, package `dev.irch.chat`; download
-   `google-services.json`. Then *Project settings → Service accounts →
-   Generate new private key* (`key.json`).
-2. On the server, one command:
-   ```sh
-   curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh | sh -s -- --server key.json google-services.json
-   ```
-   (NixOS: both into `/var/lib/irch/data`, as `fcm.json` and
-   `google-services.json`, owned by `irch`; then `systemctl restart irch`.)
 
 ## Features
 
@@ -145,21 +128,24 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   sealed op itself, and the phone shows it from a phonebook its node left
   (each space's key, names, levels) and keeps it for the node to fold
   later: a wake starts no node and opens no connection. Android phones
-  are rung through Google's push, by a push server (below); with a
-  UnifiedPush app such as ntfy, through it; else through irpush, from a
-  storage node, on one socket with heartbeats as long as the network
-  allows; else, at a battery's cost, through irch's own doorbell. iPhones catch up when
-  opened, and a call keeps irch up.
-- **Push servers** are storage nodes: through irpush, any of them; through
-  Google, those holding a Firebase project. Phones ask the storage nodes
-  they know (theirs, their spaces') for one, pair with it (irpush) or take
-  a Firebase token from its project, and give it that route, a ring token
-  per space and epoch, and a key. Members ring with those as with a
-  doorbell, every route of a phone at once; Google carries the ring
-  sealed to that key and padded to one size, so it learns when and
-  nothing else, and the phone shows it as it lands. Google keeps pushes
-  for a phone that is off four weeks; storage nodes and members keep
-  everything, synced when irch opens.
+  are rung with a UnifiedPush app such as ntfy, through it; else through
+  irpush, from a storage node (below), on one socket with heartbeats as
+  long as the network allows; else, at a battery's cost, through irch's
+  own doorbell. iPhones catch up when opened, and a call keeps irch up.
+- **Push servers** are storage nodes, any of them, through irpush. Phones
+  ask the storage nodes they know (theirs, their spaces') for a ticket,
+  pair once, and give it their device and a ring token per space and
+  epoch. Members ring with those as with a doorbell, every route of a
+  phone at once; irpush carries the ring sealed end to end, one size, so
+  its relay learns when and nothing else, and the phone shows it as it
+  lands. The push server keeps a ring for a phone that is off a day;
+  storage nodes and members keep everything, synced when irch opens.
+- **Traffic is one op per state change.** A device says `Here` as it
+  joins a space's mesh and `Gone` as it leaves; each device already there
+  answers once with its call (none, mostly). A call is said as it starts.
+  No presence, call or sync rides on a timer; idle links keep alive every
+  25 s only while irch runs, and a sleeping phone holds irpush's socket
+  alone.
 
 | network | terminal (app env) | who else is involved |
 |---|---|---|
@@ -180,9 +166,10 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   endpoint id is online, to anyone.
 - A member's UnifiedPush server learns when each member writes, and from
   where. A push server learns that much, and which spaces a ring is for;
-  Google, only when a phone is woken; irpush's relay, when and the
-  phone's address. Doorbell codes are per space and
-  die with a rekey.
+  irpush's relay, when and the phone's address. Doorbell codes are per
+  space and die with a rekey.
+- Presence is said, not polled: a device that vanishes without `Gone`
+  (its battery dies) looks here until it is back.
 - Call frames reach the system web view's video decoders.
 - Calls are for a handful of people; Macs and iPhones need WebKit 26.
 - An iPhone in the background is not told of messages: Apple's push is a

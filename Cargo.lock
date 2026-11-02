@@ -3930,7 +3930,6 @@ dependencies = [
  "noq-proto",
  "postcard",
  "reqwest",
- "ring",
  "serde",
  "serde_json",
  "sonora",

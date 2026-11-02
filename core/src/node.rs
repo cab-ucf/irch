@@ -4,7 +4,6 @@
 use crate::call::{self, Call};
 use crate::crypto::{Key, Me, kem_open, kem_seal, rand, same};
 use crate::op::{self, Env, File, Invite, Op, Role, Signed, code, tag, uncode};
-use crate::push::Firebase;
 use crate::state::State;
 use crate::store::{self, Log};
 use crate::sync::{self, Admit, Bucket, Hello};
@@ -531,7 +530,7 @@ pub struct Node {
     wake: Mutex<HashMap<String, (Option<Instant>, bool)>>,
     rang: Mutex<HashSet<(Id, Id, Ch)>>,
     push: OnceLock<reqwest::Client>,
-    // Push servers that took our Firebase token, and the ring tokens.
+    // Push servers that took our irpush device, and the ring tokens.
     via: Mutex<(Vec<EndpointAddr>, Vec<[u8; 16]>)>,
     name: Mutex<String>,
     events: broadcast::Sender<Event>,
@@ -848,7 +847,7 @@ impl Node {
             .accept(sync::ALPN, Proto(Arc::downgrade(&n)))
             .accept(BLOB, Proto(Arc::downgrade(&n)))
             .accept(call::ALPN, Proto(Arc::downgrade(&n)));
-        // A storage node rings phones through irpush, or Google with a key.
+        // A storage node rings phones through irpush.
         if serve.is_some()
             && let Some(p) = crate::push::Server::open(&n.dir, &n.net)?
         {
@@ -1177,7 +1176,7 @@ impl Node {
         (shown, false)
     }
 
-    /// Whether a push server took our Firebase token.
+    /// Whether a push server took our irpush device.
     pub fn pushing(&self) -> bool {
         !lock(&self.via).0.is_empty()
     }
@@ -1186,9 +1185,8 @@ impl Node {
         lock(&self.prefs).push.is_some()
     }
 
-    /// Our UnifiedPush endpoint, or none: sealed to every space we are in.
-    /// `fcm:TOKEN` for Firebase, `irpush:DEVICE` for our irpush device,
-    /// through whichever push servers take it.
+    /// Our UnifiedPush endpoint, doorbell or `irpush:DEVICE` (through the
+    /// push server that paired it), or none: sealed to every space we are in.
     pub async fn set_push(self: &Arc<Self>, url: Option<String>) {
         lock(&self.prefs).push = url;
         self.save_prefs();
@@ -1215,20 +1213,6 @@ impl Node {
             }
         }
         at
-    }
-
-    /// The Firebase project of the first push server among them, and every
-    /// one serving it.
-    pub async fn firebase(&self) -> Option<(Firebase, Vec<EndpointAddr>)> {
-        let asks = self.keepers().into_iter().map(|a| async {
-            let f = crate::push::firebase(&self.ep, a.clone()).await;
-            f.ok().map(|f| (f, a))
-        });
-        let got: Vec<_> = n0_future::join_all(asks).await;
-        let got: Vec<_> = got.into_iter().flatten().collect();
-        let f = got.first()?.0.clone();
-        let at = got.into_iter().filter(|g| g.0 == f).map(|g| g.1).collect();
-        Some((f, at))
     }
 
     /// Our irpush device, paired with a storage node we know that takes
@@ -1258,14 +1242,12 @@ impl Node {
         None
     }
 
-    /// Our route (a Firebase token, our irpush device), every space's ring
-    /// token and the key pushes are sealed to, to each push server for it.
+    /// Our irpush device and every space's ring token, to the storage
+    /// node it is paired with (the one of ours that says yes).
     async fn register(self: &Arc<Self>) {
-        let Some(push) = lock(&self.prefs).push.clone() else { return };
-        let fcm = match push.strip_prefix("fcm:") {
-            Some(t) => t,
-            None if push.starts_with("irpush:") => &push,
-            None => return,
+        let push = lock(&self.prefs).push.clone();
+        let Some(push) = push.filter(|p| p.starts_with("irpush:")) else {
+            return;
         };
         let mut rings = vec![];
         for sp in self.all() {
@@ -1273,14 +1255,8 @@ impl Node {
             let t = tag(&lock(&sp.book).key(inv).0);
             rings.extend(crate::wake::push_token(&self.dir, &sp.id, &t));
         }
-        let at = match push.starts_with("irpush:") {
-            true => self.keepers(), // the one we paired with says yes
-            false => self.firebase().await.map(|f| f.1).unwrap_or_default(),
-        };
-        let Ok(key) = crate::wake::push_key(&self.dir) else { return };
-        let tries = at.into_iter().map(|a| {
-            let go =
-                crate::push::register(&self.ep, a.clone(), fcm, &rings, key);
+        let tries = self.keepers().into_iter().map(|a| {
+            let go = crate::push::register(&self.ep, a.clone(), &push, &rings);
             async move { go.await.map(|_| a) }
         });
         let took = n0_future::join_all(tries).await.into_iter().flatten();
@@ -1297,7 +1273,7 @@ impl Node {
         let url = if url.starts_with("irch:wake:") {
             crate::wake::allow(&self.dir, id, &t)?;
             crate::wake::for_space(&url, id, &t).context("bad doorbell")?
-        } else if url.starts_with("fcm:") || url.starts_with("irpush:") {
+        } else if url.starts_with("irpush:") {
             // A ring code for each push server; a new one (a space joined,
             // rekeyed) registered first.
             let k = crate::wake::push_token(&self.dir, id, &t)?;
