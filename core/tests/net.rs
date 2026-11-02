@@ -942,6 +942,45 @@ async fn a_push_server_rings_a_phone_through_google() {
     assert_eq!(open(&hi).body, "hi");
 }
 
+/// Every storage node is a push server through irpush, Google or none: a
+/// phone pairs with its own unasked, and each ring lands on the one socket
+/// the phone keeps, sealed end to end.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_storage_node_rings_a_phone_through_irpush() {
+    use iroh_relay::server::{RelayConfig, Server, ServerConfig};
+    let mut cfg = ServerConfig::default();
+    cfg.relay = Some(RelayConfig::new(([127, 0, 0, 1], 0)));
+    let relay = Server::spawn(cfg).await.unwrap();
+    let at = format!("http://{}", relay.http_addr().unwrap());
+    // SAFETY: storage nodes read it as they start; no test wants another.
+    unsafe { std::env::set_var("IRCH_PUSH_RELAY", at) };
+    let s = start(&dir("s"), "s", None, true).await;
+    let db = dir("b");
+    let (a, b) = (node("a").await, start(&db, "b", None, false).await);
+    let id = a.create("hub").await.unwrap();
+    let ch = general(&a, &id);
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    pair(&b, &s, &[]).await;
+    let url = b.irpush().await.expect("paired with its storage node");
+    assert_eq!(b.irpush().await, Some(url.clone()), "kept");
+    b.set_push(Some(url)).await;
+    assert!(b.pushing(), "its storage node took the device");
+    let ring = |p: &(iroh::EndpointId, String)| p.1.starts_with("irch:ring:");
+    let told = || a.view(&id, |s| s.pushes_of(None).iter().any(ring));
+    until("a knows b's push server", || told() == Some(true)).await;
+    let named = || b.view(&id, |s| s.profile(&a.id()).is_some()) == Some(true);
+    until("b knows a", named).await;
+    b.shutdown().await;
+    drop(b);
+
+    let phone = irch_core::push::device(&db, None).unwrap().unwrap();
+    say(&a, &id, ch, "hi").await;
+    let news = tokio::time::timeout(Duration::from_secs(10), phone.next());
+    let news = news.await.expect("pushed within seconds").unwrap();
+    let n = Node::woken(&db, &news).0.expect("shown from the phonebook");
+    assert_eq!((n.space, &n.body[..]), (id, "hi"));
+}
+
 /// A member's photo waits on the space's storage node, though it is not
 /// theirs: everyone sees it while its sender is away.
 #[tokio::test(flavor = "multi_thread")]

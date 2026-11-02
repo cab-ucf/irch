@@ -40,7 +40,42 @@ object Wake {
 
   /** Hand Android's context back before the activity's runtime takes it. */
   @JvmStatic external fun release()
+
+  /** irpush's heartbeat now; seconds to the next, 0 with no irpush. */
+  @JvmStatic external fun kick(): Long
+
+  /** The network irpush keeps its socket on: an id for each, -1 for none. */
+  @JvmStatic external fun net(id: Long)
 }
+
+/** irpush's heartbeat: native timers stop while the phone sleeps, alarms
+ *  do not. Inexact (no exact-alarm permission); its socket learns slack. */
+class Beat : android.content.BroadcastReceiver() {
+  override fun onReceive(ctx: Context, i: Intent) {
+    val pm = ctx.getSystemService(android.os.PowerManager::class.java)
+    // Awake until the ping is answered.
+    pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "irch:beat")
+      .acquire(10_000)
+    val s = runCatching { Wake.kick() }.getOrDefault(0L)
+    if (IrchLive.running.get()) beat(ctx, if (s > 0) s else 1800L)
+  }
+}
+
+fun beat(ctx: Context, secs: Long) {
+  val am = ctx.getSystemService(android.app.AlarmManager::class.java)
+  val pi = android.app.PendingIntent.getBroadcast(
+    ctx, 0, Intent(ctx, Beat::class.java),
+    android.app.PendingIntent.FLAG_IMMUTABLE,
+  )
+  val at = android.os.SystemClock.elapsedRealtime() + secs * 1000
+  am.setAndAllowWhileIdle(
+    android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP, at, pi)
+}
+
+/** A network by its interface and DNS servers: `wlan0` alone is every
+ *  Wi-Fi, and each network's heartbeat is learned apart. */
+fun netId(lp: android.net.LinkProperties): Long =
+  "${lp.interfaceName} ${lp.dnsServers}".hashCode().toLong() and 0xffffffffL
 
 /** UnifiedPush: the ping carries nothing; irch fetches from peers. */
 class IrchPush : PushService() {
@@ -187,7 +222,8 @@ class IrchWake : Service() {
 
 const val SYNCING = "syncing"
 
-/** No push app: a doorbell (src/android.rs) rings, for little battery. */
+/** No push app: irpush through a storage node (one quiet socket), else a
+ *  doorbell (src/android.rs), for a little more battery. */
 fun live(ctx: Context) {
   runCatching { ctx.startForegroundService(Intent(ctx, IrchLive::class.java)) }
 }
@@ -217,7 +253,15 @@ class IrchLive : Service() {
         android.net.ConnectivityManager.NetworkCallback() {
         override fun onAvailable(n: android.net.Network) =
           Thread { runCatching { Wake.moved() } }.start()
+
+        override fun onLinkPropertiesChanged(
+          n: android.net.Network, lp: android.net.LinkProperties,
+        ) = runCatching { Wake.net(netId(lp)) }.let {}
+
+        override fun onLost(n: android.net.Network) =
+          runCatching { Wake.net(-1L) }.let {}
       })
+      beat(this, 120L)
       Thread {
         // Until Google's push takes over.
         while (!google(this)) {

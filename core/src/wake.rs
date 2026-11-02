@@ -73,6 +73,14 @@ pub fn push_key(dir: &Path) -> Result<crate::crypto::Key> {
     Ok(kdf("irch push", &[&kept(dir)?[32..]]))
 }
 
+/// Our doorbell, closed: irpush rings us now.
+pub async fn hush(dir: &Path) {
+    let bell = BELLS.lock().await.as_mut().and_then(|b| b.remove(dir));
+    if let Some((ep, _)) = bell {
+        ep.close().await;
+    }
+}
+
 pub async fn moved() {
     let bells = BELLS.lock().await.clone().unwrap_or_default();
     for (ep, _) in bells.values() {

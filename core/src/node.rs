@@ -841,9 +841,9 @@ impl Node {
             .accept(sync::ALPN, Proto(Arc::downgrade(&n)))
             .accept(BLOB, Proto(Arc::downgrade(&n)))
             .accept(call::ALPN, Proto(Arc::downgrade(&n)));
-        // With a Firebase key, a storage node rings phones through Google.
+        // A storage node rings phones through irpush, or Google with a key.
         if serve.is_some()
-            && let Some(p) = crate::push::Server::open(&n.dir)?
+            && let Some(p) = crate::push::Server::open(&n.dir, &n.net)?
         {
             let r = router.accept(crate::push::ALPN, p.clone());
             router = r.accept(crate::wake::ALPN, p);
@@ -1180,7 +1180,8 @@ impl Node {
     }
 
     /// Our UnifiedPush endpoint, or none: sealed to every space we are in.
-    /// `fcm:TOKEN` for Firebase, through whichever push servers take it.
+    /// `fcm:TOKEN` for Firebase, `irpush:DEVICE` for our irpush device,
+    /// through whichever push servers take it.
     pub async fn set_push(self: &Arc<Self>, url: Option<String>) {
         lock(&self.prefs).push = url;
         self.save_prefs();
@@ -1223,13 +1224,41 @@ impl Node {
         Some((f, at))
     }
 
-    /// Our Firebase token, every space's ring token and the key pushes are
-    /// sealed to, to each push server of that project.
+    /// Our irpush device, paired with a storage node we know that takes
+    /// rings that way: its route, or none.
+    pub async fn irpush(self: &Arc<Self>) -> Option<String> {
+        let d = crate::push::device(&self.dir, None).ok().flatten();
+        match d {
+            Some(d) if d.paired() => return Some(d.url()),
+            Some(_) => crate::push::forget(&self.dir),
+            None => {}
+        }
+        for a in self.keepers() {
+            let Ok(t) = crate::push::ticket(&self.ep, a).await else {
+                continue;
+            };
+            let Ok(Some(d)) = crate::push::device(&self.dir, Some(&t)) else {
+                continue;
+            };
+            for _ in 0..80 {
+                if d.paired() {
+                    return Some(d.url());
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            crate::push::forget(&self.dir);
+        }
+        None
+    }
+
+    /// Our route (a Firebase token, our irpush device), every space's ring
+    /// token and the key pushes are sealed to, to each push server for it.
     async fn register(self: &Arc<Self>) {
-        let push = lock(&self.prefs).push.clone();
-        let Some(fcm) = push.as_deref().and_then(|u| u.strip_prefix("fcm:"))
-        else {
-            return;
+        let Some(push) = lock(&self.prefs).push.clone() else { return };
+        let fcm = match push.strip_prefix("fcm:") {
+            Some(t) => t,
+            None if push.starts_with("irpush:") => &push,
+            None => return,
         };
         let mut rings = vec![];
         for sp in self.all() {
@@ -1237,7 +1266,10 @@ impl Node {
             let t = tag(&lock(&sp.book).key(inv).0);
             rings.extend(crate::wake::push_token(&self.dir, &sp.id, &t));
         }
-        let at = self.firebase().await.map(|f| f.1).unwrap_or_default();
+        let at = match push.starts_with("irpush:") {
+            true => self.keepers(), // the one we paired with says yes
+            false => self.firebase().await.map(|f| f.1).unwrap_or_default(),
+        };
         let Ok(key) = crate::wake::push_key(&self.dir) else { return };
         let tries = at.into_iter().map(|a| {
             let go =
@@ -1258,7 +1290,7 @@ impl Node {
         let url = if url.starts_with("irch:wake:") {
             crate::wake::allow(&self.dir, id, &t)?;
             crate::wake::for_space(&url, id, &t).context("bad doorbell")?
-        } else if url.starts_with("fcm:") {
+        } else if url.starts_with("fcm:") || url.starts_with("irpush:") {
             // A ring code for each push server; a new one (a space joined,
             // rekeyed) registered first.
             let k = crate::wake::push_token(&self.dir, id, &t)?;
