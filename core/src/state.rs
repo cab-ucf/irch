@@ -1,5 +1,6 @@
 //! An order-free fold of a space's ops. Control re-folds in `(ts, id)`
-//! order; authors pick their times, so only current admins' rekeys count.
+//! order; authors pick their times, so only current admins' rekeys count,
+//! and none leaves the owner out.
 
 use crate::op::{File, Invite, Link, Op, Role, Signed};
 use crate::{Ch, Id};
@@ -80,6 +81,8 @@ pub struct State {
     head: Id,
     // Identities retired, and from when.
     burned: HashMap<Id, Pos>,
+    // Owners who handed it on twice, from their first.
+    forfeit: HashMap<Id, Pos>,
     pub dm: Option<Id>,
     hint: String,
     control: BTreeMap<Pos, (Id, Op)>,
@@ -232,7 +235,22 @@ impl State {
         }
     }
 
+    /// Times are the author's, so a former owner can date a second
+    /// hand-over (or a ban) before the one they made: no rule over the ops
+    /// alone tells which came first. So a hand-over stands against bans,
+    /// and an owner who hands on twice in one tenure forfeits from the
+    /// first: neither counts and nothing they sign after does. The worst
+    /// they do is leave it ownerless, never theirs. Peers fold one set of
+    /// ops alike, whatever order it came in.
     fn refold(&mut self) {
+        self.forfeit = HashMap::new();
+        while let Some((a, at)) = self.fold() {
+            self.forfeit.insert(a, at);
+        }
+    }
+
+    /// One pass; returns a newly found double hand-over.
+    fn fold(&mut self) -> Option<(Id, Pos)> {
         (self.name, self.channels) = (None, BTreeMap::new());
         self.order = vec![];
         (self.profiles, self.roles) = (HashMap::new(), HashMap::new());
@@ -243,7 +261,8 @@ impl State {
         (self.spaces, self.storage) = (BTreeMap::new(), BTreeMap::new());
         self.stored = BTreeMap::new();
         self.labels = BTreeMap::new();
-        (self.head, self.burned) = (self.owner, HashMap::new());
+        (self.head, self.burned) = (self.owner, self.forfeit.clone());
+        let (mut gave, mut twice) = (HashMap::new(), None);
         if self.dm.is_some() {
             self.channels.insert(DM, "dm".into());
         }
@@ -256,11 +275,19 @@ impl State {
                 _ if role == Role::Banned || self.stale_at(at, a) => {}
                 Op::Burn => drop(self.burned.insert(*a, *at)),
                 Op::Owner { user }
-                    if head && *user != *a && !self.out(user) =>
+                    if head
+                        && *user != *a
+                        && !self.burned.contains_key(user)
+                        && self.forfeit.get(a) != Some(at) =>
                 {
                     self.roles.insert(*a, Role::Admin);
                     self.roles.remove(user);
                     self.head = *user;
+                    gave.insert(*a, *at);
+                    gave.remove(user);
+                }
+                Op::Owner { .. } if gave.contains_key(a) => {
+                    twice = twice.or(Some((*a, gave[a])))
                 }
                 Op::Profile { name, kem } => {
                     let n = crate::op::name(name);
@@ -292,7 +319,11 @@ impl State {
                         }
                     }
                 }
-                Op::Rekey { epoch, boxes } if admin => {
+                // Never one leaving the owner out: their word must still count.
+                Op::Rekey { epoch, boxes }
+                    if admin
+                        && (head || boxes.iter().any(|b| b.0 == self.head)) =>
+                {
                     let to = boxes.iter().map(|b| b.0).collect();
                     self.epochs.push(Epoch {
                         tag: *epoch,
@@ -337,23 +368,23 @@ impl State {
         for a in cut {
             self.profiles.entry(a).and_modify(|p| p.1.clear());
         }
+        twice
     }
 
     fn left_out(&self, epoch: &[u8; 8], a: &Id) -> bool {
-        let es = &self.epochs;
-        let from = es.iter().find(|e| e.tag == *epoch).map(|e| e.at);
-        es.iter().any(|e| Some(e.at) > from && !e.to.contains(a))
+        let from = self.epochs.iter().find(|e| e.tag == *epoch).map(|e| e.at);
+        self.live().any(|e| Some(e.at) > from && !e.to.contains(a))
     }
 
-    /// Sealed after a newer epoch left `a` out: an old invite, a banned member
-    /// renamed. One given the new key, writing offline, stays.
+    /// Sealed after a newer epoch, set by an admin still, left `a` out: an
+    /// old invite, a banned member renamed. One given the new key, writing
+    /// offline, stays.
     pub fn stale(&self, epoch: &[u8; 8], at: &Pos, a: &Id) -> bool {
-        let es = &self.epochs;
-        let Some(from) = es.iter().find(|e| e.tag == *epoch) else {
+        let Some(from) = self.epochs.iter().find(|e| e.tag == *epoch) else {
             return false;
         };
         let since = |e: &&Epoch| e.at > from.at && e.at < *at;
-        es.iter().filter(since).any(|e| !e.to.contains(a))
+        self.live().filter(since).any(|e| !e.to.contains(a))
     }
 
     fn stale_at(&self, at: &Pos, a: &Id) -> bool {
@@ -1158,13 +1189,16 @@ mod tests {
         st.extend([
             op(1, o, rekey(1, &[])),
             op(2, o, role(a, Role::Admin)),
-            op(3, a, rekey(2, &[a])),
+            op(3, a, rekey(2, &[o, a])),
             op(4, o, role(a, Role::Member)),
         ]);
         assert_eq!(st.epochs().len(), 2);
         assert_eq!(st.epoch().unwrap().tag, [1; 8], "a, demoted, is out");
         // b, banned, got a far-ahead epoch: only a later rekey ends the leak.
-        st.extend([op(5, o, role(a, Role::Admin)), op(200, a, rekey(3, &[b]))]);
+        st.extend([
+            op(5, o, role(a, Role::Admin)),
+            op(200, a, rekey(3, &[o, b])),
+        ]);
         st.extend([op(6, o, role(b, Role::Banned))]);
         assert!(st.leaks() && st.horizon() == 200);
         st.extend([op(201, o, rekey(4, &[a]))]);
@@ -1212,6 +1246,64 @@ mod tests {
         assert!(st.horizon() >= 9);
         st.extend([op(12, a, rekey(2, &[o, a]))]);
         assert!(!st.leaks());
+    }
+
+    #[test]
+    fn a_rogue_admin_cannot_rekey_the_owner_out() {
+        let [o, a, b] = people();
+        let mut st = State::new(&Invite::new(o, "", None));
+        let sealed = |n, author, epoch, o| Signed { epoch, ..op(n, author, o) };
+        let rekey = |t, to: &[Id]| Op::Rekey {
+            epoch: [t; 8],
+            boxes: to.iter().map(|u| (*u, vec![])).collect(),
+        };
+        let role = |user, role| Op::Role { user, role };
+        st.extend([
+            sealed(1, o, [0; 8], rekey(1, &[o, a, b])),
+            sealed(2, o, [1; 8], role(a, Role::Admin)),
+            sealed(3, a, [1; 8], rekey(2, &[a, b])),
+            sealed(4, o, [1; 8], role(a, Role::Member)),
+        ]);
+        assert_eq!(st.role(&a), Role::Member, "the owner's word stands");
+        assert_eq!(st.epoch().unwrap().tag, [1; 8]);
+        // Boxed for the owner, it counts, till its setter is demoted.
+        st.extend([
+            sealed(5, o, [1; 8], role(a, Role::Admin)),
+            sealed(6, a, [1; 8], rekey(3, &[o, a])),
+            sealed(7, b, [1; 8], post("b, cut off", None)),
+        ]);
+        assert!(st.stale(&[1; 8], &(8, Id([8; 32])), &b));
+        st.extend([sealed(8, o, [1; 8], role(a, Role::Member))]);
+        assert!(!st.stale(&[1; 8], &(9, Id([9; 32])), &b));
+    }
+
+    #[test]
+    fn a_former_owner_cannot_date_their_way_back() {
+        let [o, a, b] = people();
+        let role = |user, role| Op::Role { user, role };
+        let base = [
+            op(1, o, Op::Channel { id: CH, name: Some("g".into()) }),
+            op(5, o, Op::Owner { user: a }),
+            op(6, a, role(o, Role::Member)),
+        ];
+        // Banning the next owner before the hand-over: it still stands.
+        let mut st = State::new(&Invite::new(o, "", None));
+        st.extend(base.clone());
+        st.extend([op(3, o, role(a, Role::Banned))]);
+        assert_eq!((st.head(), st.role(&o)), (a, Role::Member));
+        // Handing it to a puppet first: neither hand-over counts, the
+        // puppet has no say, and the old owner none either.
+        let mut st = State::new(&Invite::new(o, "", None));
+        st.extend(base);
+        st.extend([
+            op(4, o, Op::Owner { user: b }),
+            op(7, b, role(a, Role::Banned)),
+            op(8, b, Op::Rename { name: "mine".into() }),
+            op(9, o, Op::Rename { name: "mine".into() }),
+        ]);
+        assert!(st.head() != b && st.role(&b) == Role::Member);
+        assert!(st.out(&o) && st.role(&a) != Role::Banned);
+        assert_eq!(st.name(), "");
     }
 
     #[test]

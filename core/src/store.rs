@@ -13,8 +13,6 @@ pub struct Log {
     end: u64,
 }
 
-pub type Rec = (u64, u8, Vec<u8>);
-
 /// One unchecked record onto a log no node has open, without reading it.
 pub fn append(path: &Path, b: &[u8]) -> Result<()> {
     let mut f = OpenOptions::new().append(true).open(path)?;
@@ -23,12 +21,16 @@ pub fn append(path: &Path, b: &[u8]) -> Result<()> {
 }
 
 impl Log {
-    pub fn open(path: &Path) -> Result<(Self, Vec<Rec>)> {
+    /// Each record, `(at, checked, bytes)`, to `each` as it is read.
+    pub fn open(
+        path: &Path,
+        mut each: impl FnMut(u64, u8, Vec<u8>),
+    ) -> Result<Self> {
         fs::create_dir_all(path.parent().expect("in a dir"))?;
         let mut o = OpenOptions::new();
         let f =
             o.read(true).write(true).create(true).truncate(false).open(path)?;
-        let (mut recs, mut end, mut r) = (vec![], 0, BufReader::new(&f));
+        let (mut end, mut r) = (0, BufReader::new(&f));
         let mut head = [0; 5];
         while r.read_exact(&mut head).is_ok() {
             // A damaged length ends the log.
@@ -40,11 +42,11 @@ impl Log {
             if r.read_exact(&mut b).is_err() {
                 break;
             }
-            recs.push((end, head[4], b));
-            end = r.stream_position()?;
+            each(end, head[4], b);
+            end += 5 + len as u64;
         }
         f.set_len(end)?;
-        Ok((Self { f, end }, recs))
+        Ok(Self { f, end })
     }
 
     pub fn append(&mut self, checked: u8, b: &[u8], sync: bool) -> Result<u64> {
@@ -92,7 +94,7 @@ pub fn write(path: &Path, b: &[u8]) -> Result<()> {
 #[test]
 fn torn_tail() {
     let p = std::env::temp_dir().join(format!("irch-{}.log", crate::now()));
-    let (mut l, _) = Log::open(&p).unwrap();
+    let mut l = Log::open(&p, |_, _, _| {}).unwrap();
     l.append(0, b"one", false).unwrap();
     l.append(2, b"two", true).unwrap();
     drop(l);
@@ -103,7 +105,8 @@ fn torn_tail() {
         .unwrap()
         .write_all(&[9, 0, 0])
         .unwrap();
-    let (mut l, recs) = Log::open(&p).unwrap();
+    let mut recs = vec![];
+    let mut l = Log::open(&p, |a, c, b| recs.push((a, c, b))).unwrap();
     assert_eq!(recs, vec![(0, 0, b"one".to_vec()), (8, 2, b"two".to_vec())]);
     assert_eq!(fs::metadata(&p).unwrap().len(), len);
     assert_eq!(l.read(8, 3).unwrap(), b"two");

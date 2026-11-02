@@ -56,8 +56,10 @@ pub const STREAM: &[u8; 8] = b"irch-s1\0";
 const CHUNK: usize = 64 << 10;
 
 /// Its size, sealed: the head, and a tag per chunk (an empty file has one).
-pub fn sealed_len(size: u64) -> u64 {
-    8 + size + 16 * size.div_ceil(CHUNK as u64).max(1)
+/// None past any file's: sizes come from others.
+pub fn sealed_len(size: u64) -> Option<u64> {
+    let tags = 16 * size.div_ceil(CHUNK as u64).max(1);
+    size.checked_add(8 + tags)
 }
 
 /// STREAM: chunk `i` under nonce `i`, the last one marked, so any size
@@ -183,7 +185,7 @@ fn streams() {
         let pt: Vec<u8> = (0..n).map(|i| (i % 251) as u8).collect();
         let mut ct = vec![];
         seal_stream(&k, &pt[..], &mut ct).unwrap();
-        assert_eq!(ct.len() as u64, sealed_len(n as u64));
+        assert_eq!(Some(ct.len() as u64), sealed_len(n as u64));
         let mut back = vec![];
         open_stream(&k, &ct[..], &mut back).unwrap();
         assert_eq!(back, pt);
