@@ -44,7 +44,10 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
 Every storage node is a push server, with no setup and no Google: an
 Android phone without a UnifiedPush app pairs with one it knows (its own
 first) through [irpush](https://github.com/cab-ucf/irpush), and keeps one
-quiet socket instead of a doorbell. Each ring is sealed end to end
+quiet socket instead of a doorbell. That socket is the phone's one irpush
+device, shared by every irpush app on it (irpush's Android library: the
+first installed holds it); irch joins it into its storage node's mesh
+beside theirs. Each ring is sealed end to end
 (post-quantum) and always the same size. Stock iroh relays ping every 15 s,
 which keeps a phone's radio awake, so for the battery saving give the
 storage node irpush's patched relay:
@@ -164,7 +167,7 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   own doorbell. iPhones catch up when opened, and a call keeps irch up.
 - **Push servers** are storage nodes, any of them, through irpush. Phones
   ask the storage nodes they know (theirs, their spaces') for a ticket,
-  pair once, and give it their device and a ring token per space and
+  join the phone's one irpush device into that mesh once, and give it their device and a ring token per space and
   epoch. Members ring with those as with a doorbell, every route of a
   phone at once; irpush carries the ring sealed end to end, one size, so
   its relay learns when and nothing else, and the phone shows it as it

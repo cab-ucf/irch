@@ -1293,6 +1293,20 @@ impl Node {
     /// Our irpush device, paired with a storage node we know that takes
     /// rings that way: its route, or none.
     pub async fn irpush(self: &Arc<Self>) -> Option<String> {
+        if crate::push::shared() {
+            if let Some(r) = crate::push::shared_route(&self.dir) {
+                return Some(r);
+            }
+            for a in self.keepers() {
+                let Ok(t) = crate::push::ticket(&self.ep, a).await else {
+                    continue;
+                };
+                if let Some(r) = crate::push::join_shared(&self.dir, &t).await {
+                    return Some(r);
+                }
+            }
+            return None;
+        }
         let d = crate::push::device(&self.dir, None).ok().flatten();
         match d {
             Some(d) if d.paired() => return Some(d.url()),
