@@ -8,7 +8,9 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import org.irpush.Irpush
 import org.json.JSONArray
+import kotlin.concurrent.thread
 import org.unifiedpush.android.connector.FailedReason
 import org.unifiedpush.android.connector.UnifiedPush
 import org.unifiedpush.android.connector.PushService
@@ -31,41 +33,44 @@ object Wake {
   /** Hand Android's context back before the activity's runtime takes it. */
   @JvmStatic external fun release()
 
-  /** irpush's heartbeat now; seconds to the next, 0 with no irpush. */
-  @JvmStatic external fun kick(): Long
+  /** The phone's irpush device id ("" not joined), from irpush's library. */
+  @JvmStatic external fun share(id: String?)
 
-  /** The network irpush keeps its socket on: an id for each, -1 for none. */
-  @JvmStatic external fun net(id: Long)
+  /** Blocks for the next storage node ticket to join with. */
+  @JvmStatic external fun joins(): String
+
+  @JvmStatic external fun joined(ok: Boolean)
+
+  /** A ring irpush brought: `{show, catch}`, as `rung` says them. */
+  @JvmStatic external fun ring(ctx: Context, dir: String, data: ByteArray): String
 }
 
-/** irpush's heartbeat: native timers stop while the phone sleeps, alarms
- *  do not. Inexact (no exact-alarm permission); its socket learns slack. */
-class Beat : android.content.BroadcastReceiver() {
-  override fun onReceive(ctx: Context, i: Intent) {
-    val pm = ctx.getSystemService(android.os.PowerManager::class.java)
-    // Awake until the ping is answered.
-    pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "irch:beat")
-      .acquire(10_000)
-    val s = runCatching { Wake.kick() }.getOrDefault(0L)
-    if (IrchLive.running.get()) beat(ctx, if (s > 0) s else 1800L)
+/** The phone's one irpush device, shared with every irpush app (irpush's
+ *  library: its owner holds the socket and its heartbeats). A ring wakes
+ *  irch here, running or not. */
+class IrchApp : android.app.Application() {
+  override fun onCreate() {
+    super.onCreate()
+    Wake.share(null)
+    val seen = getSharedPreferences("irpush", 0)
+    Irpush.start(this, "irch_app", onId = { id ->
+      Wake.share(id)
+      // A new device (or owner): the doorbell's service joins it, then stops.
+      if (id.isNotEmpty() && seen.getString("id", null) != id) {
+        seen.edit().putString("id", id).apply()
+        if (UnifiedPush.getAckDistributor(this) == null) live(this)
+      }
+    }) { _, d ->
+      Thread {
+        val dir = dataDir.absolutePath
+        if (show(this, Wake.ring(applicationContext, dir, d))) wake(this, null)
+      }.start()
+    }
+    thread(isDaemon = true, name = "irpush-join") {
+      while (true) Wake.joins().let { t -> Irpush.join(t) { Wake.joined(it) } }
+    }
   }
 }
-
-fun beat(ctx: Context, secs: Long) {
-  val am = ctx.getSystemService(android.app.AlarmManager::class.java)
-  val pi = android.app.PendingIntent.getBroadcast(
-    ctx, 0, Intent(ctx, Beat::class.java),
-    android.app.PendingIntent.FLAG_IMMUTABLE,
-  )
-  val at = android.os.SystemClock.elapsedRealtime() + secs * 1000
-  am.setAndAllowWhileIdle(
-    android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP, at, pi)
-}
-
-/** A network by its interface and DNS servers: `wlan0` alone is every
- *  Wi-Fi, and each network's heartbeat is learned apart. */
-fun netId(lp: android.net.LinkProperties): Long =
-  "${lp.interfaceName} ${lp.dnsServers}".hashCode().toLong() and 0xffffffffL
 
 /** UnifiedPush: the ping carries nothing; irch fetches from peers. */
 class IrchPush : PushService() {
@@ -143,8 +148,8 @@ class IrchWake : Service() {
 
 const val SYNCING = "syncing"
 
-/** No push app: irpush through a storage node (one quiet socket), else a
- *  doorbell (src/android.rs), for a little more battery. */
+/** No push app: joins irpush through a storage node (then stops: irpush's
+ *  library holds the phone's one socket), else waits on a doorbell. */
 fun live(ctx: Context) {
   runCatching { ctx.startForegroundService(Intent(ctx, IrchLive::class.java)) }
 }
@@ -170,29 +175,25 @@ class IrchLive : Service() {
       // No wake lock held: a ring's packets wake the phone themselves.
       // Native code cannot see the network change; the doorbell must.
       val cm = getSystemService(android.net.ConnectivityManager::class.java)
-      cm.registerDefaultNetworkCallback(object :
-        android.net.ConnectivityManager.NetworkCallback() {
+      val net = object : android.net.ConnectivityManager.NetworkCallback() {
         override fun onAvailable(n: android.net.Network) =
           Thread { runCatching { Wake.moved() } }.start()
-
-        override fun onLinkPropertiesChanged(
-          n: android.net.Network, lp: android.net.LinkProperties,
-        ) = runCatching { Wake.net(netId(lp)) }.let {}
-
-        override fun onLost(n: android.net.Network) =
-          runCatching { Wake.net(-1L) }.let {}
-      })
-      beat(this, 120L)
+      }
+      cm.registerDefaultNetworkCallback(net)
       Thread {
-        // Until a UnifiedPush app takes over.
+        // Until irpush or a UnifiedPush app takes over.
         while (UnifiedPush.getAckDistributor(this) == null) {
           val dir = dataDir.absolutePath
+          val r = Wake.rung(applicationContext, dir)
+          if (org.json.JSONObject(r).optBoolean("quiet")) break
           // Caught up beside it, if need be: the doorbell listens at once.
-          if (show(this, Wake.rung(applicationContext, dir)) &&
+          if (show(this, r) &&
             catching.compareAndSet(false, true)) Thread {
             try { catchUp(this, null) } finally { catching.set(false) }
           }.start()
         }
+        cm.unregisterNetworkCallback(net)
+        running.set(false)
         stopSelf()
       }.start()
     }

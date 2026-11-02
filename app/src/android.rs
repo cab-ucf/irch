@@ -1,12 +1,14 @@
 //! Android: `IrchPlugin.kt` sees network changes iroh cannot; `Push.kt` wakes.
 
+extern crate irpush; // org.irpush.Native, for irpush's Android library
+
 use anyhow::Context;
-use irch_core::push::{self, Device};
+use irch_core::push;
 use irch_core::wake::{self, News};
 use irch_core::{Node, Notice};
 use jni::JNIEnv;
-use jni::objects::{JClass, JObject, JString};
-use jni::sys::{jboolean, jlong, jstring};
+use jni::objects::{JByteArray, JClass, JObject, JString};
+use jni::sys::{jboolean, jstring};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
@@ -326,16 +328,17 @@ async fn node(dir: PathBuf) -> anyhow::Result<std::sync::Arc<Node>> {
     Ok(n)
 }
 
-/// Until irpush or the doorbell rings (or half an hour, to look again).
+/// Until the doorbell rings (or half an hour, to look again); `quiet` once
+/// irpush carries our rings instead (they come to `Wake.ring`).
 /// Never deaf: a running node is handed the news too.
 async fn rung(dir: PathBuf) -> anyhow::Result<Shown> {
     static TOLD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
     let net = crate::config(dir.clone(), None, None)?.net;
-    let dev = irpush(&dir).await;
-    let url = match &dev {
-        Some(d) => {
+    let route = irpush(&dir).await;
+    let url = match &route {
+        Some(r) => {
             wake::hush(&dir).await;
-            d.url()
+            r.clone()
         }
         None => wake::doorbell(&dir, &net).await?,
     };
@@ -349,26 +352,25 @@ async fn rung(dir: PathBuf) -> anyhow::Result<Shown> {
             crate::nap().await;
         });
     }
+    if route.is_some() {
+        return Ok(Shown { quiet: true, ..Default::default() });
+    }
     let half = Duration::from_secs(30 * 60);
-    let news = match dev {
-        Some(d) => tokio::time::timeout(half, d.next()).await.ok().flatten(),
-        None => {
-            let r = tokio::time::timeout(half, wake::rung(&dir, &net)).await;
-            r.ok().transpose()?.flatten()
-        }
+    let r = tokio::time::timeout(half, wake::rung(&dir, &net)).await;
+    let Some(news) = r.ok().transpose()?.flatten() else {
+        return Ok(Shown::default());
     };
-    let Some(news) = news else { return Ok(Shown::default()) };
     Ok(shown(&dir, news))
 }
 
-/// Our irpush device: one quiet socket in place of the doorbell's, once a
-/// storage node we know pairs it (looked for at most every six hours).
-async fn irpush(dir: &std::path::Path) -> Option<std::sync::Arc<Device>> {
+/// Our route through the phone's one irpush device (irpush's library, run
+/// by whichever irpush app owns it), once a storage node we know took it
+/// into its mesh (looked for at most every six hours).
+async fn irpush(dir: &std::path::Path) -> Option<String> {
     static LOOKED: std::sync::Mutex<Option<Instant>> =
         std::sync::Mutex::new(None);
-    let d = push::device(dir, None).ok().flatten();
-    if let Some(d) = d.filter(|d| d.paired()) {
-        return Some(d);
+    if let Some(r) = push::shared_route(dir) {
+        return Some(r);
     }
     {
         let mut l = LOOKED.lock().unwrap_or_else(|e| e.into_inner());
@@ -378,30 +380,59 @@ async fn irpush(dir: &std::path::Path) -> Option<std::sync::Arc<Device>> {
         *l = Some(Instant::now());
     }
     let n = node(dir.into()).await.ok()?;
-    if n.irpush().await.is_none() {
+    let r = n.irpush().await;
+    if r.is_none() {
         crate::nap().await;
-        return None;
     }
-    push::device(dir, None).ok().flatten()
+    r
 }
 
-/// An alarm rang: irpush's heartbeat. Seconds to the next, 0 for none.
+/// The phone's irpush device id, from irpush's library ("" not joined).
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_irch_chat_Wake_kick(
-    _: JNIEnv,
+pub extern "system" fn Java_dev_irch_chat_Wake_share(
+    mut env: JNIEnv,
     _: JClass,
-) -> jlong {
-    push::kick() as jlong
-}
-
-/// The network irpush keeps its socket on: an id for each, -1 for none.
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_irch_chat_Wake_net(
-    _: JNIEnv,
-    _: JClass,
-    id: jlong,
+    id: JString,
 ) {
-    push::network(id as u64);
+    push::share(text(&mut env, &id));
+}
+
+/// A library thread: the next storage node ticket to join with.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_irch_chat_Wake_joins<'l>(
+    env: JNIEnv<'l>,
+    _: JClass<'l>,
+) -> jstring {
+    let t = push::next_join();
+    env.new_string(t).map_or(std::ptr::null_mut(), |s| s.into_raw())
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_irch_chat_Wake_joined(
+    _: JNIEnv,
+    _: JClass,
+    ok: jboolean,
+) {
+    push::joined(ok != 0);
+}
+
+/// A ring irpush brought (space, then the doorbell's frame): its notices,
+/// and whether to catch up, as `Wake.rung` says them.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_irch_chat_Wake_ring<'l>(
+    mut env: JNIEnv<'l>,
+    _: JClass<'l>,
+    ctx: JObject<'l>,
+    dir: JString<'l>,
+    data: JByteArray<'l>,
+) -> jstring {
+    let dir = text(&mut env, &dir).unwrap_or_default();
+    let dir = irch_core::profile(std::path::Path::new(&dir));
+    let b = env.convert_byte_array(&data).unwrap_or_default();
+    reply(env, ctx, async move {
+        let (sp, raw) = b.split_first_chunk::<32>().context("short ring")?;
+        Ok(shown(&dir, (irch_core::Id(*sp), raw.to_vec())))
+    })
 }
 
 /// What a ring brings, to show now, and whether to catch up for it. With
@@ -410,6 +441,8 @@ pub extern "system" fn Java_dev_irch_chat_Wake_net(
 struct Shown {
     show: Vec<Notice>,
     catch: bool,
+    /// irpush carries our rings: no doorbell to wait on.
+    quiet: bool,
 }
 
 fn shown(dir: &std::path::Path, news: News) -> Shown {
@@ -425,5 +458,6 @@ fn shown(dir: &std::path::Path, news: News) -> Shown {
     }
     let hide = dir.join("private").exists();
     let n = n.filter(|_| !crate::FG.load(SeqCst));
-    Shown { show: n.into_iter().map(|x| crate::veil(x, hide)).collect(), catch }
+    let show = n.into_iter().map(|x| crate::veil(x, hide)).collect();
+    Shown { show, catch, quiet: false }
 }

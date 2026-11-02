@@ -246,6 +246,65 @@ pub fn network(id: u64) {
     lock(&DEVICES).values().for_each(|d| d.node.network(id));
 }
 
+// ── Android: one device per phone, run by irpush's library for every app ──
+//
+// Its owner may be another app; the platform tells us its id, takes the
+// tickets we get to join with (a pull: `next_join`), says how each went,
+// and hands rings to the app itself. Ours is joined once a keeper's ticket
+// went through (`irpush.joined` holds the id it was for).
+
+static SHARED: Mutex<Option<Option<String>>> = Mutex::new(None);
+static JOINS: (Mutex<Option<String>>, std::sync::Condvar) =
+    (Mutex::new(None), std::sync::Condvar::new());
+static JOINED: Mutex<Option<bool>> = Mutex::new(None);
+
+/// The platform runs our device: its id, once known ("" not joined).
+pub fn share(id: Option<String>) {
+    *lock(&SHARED) = Some(id);
+}
+
+pub fn shared() -> bool {
+    lock(&SHARED).is_some()
+}
+
+fn shared_id() -> Option<String> {
+    lock(&SHARED).clone().flatten().filter(|i| !i.is_empty())
+}
+
+/// Our route, if a keeper's mesh took this device (no node needed).
+pub fn shared_route(dir: &Path) -> Option<String> {
+    let id = shared_id()?;
+    let m = std::fs::read_to_string(dir.join("irpush.joined")).ok()?;
+    (m == id).then(|| format!("irpush:{id}"))
+}
+
+/// Platform thread: the next ticket to join with.
+pub fn next_join() -> String {
+    let w = JOINS.1.wait_while(lock(&JOINS.0), |t| t.is_none());
+    w.unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default()
+}
+
+/// Platform: how the last join went.
+pub fn joined(ok: bool) {
+    *lock(&JOINED) = Some(ok);
+}
+
+/// Join the shared device into `ticket`'s mesh; our route if it went.
+pub async fn join_shared(dir: &Path, ticket: &str) -> Option<String> {
+    *lock(&JOINED) = None;
+    *lock(&JOINS.0) = Some(ticket.into());
+    JOINS.1.notify_all();
+    for _ in 0..300 {
+        if let Some(ok) = lock(&JOINED).take() {
+            let id = shared_id().filter(|_| ok)?;
+            std::fs::write(dir.join("irpush.joined"), &id).ok()?;
+            return Some(format!("irpush:{id}"));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    None
+}
+
 impl std::fmt::Debug for Server {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         f.write_str("push server")
