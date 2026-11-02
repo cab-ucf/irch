@@ -1,6 +1,7 @@
 mod api;
 mod app;
 mod service;
+mod web;
 
 use anyhow::Result;
 use clap::Parser;
@@ -40,6 +41,11 @@ struct Cli {
     /// No interface: JSON calls on stdin, answers and events on stdout
     #[arg(long)]
     api: bool,
+    /// No interface: the app's page for your browser, here (default
+    /// 127.0.0.1:4724) and through a link from anywhere
+    #[arg(long, value_name = "ADDR", num_args = 0..=1,
+        default_missing_value = "127.0.0.1:4724")]
+    web: Option<std::net::SocketAddr>,
     /// Keep a storage node running here, from now on (as you)
     #[arg(long)]
     install: bool,
@@ -131,7 +137,14 @@ async fn main() -> Result<()> {
     let dir = c
         .dir
         .unwrap_or_else(|| dirs::data_dir().unwrap_or_default().join(home));
-    let (api, ui) = (c.api, !(c.serve || c.headless || c.api));
+    let (api, web) = (c.api, c.web);
+    let ui = !(c.serve || c.headless || c.api || web.is_some());
+    // The web link rides irp's relays, or the first of ours; none on a LAN.
+    let relays = match &net {
+        Net::Default => Some(vec![]),
+        Net::Relay(r) => Some(r.clone()),
+        _ => None,
+    };
     // irch's warnings; of its libraries, errors: a phone's network is a
     // stream of warnings, each a write.
     let log = tracing_subscriber::fmt().with_ansi(false).with_env_filter(
@@ -152,6 +165,7 @@ async fn main() -> Result<()> {
     let code_file = dir.join("code");
     let big =
         c.big_password.or_else(|| std::env::var("IRCH_BIG_PASSWORD").ok());
+    let at = dir.clone();
     let n =
         Node::start(Config { dir, name, net, link, serve, notes, big }).await?;
     if let Some(code) = n.storage_code().await {
@@ -174,6 +188,7 @@ async fn main() -> Result<()> {
     } else {
         tokio::select! {
             r = api::run(n.clone()), if api => r?,
+            r = web::run(n.clone(), at, web, relays) => r?,
             () = stopped() => {}
             () = updated(&exe), if !api => fresh = true,
         }
