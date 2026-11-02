@@ -3600,9 +3600,10 @@ async fn pump(n: Arc<Node>, sp: Weak<Space>, boot: Vec<EndpointId>) {
         loop {
             let next = tokio::select! {
                 // A rekey goes out on the old topic, to those it cut off:
-                // stay a moment, or our own move outruns it.
+                // stay a while (idle, it costs nothing), or our own move
+                // outruns it on a busy machine.
                 () = moved.notified() => {
-                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    tokio::time::sleep(Duration::from_secs(10)).await;
                     break;
                 }
                 r = tokio::time::timeout(wait, rx.next()) => r,

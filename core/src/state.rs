@@ -221,6 +221,7 @@ impl State {
             | Op::Knock { .. }
             | Op::Typing { .. }
             | Op::Typed { .. }
+            | Op::Got { .. }
             | Op::Here
             | Op::Call { .. }
             | Op::Ringing { .. }
