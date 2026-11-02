@@ -44,10 +44,19 @@ async fn seen(app: &AppHandle, fg: bool) {
     }
 }
 
-/// A minute, then asleep if still out of sight.
+/// A minute, then asleep if still out of sight; in a call, once it ends.
 #[cfg(any(desktop, target_os = "android"))]
 async fn doze(app: AppHandle) {
-    tokio::time::sleep(Duration::from_secs(60)).await;
+    use std::sync::atomic::Ordering::SeqCst;
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        if FG.load(SeqCst) {
+            return;
+        }
+        if running().is_none_or(|n| n.in_call().is_none()) {
+            break;
+        }
+    }
     if nap().await {
         app.state::<App>().0.send_replace(None);
     }
@@ -304,10 +313,27 @@ async fn link(
             "leave your spaces first: this device becomes someone else".into(),
         );
     }
-    stop(&s).await;
+    // Aside till the code proves good: a typo leaves this device as it was.
+    const WHO: [&str; 3] = ["seed", "local", "spaces"];
     let dir = home(&app).map_err(err)?;
-    forget(&dir, &["seed", "local", "spaces"]);
-    start(&app, Some(code)).await
+    let was = dir.join("was");
+    let mv = |from: &std::path::Path, to: &std::path::Path| {
+        for f in WHO {
+            let _ = std::fs::rename(from.join(f), to.join(f));
+        }
+    };
+    std::fs::create_dir_all(&was).map_err(|e| e.to_string())?;
+    stop(&s).await;
+    mv(&dir, &was);
+    let r = start(&app, Some(code)).await;
+    if r.is_err() {
+        stop(&s).await;
+        forget(&dir, &WHO);
+        mv(&was, &dir);
+        let _ = start(&app, None).await;
+    }
+    let _ = std::fs::remove_dir_all(was);
+    r
 }
 
 fn root(app: &AppHandle) -> anyhow::Result<std::path::PathBuf> {
@@ -473,11 +499,15 @@ fn upload(app: AppHandle, req: Request<'_>) -> Result<String, String> {
     r().map_err(err)
 }
 
-/// Each frame to the page: the sender's id, then the frame.
+/// Each frame to the page: the sender's id, then the frame. Asked each
+/// call (the node may be another since); the last asked alone is told.
 #[tauri::command]
 async fn tune(s: State<'_, App>, to: Channel<Body>) -> Result<(), String> {
+    static TUNED: std::sync::Mutex<
+        Option<tauri::async_runtime::JoinHandle<()>>,
+    > = std::sync::Mutex::new(None);
     let mut rx = node(&s).await?.media();
-    tauri::async_runtime::spawn(async move {
+    let task = tauri::async_runtime::spawn(async move {
         loop {
             match rx.recv().await {
                 Ok((who, f)) => {
@@ -490,6 +520,10 @@ async fn tune(s: State<'_, App>, to: Channel<Body>) -> Result<(), String> {
             }
         }
     });
+    let mut t = TUNED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(old) = t.replace(task) {
+        old.abort();
+    }
     Ok(())
 }
 
@@ -595,7 +629,9 @@ fn browse(url: &str) -> anyhow::Result<()> {
     let open = "open";
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let open = "xdg-open";
-    std::process::Command::new(open).arg(url).spawn()?;
+    // Waited on, else each would linger as a zombie.
+    let mut c = std::process::Command::new(open).arg(url).spawn()?;
+    std::thread::spawn(move || c.wait());
     Ok(())
 }
 

@@ -6,8 +6,11 @@
 set -eu
 R=https://github.com/cab-ucf/irch/releases/latest/download
 case $(uname -m) in arm64 | aarch64) cpu=aarch64 ;; *) cpu=x86_64 ;; esac
-# irch's key: with minisign here, every file is checked as updates are.
+# irch's key: with minisign here, every file is checked as updates are;
+# without, said aloud.
 KEY=RWSPfztwzR/MhakRL6cA70pN03n/nMCdTvoY5UHC2IcZuhcR+41RQI95
+command -v minisign >/dev/null || echo "No minisign: nothing here is" \
+  "checked but GitHub's TLS (irch checks its own updates)." >&2
 check() {
   command -v minisign >/dev/null || return 0
   curl -fsSL "$1.sig" | base64 -d >"$2.minisig"
@@ -15,13 +18,16 @@ check() {
     { echo "$1: not signed by irch" && exit 1; }
   rm -f "$2.minisig"
 }
-get() { curl -fL --progress-bar "$R/$1" -o "$2" && check "$R/$1" "$2"; }
+get() {
+  curl -fL --progress-bar "$1" -o "$2"
+  check "$1" "$2"
+}
 bin=$HOME/.local/bin
 
 if [ "${1:-}" = --server ]; then
   [ "$(uname -s)" = Darwin ] && t=apple-darwin || t=unknown-linux-musl
   mkdir -p "$bin"
-  get "irch-$cpu-$t" "$bin/irch.part"
+  get "$R/irch-$cpu-$t" "$bin/irch.part"
   chmod +x "$bin/irch.part" && mv "$bin/irch.part" "$bin/irch"
   exec "$bin/irch" --install
 fi
@@ -31,7 +37,7 @@ if [ "$(uname -s)" = Darwin ]; then
   to=/Applications
   [ -w $to ] || { to=$HOME/Applications && mkdir -p "$to"; }
   t=$(mktemp -d)
-  get "$f" "$t/irch.app.tar.gz"
+  get "$R/$f" "$t/irch.app.tar.gz"
   rm -rf "$to/irch.app"
   tar -xzf "$t/irch.app.tar.gz" -C "$to" && rm -rf "$t"
   open "$to/irch.app"
@@ -51,7 +57,7 @@ url=$(curl -fsSL "$R/latest.json" | tr -d ' \n' |
 app=$bin/irch.AppImage
 mkdir -p "$bin" "$HOME/.local/share/applications" \
   "$HOME/.local/share/icons/hicolor/512x512/apps"
-curl -fL --progress-bar "$url" -o "$app.part" && check "$url" "$app.part"
+get "$url" "$app.part"
 chmod +x "$app.part" && mv "$app.part" "$app"
 curl -fsSL "$R/irch.png" \
   -o "$HOME/.local/share/icons/hicolor/512x512/apps/irch.png" || true

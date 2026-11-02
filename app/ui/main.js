@@ -247,16 +247,24 @@ async function voice() {
 }
 
 /** Ogg Opus decoded here, as WAV: every web view then plays it, seeks it
- * and knows how long it is (WebKit's own Ogg is unreliable). */
+ * and knows how long it is (WebKit's own Ogg is unreliable). At most half
+ * an hour: a crafted file would grow a thousandfold. */
+const MOST = 30 * 60 * 48000;
 async function unopus(b) {
-  const o = unogg(b);
+  const o = unogg(b, MOST / 960);
   if (!o || typeof AudioDecoder !== "function") return null;
+  // Its first samples warm the encoder up (pre-skip): not sound.
   const out = [];
+  let skip = o.skip, n = 0;
   const dec = new AudioDecoder({ error: () => {}, output: (d) => {
-    const s = new Float32Array(d.numberOfFrames);
-    d.copyTo(s, { planeIndex: 0, format: "f32-planar" });
+    if (n < MOST) {
+      const s = new Float32Array(d.numberOfFrames);
+      d.copyTo(s, { planeIndex: 0, format: "f32-planar" });
+      const k = Math.min(skip, s.length);
+      out.push(s.subarray(k));
+      [skip, n] = [skip - k, n + s.length];
+    }
     d.close();
-    out.push(s);
   } });
   try {
     dec.configure({ codec: "opus", sampleRate: 48000,
@@ -272,10 +280,7 @@ async function unopus(b) {
   } finally {
     if (dec.state !== "closed") dec.close();
   }
-  // Its first samples warm the encoder up (pre-skip): not sound.
-  const all = new Float32Array(out.reduce((n, x) => n + x.length, 0));
-  out.reduce((n, x) => (all.set(x, n), n + x.length), 0);
-  return new Blob([wav([all.subarray(o.skip)], 48000)], { type: "audio/wav" });
+  return new Blob([wav(out, 48000)], { type: "audio/wav" });
 }
 
 /** A blob the web view plays: Ogg Opus through `unopus`, else as it is. */
@@ -573,7 +578,7 @@ function renderSidebar() {
   // At first, and after each update (Android's installer takes back
   // full-screen calls from apps it installs from a file): ask together.
   const v = S.me?.version;
-  if (android && v && store.get("asked") !== v && !$("modal").open) {
+  if (android && v && store.get("asked") !== v && !modalOpen()) {
     store.set("asked", v);
     askAlerts();
   }
@@ -772,8 +777,10 @@ async function openUrl(url) {
   if (c) {
     if (c[1] === "call" && android) return answer(c[2], c[3]);
     // A link rings only for a call the space says is on: no web page
-    // fakes one.
-    return callOf(c[2], c[3])?.call.length ? incoming(c[2], c[3]) : null;
+    // fakes one. Else (it ended, or never was) off the lock screen.
+    if (callOf(c[2], c[3])?.call.length) return incoming(c[2], c[3]);
+    if (!av.call.on && !calling) quiet(invoke("in_call", { on: false }));
+    return;
   }
   if (!String(url).startsWith("irch://open/")) return;
   // A channel's link, or a message's.
@@ -994,13 +1001,13 @@ function incoming(sid, ch, who) {
   };
   const rings = setInterval(ring, 6000);
   ring();
-  const late = setTimeout(() => $("modal").close(), 45e3);
+  const late = setTimeout(() => $("ring").close(), 45e3);
   let seen = false;
   const gone = setInterval(() => {
     const ids = callOf(sid, ch)?.call ?? [];
-    if (ids.some(isMe)) $("modal").close(); // answered on another of ours
+    if (ids.some(isMe)) $("ring").close(); // answered on another of ours
     else if (ids.length) seen = true;
-    else if (seen) $("modal").close();
+    else if (seen) $("ring").close();
   }, 2000);
   calling = modal((finish) => h("div", {},
     h("div", { class: "m-body" }, h("h2", {}, who),
@@ -1009,7 +1016,7 @@ function incoming(sid, ch, who) {
     foot(h("button", { class: "btn link", onclick: () => finish(false) },
       "Decline"),
     h("button", { class: "btn green", onclick: () => finish(true) },
-      "Answer"))));
+      "Answer"))), $("ring"));
   calling.then((yes) => {
     clearInterval(rings);
     clearInterval(gone);
@@ -1452,14 +1459,7 @@ const bytes = (f) => rpc("file", { space: S.sid, file: f }).then((b64) => {
 function attachments(files) {
   return h("div", { class: "attachments" }, files.map((f) => {
     const type = MEDIA[f.name.split(".").pop().toLowerCase()];
-    if (type?.startsWith("audio")) {
-      const a = h("audio", { controls: true, preload: "none" });
-      // A blob: the page's policy plays no data: media.
-      bytes(f).then(async (b) => a.src =
-        URL.createObjectURL(await playable(b, type)), () => {});
-      return h("div", { class: "voice" }, a, fileChip(f));
-    }
-    if (type?.startsWith("video") && f.size <= PREVIEW) return video(f, type);
+    if (type && f.size <= PREVIEW) return player(f, type);
     if (!mime(f.name)) return fileChip(f);
     const img = h("img", { class: "attachment", alt: f.name, title: f.name });
     const box = h("div", { class: "image loading" }, img);
@@ -1480,16 +1480,35 @@ function attachments(files) {
 
 const PREVIEW = 25 << 20; // what opens in memory (core's PREVIEW)
 
-// Played where it is, fetched on the first tap.
-function video(f, type) {
+// Voice, decoded: the latest few, the rest let go.
+const voices = new Map(); // hash -> Promise of a blob: URL
+
+function voiced(f, type) {
+  if (!voices.has(f.hash)) {
+    if (voices.size >= 4) {
+      const [k, old] = voices.entries().next().value;
+      voices.delete(k);
+      old.then(URL.revokeObjectURL, () => {});
+    }
+    voices.set(f.hash, bytes(f)
+      .then(async (b) => URL.createObjectURL(await playable(b, type)))
+      .catch((e) => (voices.delete(f.hash), Promise.reject(e))));
+  }
+  return voices.get(f.hash);
+}
+
+// Played where it is, fetched (and voice decoded) on the first tap; a
+// blob, as the page's policy plays no data: media.
+function player(f, type) {
+  const tag = type.split("/")[0];
   const play = h("button", { class: "play", title: `Play ${f.name}` },
     icon("play"), h("small", {}, `${f.name} · ${size(f.size)}`));
   const box = h("div", { class: "video" }, play);
   play.onclick = () => {
     box.classList.add("loading");
-    bytes(f).then((b) => {
-      const src = URL.createObjectURL(new Blob([b], { type }));
-      box.replaceChildren(h("video", { src, controls: true, autoplay: true,
+    (tag === "audio" ? voiced(f, type) : bytes(f).then((b) =>
+      URL.createObjectURL(new Blob([b], { type })))).then((src) => {
+      box.replaceChildren(h(tag, { src, controls: true, autoplay: true,
         playsinline: true }));
       box.classList.remove("loading");
     }, (e) => {
@@ -1497,7 +1516,8 @@ function video(f, type) {
       toast(String(e?.message ?? e), true);
     });
   };
-  return h("div", {}, box, fileChip(f));
+  return h("div", { class: tag === "audio" ? "voice" : "" }, box,
+    fileChip(f));
 }
 
 // An offered file's key is all zeros: its sender's device serves it.
@@ -1981,9 +2001,9 @@ function memberCard(id, anchor, align) {
 
 // ---------- modals ----------
 
-function modal(build) {
+// Calls ring in their own: no other replaces them.
+function modal(build, d = $("modal")) {
   return new Promise((resolve) => {
-    const d = $("modal");
     let done = false;
     const finish = (v) => {
       if (done) return;
@@ -2004,6 +2024,9 @@ function modal(build) {
     if (!mobile() || f.length === 1) f[0]?.focus({ preventScroll: true });
   });
 }
+
+/** The dialog open, if one is: the page's first, else a call's. */
+const modalOpen = () => document.querySelector("dialog[open]");
 
 const foot = (...btns) =>
   h("div", { class: "m-foot" }, h("span", { class: "spacer" }), btns);
@@ -3154,7 +3177,7 @@ function wire() {
   let touch = null;
   addEventListener("touchstart", (e) => {
     const t = e.touches[0];
-    const skip = e.touches.length > 1 || $("modal").open ||
+    const skip = e.touches.length > 1 || modalOpen() ||
       e.target.closest?.("textarea, input, pre, table");
     touch = skip ? null : [t.clientX, t.clientY];
   }, { passive: true });
@@ -3209,7 +3232,7 @@ function wire() {
   // Android's Back (MainActivity.kt): false sends irch to the background.
   window.irchBack = () => {
     const body = document.body.classList;
-    if ($("modal").open) $("modal").close();
+    if (modalOpen()) modalOpen().close();
     else if (closePop) closePop();
     else if (S.editing) stopEdit();
     else if (S.reply) cancelReply();
@@ -3271,7 +3294,7 @@ function wire() {
     } else if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
       e.preventDefault();
       stepChannel(e.key === "ArrowDown" ? 1 : -1);
-    } else if (e.key === "Escape" && !$("modal").open) {
+    } else if (e.key === "Escape" && !modalOpen()) {
       if (closePop) closePop();
       else if (S.reply) cancelReply();
       else if (S.normal) normal(false);
@@ -3283,11 +3306,11 @@ function wire() {
         sc.scrollTop = sc.scrollHeight;
         markRead();
       }
-    } else if (S.normal && !typing && !$("modal").open && !e.ctrlKey &&
+    } else if (S.normal && !typing && !modalOpen() && !e.ctrlKey &&
       !e.metaKey && !e.altKey) {
       if (vim(e)) e.preventDefault();
     } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey &&
-      !typing && !$("modal").open && !input.disabled) {
+      !typing && !modalOpen() && !input.disabled) {
       input.focus({ preventScroll: true });
     }
   });
