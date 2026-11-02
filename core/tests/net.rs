@@ -122,11 +122,21 @@ async fn join_sync_and_live() {
     });
     assert_eq!(names.unwrap(), ["a", "b"]);
 
+    // Live, so said again while it lasts, as typing is: one said before
+    // gossip joins them reaches nobody.
+    until("neighbors", || a.peers(&id) > 0 && b.peers(&id) > 0).await;
     let mut ev = b.subscribe();
-    a.typing(&id, ch).await;
     let typing = async {
         loop {
-            if let Ok(Event::Typing { user, .. }) = ev.recv().await {
+            a.typing(&id, ch).await;
+            let heard = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if let Ok(Event::Typing { user, .. }) = ev.recv().await {
+                        return user;
+                    }
+                }
+            });
+            if let Ok(user) = heard.await {
                 return user;
             }
         }
