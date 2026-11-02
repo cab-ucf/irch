@@ -337,20 +337,45 @@ async fn save(
     space: Id,
     file: File,
 ) -> Result<String, String> {
-    let (n, p) = (node(&s).await?, app.path());
+    let (n, name) = (node(&s).await?, file.clone().safe().name);
+    // Where the person says, in the system's own picker; then fetched.
     #[cfg(target_os = "android")]
-    let dir = p.app_cache_dir().map(|d| d.join("shared"));
-    #[cfg(target_os = "ios")]
-    let dir = p.document_dir(); // Files › irch
-    #[cfg(desktop)]
-    let dir = p.download_dir().or_else(|_| p.home_dir());
-    let dir = dir.map_err(|e| e.to_string())?;
-    let f = n.save(&space, &file, &dir).await.map_err(err)?;
-    #[cfg(target_os = "android")]
-    if let Some(b) = app.try_state::<android::Bridge>() {
-        b.share_file(&f).await;
+    {
+        let b = app.try_state::<android::Bridge>().ok_or("no bridge")?;
+        let Some(to) = b.save_as(&name).await.map_err(err)? else {
+            return Ok(String::new());
+        };
+        let _ = app.emit("saving", &name);
+        let dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+        let f =
+            n.save(&space, &file, &dir.join("saving")).await.map_err(err)?;
+        b.write_to(&f, &to).await.map_err(err)?;
+        Ok(name)
     }
-    Ok(f.display().to_string())
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_dialog::DialogExt;
+        let mut d = app.dialog().file().set_file_name(&name);
+        if let Ok(dl) = app.path().download_dir() {
+            d = d.set_directory(dl);
+        }
+        let Some(to) = d.blocking_save_file() else { return Ok(String::new()) };
+        let to = to.into_path().map_err(|e| e.to_string())?;
+        let _ = app.emit("saving", &name);
+        let dir = to.parent().ok_or("no folder")?;
+        // Saved beside it under a free name, then over it, as agreed.
+        let f = n.save(&space, &file, dir).await.map_err(err)?;
+        if f != to {
+            std::fs::rename(&f, &to).map_err(|e| e.to_string())?;
+        }
+        Ok(to.display().to_string())
+    }
+    #[cfg(target_os = "ios")]
+    {
+        let dir = app.path().document_dir().map_err(|e| e.to_string())?;
+        let f = n.save(&space, &file, &dir).await.map_err(err)?;
+        Ok(f.display().to_string()) // Files › irch
+    }
 }
 
 /// Android's IPC carries no bytes: frames come as base64 there.
@@ -801,6 +826,8 @@ async fn start(app: &AppHandle, link: Option<String>) -> Result<(), String> {
     let r = r.await.map_err(err);
     if let Ok(n) = &r {
         forward(app.clone(), n.clone());
+        #[cfg(target_os = "android")]
+        tauri::async_runtime::spawn(android::firebase(app.clone(), n.clone()));
     }
     let done = r.as_ref().map(drop).map_err(Clone::clone);
     app.state::<App>().0.send_replace(Some(r));
@@ -928,8 +955,12 @@ async fn notify(app: &AppHandle, x: &Notice) {
 fn log_to(dir: &std::path::Path) {
     let _ = std::fs::create_dir_all(dir);
     let Ok(f) = std::fs::File::create(dir.join("irch.log")) else { return };
+    // irch's warnings; of its libraries, errors: a phone's network is a
+    // stream of warnings, each a write.
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "warn,n0_mainline=off".into());
+        .unwrap_or_else(|_| {
+            "error,irch_core=warn,irch_app=warn,irch=warn".into()
+        });
     let log =
         tracing_subscriber::fmt().with_ansi(false).with_env_filter(filter);
     let _ = log.with_writer(std::sync::Mutex::new(f)).try_init();

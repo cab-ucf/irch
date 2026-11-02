@@ -132,9 +132,12 @@ async fn main() -> Result<()> {
         .dir
         .unwrap_or_else(|| dirs::data_dir().unwrap_or_default().join(home));
     let (api, ui) = (c.api, !(c.serve || c.headless || c.api));
+    // irch's warnings; of its libraries, errors: a phone's network is a
+    // stream of warnings, each a write.
     let log = tracing_subscriber::fmt().with_ansi(false).with_env_filter(
-        tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "warn,n0_mainline=off".into()),
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(
+            |_| "error,irch_core=warn,irch_app=warn,irch=warn".into(),
+        ),
     );
     if ui {
         std::fs::create_dir_all(&dir)?;

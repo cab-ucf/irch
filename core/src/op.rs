@@ -59,6 +59,8 @@ pub enum Op {
     // A link in our message, as its site showed it to us when we sent it:
     // nobody else fetches anything.
     Preview { target: Id, link: Link },
+    // Read up to `ts` in `channel` (a DM's: its sender's ticks).
+    Read { channel: Ch, ts: u64 },
 }
 
 /// A link's preview, made by its sender.

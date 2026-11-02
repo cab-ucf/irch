@@ -33,6 +33,23 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
   libsoup3, ALSA (libasound2) and, for calls, gstreamer plugins base,
   good, bad and libav.
 
+## Push for Android phones (optional, once per server)
+
+A storage node holding a Firebase project wakes Android phones through
+Google, so they hold nothing open. Phones in the spaces it keeps, or paired
+with it, find it by themselves: no app setting, no build of your own.
+
+1. In the [Firebase console](https://console.firebase.google.com): *Add
+   project*; *Add app → Android*, package `dev.irch.chat`; download
+   `google-services.json`. Then *Project settings → Service accounts →
+   Generate new private key* (`key.json`).
+2. On the server, one command:
+   ```sh
+   curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh | sh -s -- --server key.json google-services.json
+   ```
+   (NixOS: both into `/var/lib/irch/data`, as `fcm.json` and
+   `google-services.json`, owned by `irch`; then `systemctl restart irch`.)
+
 ## Features
 
 - Spaces with channels (admins drag them into order), threads and named
@@ -112,12 +129,24 @@ space = a grow-only set of envs;   state = a deterministic fold of it
 - **Voice messages are Opus in Ogg**, played by decoding them in the app:
   the same in every web view, seekable, the right length.
 - **Sync** compares per-day fingerprints, then sends only missing envs.
-- **Phones sleep**: out of sight for a minute, the node stops and a
-  doorbell (an iroh endpoint with no connections) waits. Whoever writes
-  rings it, handing over the sealed message, so the phone notifies at once.
-  Android must let irch run unrestricted; irch says so until it does. With
-  a UnifiedPush app such as ntfy, that app wakes irch instead. iPhones
-  have no such door: irch catches up when opened, and a call keeps it up.
+- **Phones sleep, holding nothing open.** Out of sight a minute, the
+  node stops. Whoever writes or calls rings each member's phone with the
+  sealed op itself, and the phone shows it from a phonebook its node left
+  (each space's key, names, levels) and keeps it for the node to fold
+  later: a wake starts no node and opens no connection. Android phones
+  are rung through Google's push, by a push server (below); with a
+  UnifiedPush app such as ntfy, through it; else, at a battery's cost,
+  through irch's own doorbell, kept open on a relay. iPhones catch up when
+  opened, and a call keeps irch up.
+- **Push servers** are storage nodes holding a Firebase project. Phones
+  ask the storage nodes they know (theirs, their spaces') for one, take a
+  Firebase token from its project, and give it that token, a ring token
+  per space and epoch, and a key. Members ring with those as with a
+  doorbell, every route of a phone at once; Google carries the ring
+  sealed to that key and padded to one size, so it learns when and
+  nothing else, and the phone shows it as it lands. Google keeps pushes
+  for a phone that is off four weeks; storage nodes and members keep
+  everything, synced when irch opens.
 
 | network | terminal (app env) | who else is involved |
 |---|---|---|
@@ -137,7 +166,9 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   storage nodes see sizes, times and devices. The Mainline DHT says an
   endpoint id is online, to anyone.
 - A member's UnifiedPush server learns when each member writes, and from
-  where. Doorbell codes are per space and die with a rekey.
+  where. A push server learns that much, and which spaces a ring is for;
+  Google, only when a phone is woken. Doorbell codes are per space and
+  die with a rekey.
 - Call frames reach the system web view's video decoders.
 - Calls are for a handful of people; Macs and iPhones need WebKit 26.
 - An iPhone in the background is not told of messages: Apple's push is a

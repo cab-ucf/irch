@@ -9,17 +9,19 @@ import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
+import android.net.Uri
 import android.os.Build
 import android.webkit.WebView
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
-import androidx.core.content.FileProvider
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import androidx.activity.result.ActivityResult
 import app.tauri.PermissionState
+import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.Permission
@@ -56,8 +58,17 @@ class ShareArgs {
 }
 
 @InvokeArg
-class FileArgs {
+class WriteArgs {
   var path = ""
+  var uri = ""
+}
+
+@InvokeArg
+class FirebaseArgs {
+  var app = ""
+  var key = ""
+  var project = ""
+  var sender = ""
 }
 
 @InvokeArg
@@ -74,9 +85,12 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     if (!notificationsAllowed(activity) && Build.VERSION.SDK_INT >= 33) {
       ActivityCompat.requestPermissions(activity, arrayOf(POST_NOTIFICATIONS), 1)
     }
-    // A push app costs almost no battery; else a service keeps a doorbell.
-    UnifiedPush.tryUseCurrentOrDefaultDistributor(activity) { ok ->
-      if (ok) UnifiedPush.register(activity) else live(activity)
+    // Google's push through irch's push servers; else a push app; else
+    // a service keeps irch's own doorbell. The first costs no battery.
+    fcm(activity) { google ->
+      if (!google) UnifiedPush.tryUseCurrentOrDefaultDistributor(activity) { ok ->
+        if (ok) UnifiedPush.register(activity) else live(activity)
+      }
     }
   }
 
@@ -99,9 +113,10 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     }
     invoke.resolve(JSObject()
       .put("notify", notificationsAllowed(activity))
-      .put("background", unrestricted(activity))
+      // Woken by a push, irch needs no leave to run in the background.
+      .put("background", push != null || google(activity) || unrestricted(activity))
       .put("calls", fullScreen(activity))
-      .put("push", label))
+      .put("push", label ?: "Google's push".takeIf { google(activity) }))
   }
 
   @Command
@@ -111,7 +126,7 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
         .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE,
           activity.packageName)
       activity.startActivity(i)
-    } else if (!unrestricted(activity)) unrestrict()
+    } else if (!unrestricted(activity) && !google(activity)) unrestrict()
     else if (!fullScreen(activity)) runCatching {
       val uri = android.net.Uri.parse("package:" + activity.packageName)
       activity.startActivity(Intent(
@@ -180,6 +195,20 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
   @PermissionCallback
   private fun allowed(invoke: Invoke) = invoke.resolve()
 
+  /** A push server's Firebase project, found among our storage nodes: kept
+   *  for every process to come, and our token sent to it. */
+  @Command
+  fun firebase(invoke: Invoke) {
+    val f = invoke.parseArgs(FirebaseArgs::class.java)
+    activity.getSharedPreferences("irch", 0).edit()
+      .putString("fb_app", f.app).putString("fb_key", f.key)
+      .putString("fb_project", f.project).putString("fb_sender", f.sender)
+      .apply()
+    startFirebase(activity)
+    fcm(activity) {}
+    invoke.resolve()
+  }
+
   @Command
   fun share(invoke: Invoke) {
     val text = invoke.parseArgs(ShareArgs::class.java).text
@@ -201,18 +230,40 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     }
   }
 
+  /** Android's own "save as": where to, or nothing if put away. */
   @Command
-  fun shareFile(invoke: Invoke) {
-    val file = java.io.File(invoke.parseArgs(FileArgs::class.java).path)
-    val authority = activity.packageName + ".fileprovider"
-    val uri = FileProvider.getUriForFile(activity, authority, file)
-    val type =
-      activity.contentResolver.getType(uri) ?: "application/octet-stream"
-    val send = Intent(Intent.ACTION_SEND).setType(type)
-      .putExtra(Intent.EXTRA_STREAM, uri)
-      .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-    activity.startActivity(Intent.createChooser(send, null))
-    invoke.resolve()
+  fun saveAs(invoke: Invoke) {
+    val name = invoke.parseArgs(ShareArgs::class.java).text
+    val type = java.net.URLConnection.guessContentTypeFromName(name)
+    val i = Intent(Intent.ACTION_CREATE_DOCUMENT)
+      .addCategory(Intent.CATEGORY_OPENABLE)
+      .setType(type ?: "application/octet-stream")
+      .putExtra(Intent.EXTRA_TITLE, name)
+    startActivityForResult(invoke, i, "picked")
+  }
+
+  @ActivityCallback
+  private fun picked(invoke: Invoke, r: ActivityResult) {
+    val uri = r.data?.data?.takeIf { r.resultCode == Activity.RESULT_OK }
+    invoke.resolve(if (uri == null) JSObject() else JSObject().put("uri", "$uri"))
+  }
+
+  /** A saved file to where `saveAs` said: off the main thread, as large
+   *  ones take a while. */
+  @Command
+  fun writeTo(invoke: Invoke) {
+    val a = invoke.parseArgs(WriteArgs::class.java)
+    Thread {
+      val file = java.io.File(a.path)
+      runCatching {
+        val out = activity.contentResolver.openOutputStream(Uri.parse(a.uri), "wt")
+        (out ?: error("cannot write there")).use { o ->
+          file.inputStream().use { it.copyTo(o) }
+        }
+      }.onSuccess { invoke.resolve() }
+        .onFailure { invoke.reject("saving: ${it.message}") }
+      file.delete()
+    }.start()
   }
 }
 

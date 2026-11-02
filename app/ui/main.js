@@ -912,6 +912,8 @@ function tone(notes, gain) {
     const g = audio.createGain();
     o.frequency.value = f;
     g.gain.setValueAtTime(gain, t0 + at);
+    // A ring holds, fading only at its end; a chime's notes just fade.
+    if (len > 1) g.gain.setValueAtTime(gain, t0 + at + len - 0.1);
     g.gain.exponentialRampToValueAtTime(1e-4, t0 + at + len);
     o.connect(g).connect(audio.destination);
     o.start(t0 + at);
@@ -922,7 +924,7 @@ const chime = () => tone([[880, 0, 0.12], [1320, 0.13, 0.25]], 0.15);
 // A phone's ring: 440 and 480 Hz, 2 s in every 6; the caller's ringback,
 // the same, softer, once the other side is ringing.
 const ringing = () => tone([[440, 0, 2], [480, 0, 2]], 0.07);
-const ringback = () => tone([[440, 0, 2], [480, 0, 2]], 0.025);
+const ringback = () => tone([[440, 0, 2], [480, 0, 2]], 0.04);
 
 /** A DM call of ours, alone in it: is it reaching them, ringing there,
  * or not getting through? Ringback only once it rings; a minute, then
@@ -1103,7 +1105,6 @@ function renderMessages(keepScroll) {
   S.stick = false;
   const items = [];
   const admin = !!cur()?.admin;
-  const mine = S.msgs.findLast((m) => isMe(m.author))?.id;
   let prev = null;
   for (const m of S.msgs) {
     const day = fmtDay(m.ts);
@@ -1120,11 +1121,10 @@ function renderMessages(keepScroll) {
     const authorAdmin = memberOf(m.author)?.role === "Admin";
     const sig = JSON.stringify([m.text, m.edited, m.name,
       m.reactions, m.quote, m.thread, m.pinned, cont, mentioned, editing,
-      admin, authorAdmin, m.pending, m.id === mine && m.delivered,
+      admin, authorAdmin, m.pending, m.delivered, m.read,
       m.preview]);
-    const last = m.id === mine;
     items.push({ k: m.id, sig, make: () =>
-      msgRow(m, { cont, mentioned, editing, authorAdmin, last }) });
+      msgRow(m, { cont, mentioned, editing, authorAdmin }) });
     prev = m;
   }
   reconcile($("list"), items);
@@ -1162,7 +1162,7 @@ function mentionsMe(m) {
     (m.quote && isMe(m.quote.author));
 }
 
-function msgRow(m, { cont, mentioned, editing, authorAdmin, last }) {
+function msgRow(m, { cont, mentioned, editing, authorAdmin }) {
   const row = h("div", {
     class: `msg${cont ? " cont" : ""}${mentioned ? " mentioned" : ""}` +
       (m.reply ? " has-reply" : "") + (m.pinned ? " pinned" : ""),
@@ -1186,14 +1186,20 @@ function msgRow(m, { cont, mentioned, editing, authorAdmin, last }) {
       h("span", { class: "time", title: at }, fmtTime(m.ts)), nick));
   }
   if (editing) row.append(editBox(m));
-  else if (m.text || m.edited) row.append(content(m.text, m.edited));
+  const body = !editing && (m.text || m.edited) && content(m.text, m.edited);
+  if (body) row.append(body);
   if (m.pending) {
     row.append(h("div", { class: "pending-note" },
       "Only on this device: it goes out once someone is reachable"));
-  } else if (last && m.delivered !== undefined) {
-    // A DM's last of ours: on their device, or not yet (a phone asleep).
-    row.append(h("div", { class: "pending-note" }, m.delivered
-      ? "Delivered" : "Sent, not on their device yet"));
+  } else if (isMe(m.author)) {
+    // As Signal: ✓ left this device; in a DM, ✓✓ on theirs, lit once read.
+    const [t, title] = m.read ? ["✓✓", "Read"]
+      : m.delivered ? ["✓✓", "Delivered"] : ["✓", "Sent"];
+    // At the end of the text's last line, as in Signal.
+    const end = body?.lastElementChild?.tagName === "P"
+      ? body.lastElementChild : body || row;
+    end.append(h("span", { class: "ticks" + (m.read ? " read" : ""),
+      title, "aria-label": title }, t));
   }
   if (m.files.length) row.append(attachments(m.files));
   if (m.preview) row.append(previewCard(m.preview));
@@ -1478,14 +1484,15 @@ const fileChip = (f) => h("div", { class: "file-chip" }, icon("file"),
   h("div", { class: "meta", title: "Preview", onclick: () => preview(f) },
     h("b", {}, f.name), h("small", {}, size(f.size),
       offered(f) ? " · from its sender's device, while online" : "")),
-  h("button", { title: android ? "Share" : ios ? "Save to Files"
-    : "Save to Downloads",
+  h("button", { title: ios ? "Save to Files" : "Save as…",
     onclick: () => saveFile(f) }, icon("down")));
 
+// The system's picker asks where first ("saving" once it is answered);
+// put away, nothing is said.
 async function saveFile(f) {
   const at = await invoke("save", { space: S.sid, file: f })
     .catch((e) => toast(String(e), true));
-  if (at && !android) toast(ios ? "Saved: Files › irch" : `Saved to ${at}`);
+  if (at) toast(ios ? "Saved: Files › irch" : `Saved: ${at}`);
 }
 
 const MEDIA = { mp3: "audio/mpeg", ogg: "audio/ogg", oga: "audio/ogg",
@@ -2474,8 +2481,9 @@ function notifyCheck() {
       row(a.calls, "calls may fill the screen when the phone is locked"),
       h("p", { class: "note" }, a.push
         ? `Whoever writes wakes it through ${a.push}: no battery to speak of.`
-        : "It stays connected, shown by a quiet notification. A " +
-          "UnifiedPush app such as ntfy costs less battery."),
+        : "It stays connected through a relay, shown by a quiet " +
+          "notification, which costs battery: a UnifiedPush app such as " +
+          "ntfy costs far less."),
       h("div", { class: "row" },
         !(a.notify && a.background && a.calls) && h("button",
           { class: "btn", onclick: () => draw("fix") }, "Allow"),
@@ -3011,9 +3019,16 @@ function wire() {
   $("mic-btn").onclick = voice;
   $("mic-btn").classList.toggle("hidden", !window.AudioWorkletNode);
   $("call-btn").onclick = ring;
-  av.call.changed = renderCall;
-  setInterval(renderTiles, 400);
-  setInterval(dial, 1000);
+  // A clock only in a call: its tiles and its dial tone want one.
+  let ticks = [];
+  av.call.changed = () => {
+    if (!!av.call.on !== !!ticks.length) {
+      ticks.forEach(clearInterval);
+      ticks = av.call.on
+        ? [setInterval(renderTiles, 400), setInterval(dial, 1000)] : [];
+    }
+    renderCall();
+  };
   const showMembers = (on) => {
     $("members").classList.toggle("hidden-panel", !on);
     $("members-btn").classList.toggle("on", on);
@@ -3191,8 +3206,20 @@ async function start() {
       members.t = setTimeout(() => ((members.t = 0), members()), wait);
     }
   };
+  // Out of sight (not in a call), nothing is fetched or drawn: it all
+  // comes at once when irch is seen again.
+  let stale = false;
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden || !stale) return;
+    stale = false;
+    schedule("side");
+    schedule("msgs");
+    members();
+  });
   await T.event.listen("irch", ({ payload: e }) => {
-    if (e.t === "changed") {
+    if (document.hidden && !av.call.on) {
+      stale = true;
+    } else if (e.t === "changed") {
       schedule("side");
       if (!e.space || e.space === S.sid) {
         schedule("msgs");
@@ -3211,6 +3238,7 @@ async function start() {
     }
   });
   await T.event.listen("open-url", ({ payload }) => openUrl(payload));
+  await T.event.listen("saving", ({ payload }) => toast(`Saving ${payload}…`));
   await T.event.listen("alert", ({ payload: a }) => {
     if (a.ring) return incoming(a.space, a.room, a.title);
     if (!android && document.hasFocus()) chime(); // else: a banner sounds
