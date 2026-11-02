@@ -1105,7 +1105,6 @@ function renderMessages(keepScroll) {
   S.stick = false;
   const items = [];
   const admin = !!cur()?.admin;
-  const mine = S.msgs.findLast((m) => isMe(m.author))?.id;
   let prev = null;
   for (const m of S.msgs) {
     const day = fmtDay(m.ts);
@@ -1122,11 +1121,10 @@ function renderMessages(keepScroll) {
     const authorAdmin = memberOf(m.author)?.role === "Admin";
     const sig = JSON.stringify([m.text, m.edited, m.name,
       m.reactions, m.quote, m.thread, m.pinned, cont, mentioned, editing,
-      admin, authorAdmin, m.pending, m.id === mine && m.delivered,
+      admin, authorAdmin, m.pending, m.delivered, m.read,
       m.preview]);
-    const last = m.id === mine;
     items.push({ k: m.id, sig, make: () =>
-      msgRow(m, { cont, mentioned, editing, authorAdmin, last }) });
+      msgRow(m, { cont, mentioned, editing, authorAdmin }) });
     prev = m;
   }
   reconcile($("list"), items);
@@ -1164,7 +1162,7 @@ function mentionsMe(m) {
     (m.quote && isMe(m.quote.author));
 }
 
-function msgRow(m, { cont, mentioned, editing, authorAdmin, last }) {
+function msgRow(m, { cont, mentioned, editing, authorAdmin }) {
   const row = h("div", {
     class: `msg${cont ? " cont" : ""}${mentioned ? " mentioned" : ""}` +
       (m.reply ? " has-reply" : "") + (m.pinned ? " pinned" : ""),
@@ -1188,14 +1186,20 @@ function msgRow(m, { cont, mentioned, editing, authorAdmin, last }) {
       h("span", { class: "time", title: at }, fmtTime(m.ts)), nick));
   }
   if (editing) row.append(editBox(m));
-  else if (m.text || m.edited) row.append(content(m.text, m.edited));
+  const body = !editing && (m.text || m.edited) && content(m.text, m.edited);
+  if (body) row.append(body);
   if (m.pending) {
     row.append(h("div", { class: "pending-note" },
       "Only on this device: it goes out once someone is reachable"));
-  } else if (last && m.delivered !== undefined) {
-    // A DM's last of ours: on their device, or not yet (a phone asleep).
-    row.append(h("div", { class: "pending-note" }, m.delivered
-      ? "Delivered" : "Sent, not on their device yet"));
+  } else if (isMe(m.author)) {
+    // As Signal: ✓ left this device; in a DM, ✓✓ on theirs, lit once read.
+    const [t, title] = m.read ? ["✓✓", "Read"]
+      : m.delivered ? ["✓✓", "Delivered"] : ["✓", "Sent"];
+    // At the end of the text's last line, as in Signal.
+    const end = body?.lastElementChild?.tagName === "P"
+      ? body.lastElementChild : body || row;
+    end.append(h("span", { class: "ticks" + (m.read ? " read" : ""),
+      title, "aria-label": title }, t));
   }
   if (m.files.length) row.append(attachments(m.files));
   if (m.preview) row.append(previewCard(m.preview));
@@ -1480,14 +1484,15 @@ const fileChip = (f) => h("div", { class: "file-chip" }, icon("file"),
   h("div", { class: "meta", title: "Preview", onclick: () => preview(f) },
     h("b", {}, f.name), h("small", {}, size(f.size),
       offered(f) ? " · from its sender's device, while online" : "")),
-  h("button", { title: ios ? "Save to Files" : "Save to Downloads",
+  h("button", { title: ios ? "Save to Files" : "Save as…",
     onclick: () => saveFile(f) }, icon("down")));
 
+// The system's picker asks where first ("saving" once it is answered);
+// put away, nothing is said.
 async function saveFile(f) {
   const at = await invoke("save", { space: S.sid, file: f })
     .catch((e) => toast(String(e), true));
-  // Android 9 and before share it instead: the sheet says enough.
-  if (at) toast(ios ? "Saved: Files › irch" : `Saved to ${at}`);
+  if (at) toast(ios ? "Saved: Files › irch" : `Saved: ${at}`);
 }
 
 const MEDIA = { mp3: "audio/mpeg", ogg: "audio/ogg", oga: "audio/ogg",
@@ -3233,6 +3238,7 @@ async function start() {
     }
   });
   await T.event.listen("open-url", ({ payload }) => openUrl(payload));
+  await T.event.listen("saving", ({ payload }) => toast(`Saving ${payload}…`));
   await T.event.listen("alert", ({ payload: a }) => {
     if (a.ring) return incoming(a.space, a.room, a.title);
     if (!android && document.hasFocus()) chime(); // else: a banner sounds

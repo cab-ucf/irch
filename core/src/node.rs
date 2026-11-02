@@ -1465,12 +1465,22 @@ impl Node {
         l.read.get(&(*id, *ch)).or(l.joined.get(id)).copied().unwrap_or(0)
     }
 
-    pub fn mark_read(&self, id: &Id, ch: &Ch) {
+    /// Read here; in a DM, its sender is told (not while invisible).
+    pub fn mark_read(self: &Arc<Self>, id: &Id, ch: &Ch) {
         let latest = self.view(id, |s| s.latest(ch)).flatten().unwrap_or(0);
         let latest = latest.min(now());
         if self.since(id, ch) < latest {
             lock(&self.local).read.insert((*id, *ch), latest);
             self.persist();
+            let dm = self.view(id, |s| s.dm.is_some()) == Some(true);
+            if let (true, false, Ok(sp)) = (dm, self.invisible(), self.get(id))
+            {
+                let (n, ch) = (self.clone(), *ch);
+                tokio::spawn(async move {
+                    let _ =
+                        n.post(&sp, Op::Read { channel: ch, ts: latest }).await;
+                });
+            }
         }
     }
 

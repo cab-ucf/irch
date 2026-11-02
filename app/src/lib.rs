@@ -337,27 +337,45 @@ async fn save(
     space: Id,
     file: File,
 ) -> Result<String, String> {
-    let (n, p) = (node(&s).await?, app.path());
+    let (n, name) = (node(&s).await?, file.clone().safe().name);
+    // Where the person says, in the system's own picker; then fetched.
     #[cfg(target_os = "android")]
-    let dir = p.app_cache_dir().map(|d| d.join("shared"));
-    #[cfg(target_os = "ios")]
-    let dir = p.document_dir(); // Files › irch
-    #[cfg(desktop)]
-    let dir = p.download_dir().or_else(|_| p.home_dir());
-    let dir = dir.map_err(|e| e.to_string())?;
-    let f = n.save(&space, &file, &dir).await.map_err(err)?;
-    // Android: into Downloads (10 on), else the share sheet, saying nothing.
-    #[cfg(target_os = "android")]
-    if let Some(b) = app.try_state::<android::Bridge>() {
-        return match b.download(&f).await.map_err(err)? {
-            Some(name) => Ok(format!("Downloads/{name}")),
-            None => {
-                b.share_file(&f).await;
-                Ok(String::new())
-            }
+    {
+        let b = app.try_state::<android::Bridge>().ok_or("no bridge")?;
+        let Some(to) = b.save_as(&name).await.map_err(err)? else {
+            return Ok(String::new());
         };
+        let _ = app.emit("saving", &name);
+        let dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+        let f =
+            n.save(&space, &file, &dir.join("saving")).await.map_err(err)?;
+        b.write_to(&f, &to).await.map_err(err)?;
+        Ok(name)
     }
-    Ok(f.display().to_string())
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_dialog::DialogExt;
+        let mut d = app.dialog().file().set_file_name(&name);
+        if let Ok(dl) = app.path().download_dir() {
+            d = d.set_directory(dl);
+        }
+        let Some(to) = d.blocking_save_file() else { return Ok(String::new()) };
+        let to = to.into_path().map_err(|e| e.to_string())?;
+        let _ = app.emit("saving", &name);
+        let dir = to.parent().ok_or("no folder")?;
+        // Saved beside it under a free name, then over it, as agreed.
+        let f = n.save(&space, &file, dir).await.map_err(err)?;
+        if f != to {
+            std::fs::rename(&f, &to).map_err(|e| e.to_string())?;
+        }
+        Ok(to.display().to_string())
+    }
+    #[cfg(target_os = "ios")]
+    {
+        let dir = app.path().document_dir().map_err(|e| e.to_string())?;
+        let f = n.save(&space, &file, &dir).await.map_err(err)?;
+        Ok(f.display().to_string()) // Files › irch
+    }
 }
 
 /// Android's IPC carries no bytes: frames come as base64 there.

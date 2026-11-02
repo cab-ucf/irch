@@ -1444,6 +1444,9 @@ video.scan {
   outline-offset: -2px;
 }
 .pending-note { color: var(--dim); font-size: 12px; font-style: italic; }
+.ticks { margin-left: 6px; color: var(--dim); font-size: 11px;
+  letter-spacing: -2px; white-space: nowrap; }
+.ticks.read { color: var(--cyan); }
 .url {
   font-family: var(--mono, monospace);
   word-break: break-all;

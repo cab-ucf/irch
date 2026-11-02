@@ -68,8 +68,9 @@ struct Url<'a> {
 }
 
 #[derive(Serialize)]
-struct FilePath<'a> {
+struct Write<'a> {
     path: &'a str,
+    uri: &'a str,
 }
 
 impl Bridge {
@@ -112,26 +113,29 @@ impl Bridge {
         self.call("share", Text { text }).await;
     }
 
-    /// Into Downloads, as named there (a twin gets " (1)"); `None` on
-    /// Android 9 and before, which share it instead.
-    pub async fn download(
-        &self,
-        path: &std::path::Path,
-    ) -> anyhow::Result<Option<String>> {
-        let path = &path.to_string_lossy();
+    /// Where to save `name`, in Android's picker: `None` if put away.
+    pub async fn save_as(&self, name: &str) -> anyhow::Result<Option<String>> {
         #[derive(serde::Deserialize)]
-        struct Saved {
-            name: Option<String>,
+        struct Picked {
+            uri: Option<String>,
         }
         let r = self
             .0
-            .run_mobile_plugin_async::<Saved>("download", FilePath { path });
-        Ok(r.await?.name)
+            .run_mobile_plugin_async::<Picked>("saveAs", Text { text: name });
+        Ok(r.await?.uri)
     }
 
-    pub async fn share_file(&self, path: &std::path::Path) {
+    /// The file at `path` to where `save_as` said, and gone from here.
+    pub async fn write_to(
+        &self,
+        path: &std::path::Path,
+        uri: &str,
+    ) -> anyhow::Result<()> {
         let path = &path.to_string_lossy();
-        self.call("shareFile", FilePath { path }).await;
+        let r = self
+            .0
+            .run_mobile_plugin_async::<()>("writeTo", Write { path, uri });
+        Ok(r.await?)
     }
 
     /// False if no app opens it.

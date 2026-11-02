@@ -988,6 +988,33 @@ async fn a_dm_call_connects_both_ways() {
     assert!(hear(&b, &mut at_a).await, "a hears b");
 }
 
+/// Read in a DM, its sender sees so (Signal's ticks); invisible, not.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dm_read_is_told_to_its_sender() {
+    use irch_core::state::DM;
+    let (a, b) = (node("a").await, node("b").await);
+    let id = a.create("hub").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let keyed = || a.view(&id, |s| s.kem(&b.id()).is_some()) == Some(true);
+    until("b's key", keyed).await;
+    let dm = a.dm(&id, &b.id()).await.unwrap();
+    until("b in the DM", || b.spaces().contains(&dm)).await;
+    say(&a, &dm, DM, "hi").await;
+    until("b has it", || texts(&b, &dm, &DM) == ["hi"]).await;
+    let read = || a.view(&dm, |s| s.read_by(&b.id(), &DM)).unwrap_or(0);
+    assert_eq!(read(), 0);
+    b.mark_read(&dm, &DM);
+    until("a sees it read", || read() > 0).await;
+    let was = read();
+    b.set_invisible(true).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    say(&a, &dm, DM, "there?").await;
+    until("b has it", || texts(&b, &dm, &DM).len() == 2).await;
+    b.mark_read(&dm, &DM);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(read(), was, "invisible: not told");
+}
+
 /// A DM made while b's phone sleeps: its doorbell wakes it, it takes the
 /// DM, sleeps again; opened later, b and a meet in it.
 #[tokio::test(flavor = "multi_thread")]

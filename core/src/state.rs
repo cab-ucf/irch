@@ -93,6 +93,8 @@ pub struct State {
     topics: HashMap<Ch, BTreeMap<Pos, (Id, String)>>,
     reacts: HashMap<Id, Reacts>,
     pins: HashMap<Id, (Pos, Id, bool)>,
+    // Each member's "read to here", per channel: never past its own time.
+    reads: HashMap<(Id, Ch), u64>,
     previews: HashMap<Id, (Pos, Id, Link)>,
     labels: BTreeMap<EndpointId, String>,
     authors: HashMap<Id, u64>,
@@ -184,6 +186,17 @@ impl State {
                     (self.pins.insert(target, v) != Some(v), false)
                 }
             },
+            Op::Read { channel, ts } => {
+                let r = self.reads.entry((s.author, channel)).or_default();
+                let ts = ts.min(s.ts);
+                (
+                    ts > *r && {
+                        *r = ts;
+                        true
+                    },
+                    false,
+                )
+            }
             Op::Preview { target, link } => match self.previews.get(&target) {
                 Some((p, ..)) if *p >= at => (false, false),
                 _ => {
@@ -423,6 +436,11 @@ impl State {
         // An admin's order; channels it leaves out after, by name.
         v.sort_by_key(|(c, n)| (at(c).unwrap_or(usize::MAX), n.clone(), *c));
         v
+    }
+
+    /// Up to when `user` has read `ch`.
+    pub fn read_by(&self, user: &Id, ch: &Ch) -> u64 {
+        self.reads.get(&(*user, *ch)).copied().unwrap_or(0)
     }
 
     pub fn pins(&self, ch: &Ch) -> Vec<Message> {
@@ -952,6 +970,19 @@ mod tests {
         assert!(st.message(&Id([6; 32])).unwrap().1.pinned);
         st.extend([op(8, o, Op::Pin { target: Id([6; 32]), on: false })]);
         assert_eq!(pinned(&st), 0, "newest wins");
+    }
+
+    #[test]
+    fn reads_only_go_forward_and_never_ahead() {
+        let [o, a, _] = people();
+        let mut st = State::new(&Invite::new(o, "", None));
+        let read = |t, ts| op(t, a, Op::Read { channel: CH, ts });
+        st.extend([read(10, 5)]);
+        assert_eq!(st.read_by(&a, &CH), 5);
+        st.extend([read(11, 3)]);
+        assert_eq!(st.read_by(&a, &CH), 5, "never back");
+        st.extend([read(12, 99)]);
+        assert_eq!(st.read_by(&a, &CH), 12, "not past its own time");
     }
 
     #[test]

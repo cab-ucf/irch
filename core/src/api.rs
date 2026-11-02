@@ -205,11 +205,16 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
             let me = n.id();
             let peer = n.view(&space, |s| s.peer(&me)).flatten();
             let reach = peer.and_then(|p| n.reach(&space, &p));
+            let read =
+                peer.and_then(|p| n.view(&space, |s| s.read_by(&p, &channel)));
             let row = |m: crate::Message| {
                 let mut v = json!(m);
                 v["pending"] = held.contains(&m.id).into();
                 if m.author == me && peer.is_some() {
-                    v["delivered"] = reach.is_some_and(|r| m.ts <= r).into();
+                    let seen = read.is_some_and(|r| m.ts <= r);
+                    let got = reach.is_some_and(|r| m.ts <= r);
+                    v["delivered"] = (seen || got).into();
+                    v["read"] = seen.into();
                 }
                 v
             };
