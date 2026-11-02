@@ -220,6 +220,7 @@ impl State {
             Op::Back { .. }
             | Op::Knock { .. }
             | Op::Typing { .. }
+            | Op::Typed { .. }
             | Op::Here
             | Op::Call { .. }
             | Op::Ringing { .. }

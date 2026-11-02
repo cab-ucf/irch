@@ -46,6 +46,12 @@ const ALONE: Duration = Duration::from_secs(64);
 const QUIET: Duration = Duration::from_secs(365 * 86400);
 /// Spaces up to this many ring for a call in any channel.
 const RINGS: usize = 10;
+/// No input this long: away (`Gone`, once). Others drop a device unheard
+/// from twice as long (its battery died), and a device in use says `Here`
+/// again at most this often.
+pub const AWAY: Duration = Duration::from_secs(600);
+// Typing, said again this often while it lasts; heard, it lasts 60 s.
+const TYPING: Duration = Duration::from_secs(50);
 // A callee says once that it rings; its caller hears ringback this long.
 const RANG: Duration = Duration::from_secs(45);
 pub(crate) const RELAYS: [&str; 2] =
@@ -97,7 +103,7 @@ pub struct Config {
 #[serde(tag = "t", rename_all = "lowercase")]
 pub enum Event {
     Changed { space: Id },
-    Typing { space: Id, channel: Ch, user: Id },
+    Typing { space: Id, channel: Ch, user: Id, on: bool },
     Presence { space: Id },
     Synced { space: Id, count: usize },
     Call { space: Id },
@@ -176,6 +182,10 @@ struct Page {
     rooms: BTreeMap<Ch, String>,
 }
 
+/// A member's device here (said `Here`, or answered one) or `Gone`, when
+/// it said so (older news changes nothing), and when we heard it.
+type Seen = (bool, u64, Instant);
+
 /// A member's call (or none), its device, and when it was said.
 type Said = (Option<Ch>, EndpointId, u64);
 
@@ -185,9 +195,7 @@ pub struct Space {
     book: Mutex<Book>,
     tx: Mutex<Option<GossipSender>>,
     nbrs: Mutex<HashSet<EndpointId>>,
-    // Per member's device: here (said `Here`, or answered one) or `Gone`,
-    // and when it said so last: older news changes nothing.
-    seen: Mutex<HashMap<(Id, EndpointId), (bool, u64)>>,
+    seen: Mutex<HashMap<(Id, EndpointId), Seen>>,
     // Live ops already taken, so none is taken twice.
     heard: Mutex<HashMap<Id, Instant>>,
     calls: Mutex<HashMap<Id, Said>>,
@@ -536,6 +544,12 @@ pub struct Node {
     events: broadcast::Sender<Event>,
     clock: AtomicU64,
     invisible: AtomicBool,
+    // Last input, last `Here` said, and away (said `Gone` for idling).
+    input: Mutex<Instant>,
+    said: Mutex<Instant>,
+    away: AtomicBool,
+    // Where we said we type, and when.
+    typing: Mutex<Option<(Id, Ch, Instant)>>,
     serve: Option<[u8; 16]>,
     big: Option<String>,
     files: FsStore,
@@ -818,6 +832,10 @@ impl Node {
             lookup,
             spaces: RwLock::default(),
             invisible: AtomicBool::new(local.invisible),
+            input: Mutex::new(Instant::now()),
+            said: Mutex::new(Instant::now()),
+            away: AtomicBool::new(false),
+            typing: Mutex::default(),
             local: Mutex::new(local),
             prefs: Mutex::new(prefs),
             closed: Mutex::new(closed),
@@ -2072,9 +2090,42 @@ impl Node {
         Ok(())
     }
 
-    pub async fn typing(&self, id: &Id, channel: Ch) {
-        if let Ok(sp) = self.get(id) {
+    /// Typing in `channel` (`on`), or the input empty again: said once
+    /// each way (and again only after `TYPING` of more typing).
+    pub async fn typing(&self, id: &Id, channel: Ch, on: bool) {
+        let t = |(i, c, at): (Id, Ch, Instant)| {
+            (i, c) == (*id, channel) && at.elapsed() < TYPING
+        };
+        let was = {
+            let mut cur = lock(&self.typing);
+            if on && cur.is_some_and(t) || !on && cur.is_none() {
+                return;
+            }
+            let was = cur.take();
+            *cur = on.then(|| (*id, channel, Instant::now()));
+            was
+        };
+        // Elsewhere before, or done: stopped there.
+        if let Some((i, c, _)) =
+            was.filter(|w| !on || (w.0, w.1) != (*id, channel))
+            && let Ok(sp) = self.get(&i)
+        {
+            self.signal(&sp, Op::Typed { channel: c }).await;
+        }
+        if let (true, Ok(sp)) = (on, self.get(id)) {
             self.signal(&sp, Op::Typing { channel }).await;
+        }
+    }
+
+    /// The user did something: back from away (`Here`), or, in use, `Here`
+    /// again once `AWAY` has passed, so nobody takes us for gone.
+    pub async fn active(&self) {
+        *lock(&self.input) = Instant::now();
+        let back = self.away.swap(false, Relaxed);
+        if back || lock(&self.said).elapsed() > AWAY {
+            for sp in self.all() {
+                self.here(&sp).await;
+            }
         }
     }
 
@@ -3326,7 +3377,7 @@ impl Node {
             let was = seen.get(&who).copied();
             let fresh = was.is_none_or(|w| w.1 < s.ts);
             if fresh {
-                seen.insert(who, (here, s.ts));
+                seen.insert(who, (here, s.ts, Instant::now()));
             }
             fresh && was.is_some_and(|w| w.0) != here
         };
@@ -3339,9 +3390,9 @@ impl Node {
             self.said(sp, (s.author, s.device, s.ts), None, true);
         }
         match s.op {
-            Op::Typing { channel } => {
-                let user = s.author;
-                self.emit(Event::Typing { space: sp.id, channel, user });
+            Op::Typing { channel } | Op::Typed { channel } => {
+                let (user, on) = (s.author, matches!(s.op, Op::Typing { .. }));
+                self.emit(Event::Typing { space: sp.id, channel, user, on });
             }
             // New here, or back from sleep: answered once with our call
             // (none, mostly), which says we are here without asking back.
@@ -3405,9 +3456,10 @@ impl Node {
     /// Here (a state change: started, back, another network): one `Here`,
     /// and our call, if any, for whoever missed it.
     async fn here(&self, sp: &Space) {
-        if self.get(&sp.id).is_err() {
-            return; // shutting down
+        if self.get(&sp.id).is_err() || self.away.load(Relaxed) {
+            return; // shutting down, or away
         }
+        *lock(&self.said) = Instant::now();
         self.signal(sp, Op::Here).await;
         if let Some((_, ch)) = self.in_call().filter(|c| c.0 == sp.id) {
             self.signal(sp, Op::Call { channel: Some(ch) }).await;
@@ -3580,9 +3632,9 @@ impl reqwest::dns::Resolve for Public {
 }
 
 /// Local, sending only what changed: a late tick means we slept (so, as
-/// any state change, `resume`); catching up once as we start; our storage
-/// nodes named where we became admin. Presence and new ops ride on state
-/// changes and gossip, never on a timer.
+/// any state change, `resume`); idle past `AWAY`, away (`Gone`, once); a
+/// device unheard from twice that long, gone; catching up once as we
+/// start; our storage nodes named where we became admin.
 async fn heartbeat(n: Weak<Node>) {
     let mut t = tokio::time::interval(BEAT);
     t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -3594,7 +3646,30 @@ async fn heartbeat(n: Weak<Node>) {
             n.resume().await;
         }
         last = now();
+        // In a call is in use.
+        if n.in_call().is_some() {
+            n.active().await;
+        }
+        if lock(&n.input).elapsed() > AWAY && !n.away.swap(true, Relaxed) {
+            for sp in n.all() {
+                n.signal(&sp, Op::Gone).await;
+            }
+        }
         for sp in n.all() {
+            let dead: Vec<_> = lock(&sp.seen)
+                .iter_mut()
+                .filter(|s| s.1.0 && s.1.2.elapsed() > 2 * AWAY)
+                .map(|((u, d), s)| {
+                    s.0 = false;
+                    (*u, *d, s.1 + 1)
+                })
+                .collect();
+            for &w in &dead {
+                n.said(&sp, w, None, true);
+            }
+            if !dead.is_empty() {
+                n.emit(Event::Presence { space: sp.id });
+            }
             if i == 0 {
                 n.bootstrap(&sp).iter().take(3).for_each(|p| n.sync(&sp, *p));
             }

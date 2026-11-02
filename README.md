@@ -24,8 +24,11 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
   computer*, or `install.sh … | sh -s -- --server`.
 - **NixOS**: `inputs.irch.url = "github:cab-ucf/irch";` and
   `irch.nixosModules.default` among the modules: the app and a storage
-  node, kept up to date (checked against irch's key, built by Nix).
-  `services.irch.enable = false;` leaves the node out.
+  node, kept up to date (checked against irch's key, built by Nix; the
+  newer of the latest release and the flake's own runs).
+  `services.irch.enable = false;` leaves the node out (a laptop: keep it
+  on a computer that is always on). Sway: `exec irch-app --hidden` in its
+  config (it skips XDG autostart) and a tray in the bar (waybar's).
 - **From source**: `cargo run --release -p irch` (terminal, `--serve` for a
   storage node); `cd app && cargo tauri dev` or
   `cargo tauri android build --apk`; on a Mac, `cargo tauri ios init`,
@@ -123,8 +126,8 @@ space = a grow-only set of envs;   state = a deterministic fold of it
 - **Voice messages are Opus in Ogg**, played by decoding them in the app:
   the same in every web view, seekable, the right length.
 - **Sync** compares per-day fingerprints, then sends only missing envs.
-- **Phones sleep, holding nothing open.** Out of sight a minute, the
-  node stops. Whoever writes or calls rings each member's phone with the
+- **Phones and desktops sleep, holding nothing open.** Out of sight a
+  minute (a desktop: with a storage node pushing to it), the node stops. Whoever writes or calls rings each member's phone with the
   sealed op itself, and the phone shows it from a phonebook its node left
   (each space's key, names, levels) and keeps it for the node to fold
   later: a wake starts no node and opens no connection. Android phones
@@ -141,11 +144,14 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   lands. The push server keeps a ring for a phone that is off a day;
   storage nodes and members keep everything, synced when irch opens.
 - **Traffic is one op per state change.** A device says `Here` as it
-  joins a space's mesh and `Gone` as it leaves; each device already there
-  answers once with its call (none, mostly). A call is said as it starts.
-  No presence, call or sync rides on a timer; idle links keep alive every
-  25 s only while irch runs, and a sleeping phone holds irpush's socket
-  alone.
+  joins a space's mesh and `Gone` as it leaves or idles 10 minutes; each
+  device already there answers once with its call (none, mostly); in use,
+  it says `Here` again at most every 10 minutes, and others drop a device
+  unheard from 20. Typing is said as the input fills and as it empties.
+  A call is said as it starts, and a ring for one starts the node at once,
+  so it connects as it is answered.
+  Idle links keep alive every 25 s only while irch runs; asleep, a device
+  holds irpush's socket alone.
 
 | network | terminal (app env) | who else is involved |
 |---|---|---|
@@ -169,7 +175,7 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   irpush's relay, when and the phone's address. Doorbell codes are per
   space and die with a rekey.
 - Presence is said, not polled: a device that vanishes without `Gone`
-  (its battery dies) looks here until it is back.
+  (its battery dies) looks here up to 20 minutes.
 - Call frames reach the system web view's video decoders.
 - Calls are for a handful of people; Macs and iPhones need WebKit 26.
 - An iPhone in the background is not told of messages: Apple's push is a

@@ -302,6 +302,14 @@ async fn told(
         )
     {}
     let notices = crate::alerts(&n, false);
+    // Ringing: up until it is answered (in sight) or ends.
+    let ringing = || n.spaces().iter().any(|s| !n.calls(s).is_empty());
+    for _ in 0..45 {
+        if !ringing() || crate::FG.load(SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
     crate::nap().await;
     Ok(notices)
 }
@@ -410,6 +418,8 @@ fn shown(dir: &std::path::Path, news: News) -> Shown {
         return Shown::default();
     }
     let (n, catch) = Node::woken(dir, &news);
+    // A call: the node starts as it rings, so it connects as it is answered.
+    let catch = catch || n.as_ref().is_some_and(|x| x.ring);
     if catch {
         NEWS.lock().unwrap_or_else(|e| e.into_inner()).push(news);
     }

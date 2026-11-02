@@ -42,10 +42,15 @@ pub enum Call {
         space: Id,
         channel: Ch,
     },
+    /// Typing; with `stop`, the input is empty again.
     Typing {
         space: Id,
         channel: Ch,
+        #[serde(default)]
+        stop: bool,
     },
+    /// The user did something: here (away after `AWAY` without).
+    Active,
     Create {
         name: String,
     },
@@ -250,8 +255,9 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
         Call::MarkRead { space, channel } => {
             json!(n.mark_read(&space, &channel))
         }
-        Call::Typing { space, channel } => {
-            json!(n.typing(&space, channel).await)
+        Call::Active => json!(n.active().await),
+        Call::Typing { space, channel, stop } => {
+            json!(n.typing(&space, channel, !stop).await)
         }
         Call::Create { name } => json!(n.create(&name).await?),
         Call::Join { code } => json!(n.join(&code).await?),

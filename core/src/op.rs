@@ -61,6 +61,8 @@ pub enum Op {
     Preview { target: Id, link: Link },
     // Read up to `ts` in `channel` (a DM's: its sender's ticks).
     Read { channel: Ch, ts: u64 },
+    // Stopped typing in `channel`: its input is empty (live).
+    Typed { channel: Ch },
 }
 
 /// A link's preview, made by its sender.
@@ -113,6 +115,7 @@ impl Op {
         matches!(
             self,
             Op::Typing { .. }
+                | Op::Typed { .. }
                 | Op::Here
                 | Op::Call { .. }
                 | Op::Gone

@@ -122,21 +122,23 @@ async fn join_sync_and_live() {
     });
     assert_eq!(names.unwrap(), ["a", "b"]);
 
-    // Live, so said again while it lasts, as typing is: one said before
-    // gossip joins them reaches nobody.
+    // Typing is said as it starts and as the input empties, once each; one
+    // said before gossip joins them reaches nobody, so start over until heard.
     until("neighbors", || a.peers(&id) > 0 && b.peers(&id) > 0).await;
     let mut ev = b.subscribe();
+    let mut heard = async |on: bool| loop {
+        if let Ok(Event::Typing { user, on: o, .. }) = ev.recv().await
+            && o == on
+        {
+            return user;
+        }
+    };
     let typing = async {
         loop {
-            a.typing(&id, ch).await;
-            let heard = tokio::time::timeout(Duration::from_secs(1), async {
-                loop {
-                    if let Ok(Event::Typing { user, .. }) = ev.recv().await {
-                        return user;
-                    }
-                }
-            });
-            if let Ok(user) = heard.await {
+            a.typing(&id, ch, false).await;
+            a.typing(&id, ch, true).await;
+            let one = Duration::from_secs(1);
+            if let Ok(user) = tokio::time::timeout(one, heard(true)).await {
                 return user;
             }
         }
@@ -144,6 +146,11 @@ async fn join_sync_and_live() {
     let who =
         tokio::time::timeout(Duration::from_secs(10), typing).await.unwrap();
     assert_eq!(who, a.id());
+    a.typing(&id, ch, true).await; // said already: nothing goes
+    a.typing(&id, ch, false).await;
+    let ten = Duration::from_secs(10);
+    let stopped = tokio::time::timeout(ten, heard(false)).await.unwrap();
+    assert_eq!(stopped, a.id(), "and stopped, once the input is empty");
     let edit = Op::Edit { target: hello, text: Some("hello!".into()) };
     assert!(b.publish(&id, edit.clone()).await.is_ok(), "anyone may send it");
     a.publish(&id, edit).await.unwrap();

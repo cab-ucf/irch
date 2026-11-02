@@ -360,7 +360,7 @@ function wav(frames, rate) {
 const S = {
   me: null, spaces: [], members: [], msgs: [], sid: null, ch: null,
   limit: 50, more: true, loading: false, reply: null, editing: null,
-  newFrom: null, unreadAtOpen: 0, stick: false, lastTyping: 0, files: [],
+  newFrom: null, unreadAtOpen: 0, stick: false, files: [],
   typing: new Map(), // "space|channel" -> Map(user -> expiry)
   thread: null, // open, or last open
 };
@@ -2965,6 +2965,22 @@ function typeMode() {
   $("input").focus({ preventScroll: true });
 }
 
+/** Typing, or the input empty again: the node says each once. */
+function typed() {
+  const t = $("input").value, s = cur(), ch = chan();
+  const stop = !t.trim() || t.startsWith("/");
+  if (s && ch) quiet(rpc("typing", { space: s.id, channel: ch.id, stop }));
+}
+
+/** In use (keys, clicks): told at most every 30 s; the node says `Here`
+ *  only coming back, or after ten minutes. */
+let acted = 0;
+function active() {
+  if (Date.now() - acted < 30e3) return;
+  acted = Date.now();
+  quiet(rpc("active"));
+}
+
 async function send() {
   const input = $("input");
   const text = input.value.trim();
@@ -2975,6 +2991,7 @@ async function send() {
   if (cmd && SLASH[cmd[1]]) {
     input.value = "";
     autosize(input);
+    typed();
     return quiet(Promise.resolve(SLASH[cmd[1]](cmd[2].trim())));
   }
   if ((!text && !files.length) || !s || !ch) return;
@@ -2985,7 +3002,7 @@ async function send() {
   renderFilesBar();
   autosize(input);
   cancelReply();
-  S.lastTyping = 0;
+  typed();
   S.stick = true;
   try {
     const op = { Post: { channel: ch.id, text, reply, files } };
@@ -3112,13 +3129,10 @@ function wire() {
   input.addEventListener("input", () => {
     autosize(input);
     store.set(draft(), input.value);
-    const s = cur();
-    const ch = chan();
-    if (input.value.trim() && s && ch && Date.now() - S.lastTyping > 4000) {
-      S.lastTyping = Date.now();
-      quiet(rpc("typing", { space: s.id, channel: ch.id }));
-    }
+    typed();
   });
+  addEventListener("keydown", active, true);
+  addEventListener("pointerdown", active, true);
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
@@ -3230,11 +3244,13 @@ async function start() {
     } else if (e.t === "call") {
       schedule("side");
     } else if (e.t === "typing" && !isMe(e.user)) {
+      // Said once each way; a stop lost, it fades in a minute.
       const k = `${e.space}|${e.channel}`;
       if (!S.typing.has(k)) S.typing.set(k, new Map());
-      S.typing.get(k).set(e.user, Date.now() + 6000);
+      if (e.on) S.typing.get(k).set(e.user, Date.now() + 60e3);
+      else S.typing.get(k).delete(e.user);
       renderTyping();
-      setTimeout(renderTyping, 6100);
+      if (e.on) setTimeout(renderTyping, 60.1e3);
     }
   });
   await T.event.listen("open-url", ({ payload }) => openUrl(payload));

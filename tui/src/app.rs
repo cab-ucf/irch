@@ -149,7 +149,6 @@ struct App {
     status: String,
     notice: Option<String>,
     typing: Typing,
-    typed: Option<Instant>,
 }
 
 pub async fn run(n: Arc<Node>) -> Result<()> {
@@ -173,7 +172,6 @@ pub async fn run(n: Arc<Node>) -> Result<()> {
         status: "Esc for vim keys, ? or :help for all".into(),
         notice: None,
         typing: HashMap::new(),
-        typed: None,
     };
     let r = a.run(&mut t).await;
     ratatui::restore();
@@ -193,6 +191,7 @@ impl App {
             tokio::select! {
                 k = keys.next() => match k {
                     Some(Ok(Term::Key(k))) if k.kind == KeyEventKind::Press => {
+                        self.n.active().await;
                         if self.key(k).await {
                             return Ok(());
                         }
@@ -202,10 +201,13 @@ impl App {
                     _ => {}
                 },
                 e = events.recv() => match e {
-                    Ok(Event::Typing { space, channel, user }) => {
-                        let until = Instant::now() + Duration::from_secs(6);
-                        let at = (space, channel);
-                        self.typing.entry(at).or_default().insert(user, until);
+                    Ok(Event::Typing { space, channel, user, on }) => {
+                        let until = Instant::now() + Duration::from_secs(60);
+                        let t = self.typing.entry((space, channel)).or_default();
+                        match on {
+                            true => drop(t.insert(user, until)),
+                            false => drop(t.remove(&user)),
+                        }
                     }
                     Ok(Event::Synced { count, .. }) => {
                         self.status = format!("caught up on {count} ops");
@@ -354,6 +356,7 @@ impl App {
             KeyCode::Enter => {
                 let (line, draft) = (self.field.take(), self.draft);
                 self.draft = Draft::New;
+                self.typed().await;
                 let r = self.send(line.trim(), draft).await;
                 if r.is_err() {
                     (self.draft, self.field) = (draft, Field::default());
@@ -362,7 +365,7 @@ impl App {
                 return r;
             }
             _ => {
-                if self.field.key(k) && matches!(k.code, KeyCode::Char(_)) {
+                if self.field.key(k) {
                     self.typed().await;
                 }
             }
@@ -442,7 +445,7 @@ impl App {
         if let Draft::Thread(id) = draft {
             self.go(Some((s, Some(id.thread()))));
         }
-        (self.sel, self.typed) = (None, None);
+        self.sel = None;
         Ok(false)
     }
 
@@ -453,14 +456,12 @@ impl App {
         Ok(())
     }
 
+    /// Typing, or the field empty again: the node says each once.
     async fn typed(&mut self) {
-        let due = self.typed.is_none_or(|t| t.elapsed().as_secs() >= 4);
-        if let Some((s, Some(c))) = self.at
-            && due
-            && !self.field.text.starts_with('/')
-        {
-            self.typed = Some(Instant::now());
-            self.n.typing(&s, c).await;
+        let t = &self.field.text;
+        if let Some((s, Some(c))) = self.at {
+            let on = !t.trim().is_empty() && !t.starts_with('/');
+            self.n.typing(&s, c, on).await;
         }
     }
 
