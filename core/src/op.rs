@@ -219,6 +219,11 @@ impl Invite {
         Id(kdf("irch space", &[&self.owner.0, &self.nonce]))
     }
 
+    /// A contact card: a DM with its own owner, met in to start real ones.
+    pub fn card(&self) -> bool {
+        self.dm == Some(self.owner)
+    }
+
     pub fn encode(&self) -> String {
         code("join", self)
     }

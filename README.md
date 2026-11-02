@@ -69,8 +69,14 @@ with it, find it by themselves: no app setting, no build of your own.
   `?`; off in Settings), swipe gestures on phones.
 - The terminal client is modal like vim: counts, `gg`/`G`, `/` and `n`,
   `:` commands, `l`/`h` into and out of threads, `J`/`K` channels, `?`.
-- A DM closes (✕) and comes back with its next message; deleting it is
-  separate (its menu, or `:leave`).
+- A DM closes (✕) to a greyed, folded *Closed* list and comes back with
+  its next message; deleting it is separate (its menu, or `:leave`).
+- Contacts (the people icon by *Direct messages*): everyone from every
+  space and DM, most messaged first, searchable. *My contact code* (or
+  `:contact`) is a code or QR: whoever adds it can DM you, no space shared.
+- A deleted message can be undone for a few seconds (*Undo*, or `u`).
+- A call rings all of someone's devices; answered on one, the others
+  stop, and none of the caller's own ring.
 - Several profiles per device, linked devices (listed, with when each
   last wrote), invisible mode, private notifications, themes (Neon,
   Midnight, Nord, UCF, Light).

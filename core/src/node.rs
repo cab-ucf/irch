@@ -998,11 +998,15 @@ impl Node {
             }
             // Others' calls, each once while it lasts; not the one we are in.
             let calls = self.get(&id).map(|sp| self.callers(&sp, None));
-            for (_, ch, u) in calls.unwrap_or_default() {
+            let calls = calls.unwrap_or_default();
+            // Taken on another of ours: it rings here no more.
+            let ours: HashSet<Ch> =
+                calls.iter().filter(|c| c.2 == me).map(|c| c.1).collect();
+            for (_, ch, u) in calls {
                 let fresh = u != me && lock(&self.rang).insert((id, u, ch));
                 live.insert((id, u, ch));
                 let tell = level != Level::Off && (dm || level == Level::All);
-                if !fresh || !tell || self.in_call() == Some((id, ch)) {
+                if !fresh || !tell || ours.contains(&ch) {
                     continue;
                 }
                 // Named in any space we share: a new DM may lack their profile.
@@ -1681,6 +1685,13 @@ impl Node {
         if sp.id == self.own {
             self.reconcile().await;
         }
+        // A card we took: a DM with its owner, once their key is here.
+        let card = sp.inv.as_ref().filter(|i| i.card() && i.owner != me);
+        if let Some(o) = card.map(|i| i.owner)
+            && self.dms_with(&o).is_empty()
+        {
+            let _ = self.dm(&sp.id, &o).await;
+        }
         // A DM that another, the one both sides pick, replaced: put away.
         let peer = self.view(&sp.id, |s| s.peer(&me)).flatten();
         let pick = peer.and_then(|p| self.dm_of(&p));
@@ -1919,8 +1930,17 @@ impl Node {
     pub async fn leave(self: &Arc<Self>, id: &Id) -> Result<()> {
         ensure!(*id != self.own, "not a space");
         let own = self.get(&self.own)?;
-        self.post(&own, Op::Left { space: *id }).await?;
-        self.close(id);
+        // A DM deleted: their card goes too, or it would knock again.
+        let p = self.view(id, |s| s.peer(&self.id())).flatten();
+        let card =
+            |s: &Space| s.inv.as_ref().filter(|i| i.card()).map(|i| i.owner);
+        let cards =
+            self.all().into_iter().filter(|s| p.is_some() && card(s) == p);
+        let gone = cards.map(|s| s.id).chain([*id]).collect::<Vec<_>>();
+        for c in gone {
+            self.post(&own, Op::Left { space: c }).await?;
+            self.close(&c);
+        }
         // Its files stop being served from here.
         let mine = self.sharing().into_iter().filter(|f| f.1 == *id);
         for (h, ..) in mine.collect::<Vec<_>>() {
@@ -2038,7 +2058,31 @@ impl Node {
             })?;
             dm.then_some((sp, here))
         };
-        self.all().into_iter().filter_map(with).collect()
+        let card = |sp: &Arc<Space>| sp.inv.as_ref().is_some_and(Invite::card);
+        self.all().into_iter().filter(|s| !card(s)).filter_map(with).collect()
+    }
+
+    pub fn card(&self, id: &Id) -> bool {
+        self.get(id).is_ok_and(|s| s.inv.as_ref().is_some_and(Invite::card))
+    }
+
+    /// Ours to hand out: whoever joins it gets a DM with us.
+    pub async fn contact(self: &Arc<Self>) -> Result<String> {
+        let me = self.id();
+        let ours =
+            |s: &Arc<Space>| s.inv.as_ref().is_some_and(|i| i.owner == me);
+        let has = self.all().into_iter().find(|s| ours(s) && self.card(&s.id));
+        let id = match has {
+            Some(sp) => sp.id,
+            None => {
+                let inv = Invite::new(me, &self.name(), Some(me));
+                let (epoch, id) = (tag(&inv.key), self.enter(inv).await?);
+                let rekey = Op::Rekey { epoch, boxes: vec![] };
+                self.post(&self.get(&id)?, rekey).await?;
+                id
+            }
+        };
+        self.invite(&id).await
     }
 
     /// The DM both are in: of several, the lowest id, as both sides pick.
@@ -2120,10 +2164,15 @@ impl Node {
             // No devices here: the page's audio, as before.
             call.voice = v.inspect_err(|e| warn!("voice: {e:#}")).ok();
         }
+        let dev = self.ep.id();
+        let on = self.callers(&sp, Some(ch)).iter().any(|c| c.0 != dev);
         *lock(&self.call) = Some(call);
         let raw = self.signal(&sp, Op::Call { channel: Some(ch) }).await;
         self.emit(Event::Call { space: id });
-        self.wake(&id, raw); // sleeping phones: someone is calling
+        // Sleeping phones: someone is calling; one answering rings no one.
+        if !on {
+            self.wake(&id, raw);
+        }
         tokio::spawn(self.clone().ring(run));
         Ok(())
     }

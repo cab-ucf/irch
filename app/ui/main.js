@@ -363,6 +363,8 @@ const S = {
   newFrom: null, unreadAtOpen: 0, stick: false, lastTyping: 0, files: [],
   typing: new Map(), // "space|channel" -> Map(user -> expiry)
   thread: null, // open, or last open
+  gone: new Set(), // deleted here, not yet sent: undo meanwhile
+  undo: null,
 };
 
 const cur = () => S.spaces.find((s) => s.id === S.sid);
@@ -420,6 +422,11 @@ async function loadSidebar() {
   }
   if (!cur().channels.some((c) => c.id === S.thread?.parent)) S.thread = null;
   adopt();
+  const met = S.meet && S.spaces.find((x) => x.dm && x.with === S.meet);
+  if (met) {
+    S.meet = null;
+    return select(met.id);
+  }
   if (!chan() && cur().channels.length) return select(S.sid);
   renderSidebar();
   renderHeader();
@@ -513,6 +520,7 @@ function select(sid, ch) {
   S.sid = sid;
   const s = cur();
   if (s?.closed) quiet(call("hide", { space: sid, on: false }));
+  if (s) s.closed = false;
   if (sid && !s?.dm) store.set("sid", sid);
   const valid = (k) =>
     k && (s?.channels.some((x) => x.id === k) || k === S.thread?.id);
@@ -573,12 +581,22 @@ function renderSidebar() {
     h("button", { title: "Add a space (create or join)", onclick: addSpace },
       icon("plus")));
   const d = dms();
+  const shut = S.spaces.filter((s) => s.dm && s.closed && s.id !== S.sid);
+  const fold = store.get("fold.closed") !== "0";
   const anyone = S.spaces.some((s) => !s.dm);
   put($("channels"), S.spaces.filter((s) => !s.dm).map(spaceTree),
-    (anyone || d.length > 0) && [h("div", { class: "space dms" },
+    [h("div", { class: "space dms" },
       h("span", { class: "name" }, "Direct messages"),
+      h("button", { class: "gear", title: "Contacts", onclick: contacts },
+        icon("users")),
       anyone && h("button", { class: "gear", title: "Message someone",
-        onclick: () => quickSwitch("@") }, icon("plus"))), dmList()]);
+        onclick: () => quickSwitch("@") }, icon("plus"))), dmList(d),
+    shut.length > 0 && h("div", { class: "space shut" + (fold ? "" : " open"),
+      role: "button", tabindex: 0, onclick: () => {
+        store.set("fold.closed", fold ? "0" : "1");
+        renderSidebar();
+      } }, icon("chevron"), h("span", { class: "name" },
+      `Closed (${shut.length})`)), !fold && dmList(shut)]);
   renderUserPanel();
 }
 
@@ -604,9 +622,10 @@ function spaceTree(s) {
   open && channelList(s)];
 }
 
-function dmList() {
-  return dms().map((d) => h("div", {
+function dmList(list) {
+  return list.map((d) => h("div", {
     class: `channel dm${d.id === S.sid ? " active" : ""}` +
+      (d.closed && d.id !== S.sid ? " shut" : "") +
       (unread(d) && d.id !== S.sid ? " unread" : ""),
     onclick: () => select(d.id), role: "button", tabindex: 0,
     oncontextmenu: (e) => {
@@ -621,8 +640,8 @@ function dmList() {
     e.stopPropagation();
     callIn(d.id);
   } }, icon("ring")),
-  h("button", { class: "gear", title: "Close (kept; back with a new message)",
-    onclick: (e) => {
+  !d.closed && h("button", { class: "gear",
+    title: "Close (kept; back with a new message)", onclick: (e) => {
       e.stopPropagation();
       closeDm(d);
     } }, icon("x"))));
@@ -978,7 +997,9 @@ function incoming(sid, ch, who) {
   const late = setTimeout(() => $("modal").close(), 45e3);
   let seen = false;
   const gone = setInterval(() => {
-    if ((callOf(sid, ch)?.call ?? []).length) seen = true;
+    const ids = callOf(sid, ch)?.call ?? [];
+    if (ids.some(isMe)) $("modal").close(); // answered on another of ours
+    else if (ids.length) seen = true;
     else if (seen) $("modal").close();
   }, 2000);
   calling = modal((finish) => h("div", {},
@@ -1107,6 +1128,7 @@ function renderMessages(keepScroll) {
   const admin = !!cur()?.admin;
   let prev = null;
   for (const m of S.msgs) {
+    if (S.gone.has(m.id)) continue;
     const day = fmtDay(m.ts);
     const newDay = !prev || fmtDay(prev.ts) !== day;
     if (newDay) items.push({ k: "d" + day, sig: "", make: () => divider(day) });
@@ -1665,8 +1687,8 @@ function toolbar(m) {
       () => publish({ Pin: { target: m.id, on: !m.pinned } })),
     mine && tool("pencil", "Edit", () => startEdit(m)),
     (mine || cur()?.admin) &&
-      tool("trash", "Delete (hold Shift to skip confirmation)",
-        (e) => del(m, e), "danger"));
+      tool("trash", "Delete (Undo for a few seconds)", () => del(m),
+        "danger"));
 }
 
 async function toNotes(m) {
@@ -2122,9 +2144,11 @@ async function createFlow() {
   if (id) await open(id);
 }
 
-async function joinFlow() {
+async function joinFlow(card) {
   if (!(await named())) return;
-  let code = await ask({ title: "Join a space",
+  let code = await ask(card ? { title: "Add a contact",
+    sub: "Paste their contact code (Contacts › My contact code).",
+    label: "Contact code" } : { title: "Join a space",
     sub: "Paste an invite someone shared with you.", label: "Invite",
     placeholder: "irch:join:…", ok: "Join", maxLength: 8192, scan: true });
   if (code === SCAN) code = await scanQR();
@@ -2135,6 +2159,7 @@ async function joinFlow() {
 async function joinCode(code) {
   const p = await rpc("peek", { code }).catch(() => null);
   if (!p) return toast("That is not an irch invite", true);
+  if (p.card) return addCard(code, p);
   if (!p.joined) {
     const ok = await modal((finish) => h("div", {},
       h("div", { class: "m-body" }, h("h2", {}, `Join ${p.name || "a space"}?`),
@@ -2151,6 +2176,16 @@ async function joinCode(code) {
     await open(id);
     toast("Joined. History syncs as soon as a member is reachable.");
   }
+}
+
+async function addCard(code, p) {
+  if (isMe(p.owner)) return toast("That is your own contact code", true);
+  const d = S.spaces.find((x) => x.dm && x.with === p.owner);
+  if (d) return open(d.id);
+  if (!(await call("join", { code }).catch(() => null))) return;
+  S.meet = p.owner;
+  toast(`${p.name || "Contact"} added: your DM opens once they're reachable.`);
+  schedule("side");
 }
 
 async function linkFlow() {
@@ -2177,8 +2212,8 @@ async function open(id) {
   select(id);
 }
 
-async function startDm(user, ring) {
-  const id = await call("dm", { space: S.sid, user }).catch(() => null);
+async function startDm(user, ring, space = S.sid) {
+  const id = await call("dm", { space, user }).catch(() => null);
   if (id) await (ring ? open(id).then(() => callIn(id)) : open(id));
 }
 
@@ -2510,13 +2545,8 @@ function quickSwitch(start = "") {
   const all = S.spaces.flatMap((s) => s.channels.map((ch) => ({ s, ch })));
   const dmWith = new Set(S.spaces.filter((s) => s.dm).map((s) => s.with));
   let people = [], redraw = () => {};
-  Promise.all(S.spaces.filter((s) => !s.dm).map((s) =>
-    rpc("members", { space: s.id }).then((ms) => ms.map((m) => ({ s, m })),
-      () => []))).then((v) => {
-    const seen = new Set();
-    people = v.flat().filter(({ m }) => !isMe(m.id) &&
-      m.role !== "Banned" && !dmWith.has(m.id) &&
-      !seen.has(m.id) && seen.add(m.id));
+  everyone().then((v) => {
+    people = v.filter(({ m }) => !dmWith.has(m.id));
     redraw();
   });
   modal((finish) => {
@@ -2560,6 +2590,64 @@ function quickSwitch(start = "") {
       .catch(() => null);
     if (id) await open(id);
   });
+}
+
+/** Everyone we share a space with, once each: { s, m }. */
+async function everyone() {
+  const v = await Promise.all(S.spaces.filter((s) => !s.dm).map((s) =>
+    rpc("members", { space: s.id }).then((ms) => ms.map((m) => ({ s, m })),
+      () => [])));
+  const seen = new Set();
+  return v.flat().filter(({ m }) => !isMe(m.id) && m.role !== "Banned" &&
+    !seen.has(m.id) && seen.add(m.id));
+}
+
+/** Everyone from every space and DM; most messaged first. */
+async function contacts() {
+  const all = new Map(S.spaces.filter((s) => s.dm && s.with)
+    .map((d) => [d.with, { id: d.with, name: d.name, d }]));
+  for (const { s, m } of await everyone()) {
+    all.set(m.id, { id: m.id, name: m.name, ...all.get(m.id), s,
+      online: m.online });
+  }
+  const list = [...all.values()].sort((a, b) =>
+    (b.d?.count ?? 0) - (a.d?.count ?? 0) || a.name.localeCompare(b.name));
+  const x = await modal((finish) => {
+    const input = h("input", { type: "text", placeholder: "Search contacts" });
+    const rows = h("div", { class: "qs-list" });
+    const draw = () => {
+      const q = input.value.toLowerCase();
+      rows.replaceChildren(...list.filter((c) =>
+        c.name.toLowerCase().includes(q)).map((c) =>
+        h("button", { onclick: () => finish(c) },
+          avatar(c.id, c.name, "xs", c.online), h("span", {}, c.name),
+          h("small", {}, c.d?.count ? `${c.d.count} messages`
+            : c.s?.name ?? ""))));
+    };
+    input.addEventListener("input", draw);
+    input.addEventListener("keydown", (e) =>
+      e.key === "Enter" && rows.firstChild?.click());
+    draw();
+    return h("div", { class: "m-body" }, h("h2", {}, "Contacts"),
+      h("p", { class: "sub" }, "Everyone you share a space or DM with."),
+      h("div", { class: "row" },
+        h("button", { class: "btn", onclick: () => finish("card") },
+          "My contact code"),
+        h("button", { class: "btn grey", onclick: () => finish("add") },
+          "Add a contact")), input, rows);
+  });
+  if (x === "card") return myCard();
+  if (x === "add") return joinFlow(true);
+  if (x) await (x.d ? open(x.d.id) : startDm(x.id, false, x.s.id));
+}
+
+async function myCard() {
+  if (!(await named())) return;
+  const code = await call("contact").catch(() => null);
+  if (code) showCode({ title: "Your contact code",
+    label: "Send it, or have them scan it", code,
+    note: "Whoever adds it can message you, with no space in common. " +
+      "Everyone who adds it sees the others' names." });
 }
 
 /** `text` with the words of `q` marked. */
@@ -2639,14 +2727,24 @@ function searchFlow(scope = inThread() || chan() ? "room" : "space") {
 const publish = (op) => quiet(call("publish", { space: cur().id, op }));
 const react = (m, emoji, on) => publish({ React: { target: m.id, emoji, on } });
 
-async function del(m, e) {
-  if (!e?.shiftKey) {
-    const ok = await confirmBox({ title: "Delete Message",
-      sub: "Are you sure you want to delete this message? Tip: hold Shift " +
-        "when clicking delete to skip this.", ok: "Delete" });
-    if (!ok) return;
-  }
-  publish({ Edit: { target: m.id, text: null } });
+/** Gone here at once, sent a few seconds later: until then, Undo (u). */
+function del(m) {
+  const op = { space: cur().id, op: { Edit: { target: m.id, text: null } } };
+  const end = (send) => {
+    clearTimeout(timer);
+    t.remove();
+    S.gone.delete(m.id);
+    if (S.undo === undo) S.undo = null;
+    if (send) quiet(call("publish", op));
+    renderMessages(true);
+  };
+  const undo = () => end(false);
+  const timer = setTimeout(() => end(true), 6000);
+  const t = toast(h("span", {}, "Message deleted ",
+    h("button", { class: "btn link", onclick: undo }, "Undo")), false, 6000);
+  S.gone.add(m.id);
+  S.undo = undo;
+  renderMessages(true);
 }
 
 function startReply(m) {
@@ -2892,7 +2990,7 @@ const KEYS = [
   ["l, Enter / h", "into its thread / back out"],
   ["J / K", "next / previous channel"],
   ["r", "reply"], ["t", "reply in its thread"], ["e", "edit (yours)"],
-  ["dd", "delete"], ["y", "copy its text"], ["p", "pin"], ["+", "react"],
+  ["dd", "delete (u undoes)"], ["y", "copy its text"], ["p", "pin"], ["+", "react"],
   ["n", "add to notes"], ["x", "close this DM"], ["/", "search"],
   [":", "a /command"], ["i, a, o", "back to typing"],
   ["Ctrl+K", "jump to a channel or DM; @ for anyone to message"],
@@ -2933,6 +3031,7 @@ function vim(e) {
     e: () => m && isMe(m.author) && (typeMode(), startEdit(m)),
     d: () => m && last === "d" && (isMe(m.author) || cur()?.admin) && del(m),
     y: () => m && copy(m.text, "Copied"),
+    u: () => S.undo?.(),
     "+": () => m && picker(row(), (em) => react(m, em, true)),
     n: () => m && toNotes(m),
     p: () => m && publish({ Pin: { target: m.id, on: !m.pinned } }),
