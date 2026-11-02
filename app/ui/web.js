@@ -38,6 +38,8 @@
   // Open while wanted; cut, again after a pause (the node may restart).
   const streams = new Map();
   function stream(path, each) {
+    const old = streams.get(path); // a new call's tune replaces the last
+    if (old) old.dead = true, old.stop?.();
     const s = { each, stop: null };
     streams.set(path, s);
     const run = async () => {
@@ -48,9 +50,9 @@
         if (r.status === 403) return; // a wrong token stays wrong
         if (r.ok) for await (const f of frames(r.body.getReader())) each(f);
       } catch {}
-      if (c.signal.aborted) return;
+      if (c.signal.aborted || s.dead) return;
       s.stop = null;
-      setTimeout(() => !s.stop && wanted() && run(), 3e3);
+      setTimeout(() => !s.stop && !s.dead && wanted() && run(), 3e3);
     };
     s.run = run;
     if (wanted()) run();
@@ -61,7 +63,7 @@
   const wanted = () => !document.hidden || Date.now() - sent < 5e3;
   document.addEventListener("visibilitychange", () => {
     for (const s of streams.values()) {
-      if (wanted() && !s.stop) s.run();
+      if (wanted() && !s.stop && !s.dead) s.run();
       else if (!wanted()) s.stop?.(), s.stop = null;
     }
   });
