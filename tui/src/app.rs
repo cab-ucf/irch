@@ -28,6 +28,7 @@ x         close a DM (kept; back with its next message)
 :         a command   ?  this   esc q  close this   ZZ :q  quit
 
 :create NAME  :join CODE  :invite  :dm USER  :b NAME (go)  :nick NAME
+:contact      your code: whoever joins it can DM you
 :leave        leave a space; in a DM, delete it from your devices
 :close        put a DM away, kept     :invisible  no presence or typing
 :channel NAME  :rmchannel  :rename NAME  :room NAME (a named thread)
@@ -777,6 +778,14 @@ impl App {
                 osc52(&format!("irch://open/{s}/{c}{}", m.unwrap_or_default()));
                 self.status = "its link, copied if your terminal allows".into();
             }
+            "contact" => {
+                let code = n.contact().await?;
+                osc52(&code);
+                self.notice = Some(format!(
+                    "Your contact code, copied if your terminal allows. \
+                     Whoever :joins it gets a DM with you.\n\n{code}"
+                ));
+            }
             "link" => {
                 self.notice = Some(format!(
                     "Start irch on your other device with\n\n  irch --link \
@@ -872,8 +881,9 @@ impl App {
         let mut v = vec![];
         let week = irch_core::now().saturating_sub(7 * 86_400_000);
         for s in self.n.spaces() {
-            if self.n.hidden(&s) && self.at.map(|a| a.0) != Some(s) {
-                continue; // a closed DM
+            let at = self.at.map(|a| a.0) == Some(s);
+            if self.n.card(&s) || self.n.hidden(&s) && !at {
+                continue; // a contact card, or a closed DM
             }
             let rooms = self.n.view(&s, |st| (st.channels(), st.threads()));
             let (chans, threads) = rooms.unwrap_or_default();

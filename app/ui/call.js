@@ -90,13 +90,15 @@ export async function join(space, channel, rpc) {
   }
   // A phone's call: the microphone allowed, the screen on.
   await quiet(core.invoke("in_call", { on: true }));
+  // On screen at once, "Calling…"; a failure below hangs up.
+  call.on = { space, channel };
+  call.since = Date.now();
+  call.met = false;
+  call.changed();
   await rpc("ring", { space, channel });
   // The core's own voice where it has one: its echo canceller hears what
   // plays, so both sides speak at once. Else the web view's, as before.
   call.native = !!(await rpc("me")).call?.native;
-  call.on = { space, channel };
-  call.since = Date.now();
-  call.met = false;
   call.changed();
   decodes ??= await decodable();
   sayCodecs(); // and again as each peer appears, not on a timer

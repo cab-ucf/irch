@@ -85,6 +85,8 @@ pub enum Call {
         user: Id,
     },
     LinkCode,
+    /// Ours to hand out: whoever takes it can DM us.
+    Contact,
     AddStorage {
         code: String,
     },
@@ -269,6 +271,7 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
         Call::Rekey { space } => json!(n.rekey(&space).await?),
         Call::Dm { space, user } => json!(n.dm(&space, &user).await?),
         Call::LinkCode => json!(n.link_code().await),
+        Call::Contact => json!(n.contact().await?),
         Call::AddStorage { code } => json!(n.add_storage(&code).await?),
         Call::Store { space, node, on } => {
             json!(n.store(&space, &node, on).await?)
@@ -292,7 +295,7 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
                 n.view(s, |s| s.profile(&i.owner).map(str::to_string))?
             });
             json!({ "space": i.id(), "name": i.name, "owner": i.owner,
-                "who": who, "dm": i.dm.is_some(),
+                "who": who, "dm": i.dm.is_some(), "card": i.card(),
                 "joined": n.spaces().contains(&i.id()) })
         }
         Call::Devices => {
@@ -351,6 +354,9 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
 }
 
 fn space(n: &Node, id: &Id) -> Option<Value> {
+    if n.card(id) {
+        return None;
+    }
     let me = n.id();
     let v = n.view(id, |s| {
         // A DM is named by who else is in it (members: no cost elsewhere).
@@ -370,9 +376,10 @@ fn space(n: &Node, id: &Id) -> Option<Value> {
             s.channels(),
             with,
             s.threads(),
+            s.count(&crate::state::DM),
         )
     })?;
-    let (name, dm, owner, admin, chans, with, threads) = v;
+    let (name, dm, owner, admin, chans, with, threads, count) = v;
     let mut calls = n.calls(id);
     let thread = |t: &crate::Thread| {
         let (unread, mentions) = n.unread(id, &t.id);
@@ -403,6 +410,7 @@ fn space(n: &Node, id: &Id) -> Option<Value> {
     let reach = with.and_then(|w| n.reach(id, &w));
     Some(json!({
         "id": id, "name": name, "dm": dm, "with": with, "owner": owner,
+        "count": count,
         "admin": admin, "peers": peers, "locked": locked, "channels": channels,
         "near": n.neighbors(id).into_iter()
             .map(|(d, who)| (d.fmt_short().to_string(), who))

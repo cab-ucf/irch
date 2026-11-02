@@ -277,6 +277,50 @@ async fn direct_messages() {
     assert!(!a.hidden(&dm), "back when opened");
 }
 
+/// A contact code: a DM with no space in common, and gone with the DM.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_contact_code_starts_a_dm() {
+    let (a, b) = (node("a").await, node("b").await);
+    let code = a.contact().await.unwrap();
+    assert_eq!(a.contact().await.unwrap().len(), code.len(), "one card");
+    let card = b.join(&code).await.unwrap();
+    let dm = || b.spaces().into_iter().find(|s| !b.card(s) && *s != card);
+    until("b has a DM", || dm().is_some()).await;
+    let dm = dm().unwrap();
+    say(&b, &dm, irch_core::state::DM, "found you").await;
+    until("a got it", || {
+        texts(&a, &dm, &irch_core::state::DM) == ["found you"]
+    })
+    .await;
+    b.leave(&dm).await.unwrap();
+    assert!(!b.spaces().contains(&card), "the card went with it");
+}
+
+/// Answered elsewhere, a call rings none of the caller's own devices.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_rings_none_of_the_callers_devices() {
+    let (a, b) = (node("a").await, node("b").await);
+    let a2 = start(&dir("a2"), "phone", Some(a.link_code().await), false).await;
+    let id = a.create("hub").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let keyed = || a.view(&id, |s| s.kem(&b.id()).is_some()) == Some(true);
+    until("b's key", keyed).await;
+    let dm = a.dm(&id, &b.id()).await.unwrap();
+    say(&a, &dm, irch_core::state::DM, "psst").await;
+    until("all in the DM", || {
+        b.spaces().contains(&dm) && a2.spaces().contains(&dm)
+    })
+    .await;
+    a2.notices();
+    a.call(Some((dm, irch_core::state::DM))).await.unwrap();
+    until("a2 sees a's call", || !a2.calls(&dm).is_empty()).await;
+    b.call(Some((dm, irch_core::state::DM))).await.unwrap();
+    let both = || a2.calls(&dm).values().flatten().count() == 2;
+    until("a2 sees b answer", both).await;
+    let rings = a2.notices().into_iter().filter(|x| x.ring).count();
+    assert_eq!(rings, 0, "a's phone stays quiet");
+}
+
 /// A DM's very first message is news, though it came before b was in it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_dm_notifies() {

@@ -1205,6 +1205,8 @@ dialog .m-foot .spacer { flex: 1; }
 
 /* ===== irch additions ===== */
 .channel.dm { gap: 8px; }
+.channel.dm.shut { opacity: 0.5; }
+.space.shut { padding-left: 20px; }
 .channel.dm .avatar.xs { width: 24px; height: 24px; font-size: 12px; }
 .avatar.big { width: 68px; height: 68px; font-size: 30px; margin-bottom: 8px; }
 #chat-header .title .at { color: var(--muted); font-size: 20px; }

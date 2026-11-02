@@ -740,6 +740,10 @@ impl State {
         self.labels.get(d).map(String::as_str)
     }
 
+    pub fn count(&self, ch: &Ch) -> usize {
+        self.posts.get(ch).map_or(0, BTreeMap::len)
+    }
+
     pub fn latest(&self, ch: &Ch) -> Option<u64> {
         Some(self.posts.get(ch)?.last_key_value()?.0.0)
     }
