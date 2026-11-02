@@ -61,6 +61,8 @@ pub enum Op {
     Preview { target: Id, link: Link },
     // Read up to `ts` in `channel` (a DM's: its sender's ticks).
     Read { channel: Ch, ts: u64 },
+    // A DM's news landed on this device, up to `ts` (live): ✓✓ there.
+    Got { ts: u64 },
 }
 
 /// A link's preview, made by its sender.
@@ -117,6 +119,7 @@ impl Op {
                 | Op::Call { .. }
                 | Op::Gone
                 | Op::Ringing { .. }
+                | Op::Got { .. }
         )
     }
 }

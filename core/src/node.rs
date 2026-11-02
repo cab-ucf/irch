@@ -1318,7 +1318,9 @@ impl Node {
                         let r = crate::wake::ring(&n.ep, &url, &id, raw);
                         match r.await {
                             // Their phone has it: woken, it tells or rings.
-                            Ok(()) => return n.reach_device(&id, &d, ts),
+                            Ok(true) => return n.reach_device(&id, &d, ts),
+                            // Held for Google: on its way, not there yet.
+                            Ok(false) => return,
                             Err(e) => warn!("wake: {e:#}"),
                         }
                     }
@@ -1640,6 +1642,14 @@ impl Node {
         if new > 0 {
             self.emit(Event::Changed { space: sp.id });
             tokio::spawn(self.clone().effects(sp.clone()));
+            // A DM's news from them, here: they see ✓✓.
+            let dm = lock(&sp.book).st.dm.is_some();
+            if dm && !mine {
+                let (n, sp) = (self.clone(), sp.clone());
+                tokio::spawn(async move {
+                    n.signal(&sp, Op::Got { ts: now() }).await;
+                });
+            }
         }
         new
     }
@@ -1783,7 +1793,6 @@ impl Node {
         match sp.tx().filter(|_| raw.len() <= GOSSIP_MAX) {
             Some(tx) => {
                 drop(tx.broadcast(raw.clone().into()).await);
-                self.gossiped(sp, ts);
             }
             None => sp.nbrs().into_iter().for_each(|p| self.sync(sp, p)),
         }
@@ -2076,7 +2085,6 @@ impl Node {
         let raw = self.seal(sp, &key, ts, op).1;
         if let Some(tx) = sp.tx() {
             let _ = tx.broadcast(raw.clone().into()).await;
-            self.gossiped(sp, ts);
         }
         Some(raw)
     }
@@ -3136,11 +3144,6 @@ impl Node {
         }
     }
 
-    /// Gossiped: the devices next to us have it, so their owners do.
-    fn gossiped(&self, sp: &Space, ts: u64) {
-        sp.nbrs().iter().for_each(|d| self.reach_device(&sp.id, d, ts));
-    }
-
     /// A device of someone's has our ops here up to `ts`.
     fn reach_device(&self, id: &Id, d: &EndpointId, ts: u64) {
         let Ok(sp) = self.get(id) else { return };
@@ -3327,6 +3330,16 @@ impl Node {
                     let (n, sp) = (self.clone(), sp.clone());
                     let call = Op::Call { channel: Some(ch) };
                     tokio::spawn(async move { n.signal(&sp, call).await });
+                }
+            }
+            // Their device has our DM's news up to `ts`: proof of it.
+            Op::Got { ts } => {
+                let mut r = lock(&sp.reach);
+                let at = r.entry(s.author).or_default();
+                if *at < ts.min(s.ts) {
+                    *at = ts.min(s.ts);
+                    drop(r);
+                    self.emit(Event::Changed { space: sp.id });
                 }
             }
             Op::Ringing { channel } => {
