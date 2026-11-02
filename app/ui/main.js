@@ -1513,7 +1513,8 @@ const fileChip = (f) => h("div", { class: "file-chip" }, icon("file"),
 // put away, nothing is said.
 async function saveFile(f) {
   const at = await invoke("save", { space: S.sid, file: f })
-    .catch((e) => toast(String(e), true));
+    .catch((e) => toast(`${f.name}: ${e}`, true, 8000));
+  S.saving?.remove();
   if (at) toast(ios ? "Saved: Files › irch" : `Saved: ${at}`);
 }
 
@@ -3353,7 +3354,11 @@ async function start() {
     }
   });
   await T.event.listen("open-url", ({ payload }) => openUrl(payload));
-  await T.event.listen("saving", ({ payload }) => toast(`Saving ${payload}…`));
+  // Up while it fetches, however long: gone once saved or failed.
+  await T.event.listen("saving", ({ payload }) => {
+    S.saving?.remove();
+    S.saving = toast(`Saving ${payload}…`, false, 600e3);
+  });
   await T.event.listen("alert", ({ payload: a }) => {
     if (a.ring) return incoming(a.space, a.room, a.title);
     if (!android && document.hasFocus()) chime(); // else: a banner sounds

@@ -122,7 +122,8 @@ impl Server {
             let sent = sent.and_then(|d| irpush.push(d, &irpush::app(APP), r));
             ok |= sent.inspect_err(|e| tracing::warn!("push: {e:#}")).is_ok();
         }
-        tx.write_all(&[ok as u8]).await?;
+        // 2: taken, on its way through Google (not on the phone yet).
+        tx.write_all(&[if ok { 2 } else { 0 }]).await?;
         tx.finish()?;
         let _ = tokio::time::timeout(SLOW, c.closed()).await;
         Ok(())
