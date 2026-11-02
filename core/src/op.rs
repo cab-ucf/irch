@@ -63,6 +63,8 @@ pub enum Op {
     Read { channel: Ch, ts: u64 },
     // Stopped typing in `channel`: its input is empty (live).
     Typed { channel: Ch },
+    // A DM's news landed on this device, up to `ts` (live): ✓✓ there.
+    Got { ts: u64 },
 }
 
 /// A link's preview, made by its sender.
@@ -132,6 +134,7 @@ impl Op {
                 | Op::Call { .. }
                 | Op::Gone
                 | Op::Ringing { .. }
+                | Op::Got { .. }
         )
     }
 }

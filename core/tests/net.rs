@@ -956,6 +956,22 @@ async fn a_photo_waits_on_the_spaces_storage_node() {
     assert_eq!(c.file(&id, &f).await.unwrap(), b"a photo", "from s");
 }
 
+/// A file whose only holder is away: said plainly, and soon, not after
+/// minutes of asking every device in turn.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_nobody_online_has_fails_soon_and_says_why() {
+    let (a, b) = (node("a").await, node("b").await);
+    let id = a.create("lab").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let f = a.attach(&id, "cat.png", b"a photo").await.unwrap();
+    a.shutdown().await;
+    drop(a);
+    let t = std::time::Instant::now();
+    let e = b.file(&id, &f).await.unwrap_err().to_string();
+    assert!(e.contains("nobody who has it is reachable now"), "{e}");
+    assert!(t.elapsed() < Duration::from_secs(25), "{:?}", t.elapsed());
+}
+
 /// A call in a fresh DM: both sides gossip in it, the callee sees the
 /// call, and once it answers, each hears the other.
 #[tokio::test(flavor = "multi_thread")]
@@ -990,6 +1006,34 @@ async fn a_dm_call_connects_both_ways() {
     };
     assert!(hear(&a, &mut at_b).await, "b hears a");
     assert!(hear(&b, &mut at_a).await, "a hears b");
+}
+
+/// ✓✓ only once their device has it: not when it merely went out, nor
+/// when only a storage node or a stale gossip neighbor might hold it.
+#[tokio::test(flavor = "multi_thread")]
+async fn delivered_means_on_their_device() {
+    use irch_core::state::DM;
+    let db = dir("b");
+    let a = node("a").await;
+    let b = start(&db, "b", None, false).await;
+    let id = a.create("hub").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let keyed = || a.view(&id, |s| s.kem(&b.id()).is_some()) == Some(true);
+    until("b's key", keyed).await;
+    let dm = a.dm(&id, &b.id()).await.unwrap();
+    until("b in the DM", || b.spaces().contains(&dm)).await;
+    until("a gossips in the DM", || a.peers(&dm) > 0).await;
+    let b_id = b.id();
+    b.shutdown().await;
+    drop(b);
+    let at = || a.reach(&dm, &b_id).unwrap_or(0);
+    say(&a, &dm, DM, "you there?").await;
+    let ts = a.view(&dm, |s| s.messages(&DM, None, 1)).unwrap()[0].ts;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(at() < ts, "out, but not on b's device");
+    let b = start(&db, "b", None, false).await;
+    until("b has it", || texts(&b, &dm, &DM) == ["you there?"]).await;
+    until("✓✓ once it does", || at() >= ts).await;
 }
 
 /// Read in a DM, its sender sees so (Signal's ticks); invisible, not.

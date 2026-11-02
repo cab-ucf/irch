@@ -171,13 +171,14 @@ async fn answer(
     Ok(ok.then(|| (!news.is_empty()).then_some((space, news))))
 }
 
-/// Relays https only: any member names them.
+/// Relays https only: any member names them. Whether the phone itself
+/// has it (not a push server, holding it for Google).
 pub async fn ring(
     ep: &Endpoint,
     url: &str,
     space: &Id,
     raw: Option<&[u8]>,
-) -> Result<()> {
+) -> Result<bool> {
     let (to, tag, token): (EndpointAddr, [u8; 8], [u8; 16]) =
         uncode("ring", url)?;
     // With a relay to meet at, no private address: a member could aim
@@ -201,8 +202,12 @@ pub async fn ring(
         tx.finish()?;
         let got = rx.read_to_end(1).await?;
         c.close(0u8.into(), b"");
-        ensure!(got == [1], "not that doorbell's code, or an old one");
-        Ok(())
+        // 1: the phone has it; 2: a push server, which hands it on.
+        ensure!(
+            got == [1] || got == [2],
+            "not that doorbell's code, or an old one"
+        );
+        Ok(got == [1])
     };
     timeout(SLOW, go).await?
 }
