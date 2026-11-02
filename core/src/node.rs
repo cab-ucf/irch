@@ -2633,20 +2633,30 @@ impl Node {
         Ok(())
     }
 
-    /// A blob's real size, proven by its hash, from the first that has it.
-    async fn verified(&self, peers: &[EndpointId], h: &Id) -> Option<u64> {
+    /// A blob's real size, proven by its hash, and who gave it: all asked
+    /// at once, the first answer taken (offline devices cost no turn).
+    async fn verified(
+        &self,
+        peers: &[EndpointId],
+        h: &Id,
+    ) -> Option<(u64, EndpointId)> {
         let hash = iroh_blobs::Hash::from_bytes(h.0);
-        for p in peers {
-            // One that answers slowly, or never, gives way to the next.
-            let size = async {
-                let c = self.ep.connect(*p, iroh_blobs::ALPN).await.ok()?;
-                let got =
-                    iroh_blobs::get::request::get_verified_size(&c, &hash);
-                Some(got.await.ok()?.0)
-            };
-            let ten = Duration::from_secs(10);
-            if let Ok(Some(n)) = tokio::time::timeout(ten, size).await {
-                return Some(n);
+        let mut asks: n0_future::FuturesUnordered<_> = peers
+            .iter()
+            .map(|p| async move {
+                let size = async {
+                    let c = self.ep.connect(*p, iroh_blobs::ALPN).await.ok()?;
+                    let got =
+                        iroh_blobs::get::request::get_verified_size(&c, &hash);
+                    Some((got.await.ok()?.0, *p))
+                };
+                let wait = Duration::from_secs(8);
+                tokio::time::timeout(wait, size).await.ok().flatten()
+            })
+            .collect();
+        while let Some(r) = asks.next().await {
+            if r.is_some() {
+                return r;
             }
         }
         None
@@ -2663,23 +2673,31 @@ impl Node {
         let hash = iroh_blobs::Hash::from_bytes(h.0);
         if !self.files.has(hash).await? {
             let sp = self.get(space)?;
-            let mut peers: Vec<EndpointId> = self.bootstrap(&sp);
+            // Storage nodes and those online first, then everyone known.
+            let mut peers: Vec<EndpointId> =
+                self.stores(space).into_iter().map(|s| s.0.id).collect();
             peers.extend(sp.nbrs());
-            peers.extend(self.stores(space).into_iter().map(|s| s.0.id));
-            // Who we are, proven to each first: files go to members only.
-            for p in peers.iter().take(4) {
+            peers.extend(self.bootstrap(&sp));
+            let mut seen = HashSet::new();
+            peers.retain(|p| seen.insert(*p));
+            // Who we are, proven to them at once: files go to members only.
+            let proofs = peers.iter().take(8).map(|p| {
                 let s = self.clone().sync_with(sp.clone(), (*p).into());
-                let _ = tokio::time::timeout(Duration::from_secs(10), s).await;
-            }
+                tokio::time::timeout(Duration::from_secs(5), s)
+            });
+            n0_future::join_all(proofs).await;
             // Real size first: a post may claim 1 byte.
-            let size = self.verified(&peers, h).await;
-            ensure!(size == Some(len), "not reachable now, or not as said");
-            // A link may drop mid-way (relay losses): asked again, it resumes.
+            let gone = "nobody who has it is reachable now: it saves once \
+                its sender, or a storage node keeping it, is online";
+            let (size, from) = self.verified(&peers, h).await.context(gone)?;
+            ensure!(size == len, "not the file its post said");
+            // Who answered first, then the rest; a link may drop mid-way
+            // (relay losses): asked again, it resumes.
+            peers.retain(|p| *p != from);
+            peers.insert(0, from);
             let got =
                 self.files.downloader(&self.ep).download(hash, peers.repeat(3));
-            got.await.ok().context(
-                "not reachable now: ask whoever sent it to open irch",
-            )?;
+            got.await.ok().context(gone)?;
         }
         Ok(&self.files)
     }
@@ -2737,7 +2755,8 @@ impl Node {
                     });
                     files.get_bytes(hash).await?.to_vec()
                 }
-                Err(_) => self.legacy(space, f).await?,
+                // An older irch's whole-sealed file, else the real reason.
+                Err(e) => self.legacy(space, f).await.map_err(|_| e)?,
             },
         };
         if !ct.starts_with(crate::crypto::STREAM) {
@@ -2749,15 +2768,20 @@ impl Node {
         Ok(pt)
     }
 
-    /// Sealed whole, by an older irch: asked for by hash.
+    /// Sealed whole, by an older irch: asked for by hash, of all at once.
     async fn legacy(&self, space: &Id, f: &File) -> Result<Vec<u8>> {
         let sp = self.get(space)?;
         let (mut peers, get) = (sp.nbrs(), Ask::Get(f.hash));
         peers.extend(self.bootstrap(&sp));
-        for p in peers {
-            let ask = self.ask(p.into(), &get);
-            let wait = tokio::time::timeout(Duration::from_secs(20), ask);
-            if let Ok(Ok(b)) = wait.await
+        let mut asks: n0_future::FuturesUnordered<_> = peers
+            .into_iter()
+            .map(|p| {
+                let ask = self.ask(p.into(), &get);
+                tokio::time::timeout(Duration::from_secs(5), ask)
+            })
+            .collect();
+        while let Some(r) = asks.next().await {
+            if let Ok(Ok(b)) = r
                 && blake3::hash(&b) == f.hash.0
             {
                 std::fs::create_dir_all(self.dir.join("blobs"))?;
@@ -2918,7 +2942,7 @@ impl Node {
             }
             Ask::Keep(t, h, pw) if self.serve.is_some_and(|s| same(&s, &t)) => {
                 let size = self.verified(&[from], &h).await;
-                let size = size.context("not reachable, or not there")?;
+                let size = size.context("not reachable, or not there")?.0;
                 let same = |a: &str, b: &str| {
                     blake3::hash(a.as_bytes()) == blake3::hash(b.as_bytes())
                 };
@@ -2941,7 +2965,7 @@ impl Node {
                 let hash = iroh_blobs::Hash::from_bytes(h.0);
                 if !self.files.has(hash).await? {
                     let size = self.verified(&[from], &h).await;
-                    let size = size.context("not reachable, or not there")?;
+                    let size = size.context("not reachable, or not there")?.0;
                     match self.budget(&sp, size) {
                         Ok(()) => self.fetch(&h, from),
                         Err(no) => tx.write_all(no.as_bytes()).await?,

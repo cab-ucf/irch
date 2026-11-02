@@ -962,6 +962,22 @@ async fn a_photo_waits_on_the_spaces_storage_node() {
     assert_eq!(c.file(&id, &f).await.unwrap(), b"a photo", "from s");
 }
 
+/// A file whose only holder is away: said plainly, and soon, not after
+/// minutes of asking every device in turn.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_nobody_online_has_fails_soon_and_says_why() {
+    let (a, b) = (node("a").await, node("b").await);
+    let id = a.create("lab").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let f = a.attach(&id, "cat.png", b"a photo").await.unwrap();
+    a.shutdown().await;
+    drop(a);
+    let t = std::time::Instant::now();
+    let e = b.file(&id, &f).await.unwrap_err().to_string();
+    assert!(e.contains("nobody who has it is reachable now"), "{e}");
+    assert!(t.elapsed() < Duration::from_secs(25), "{:?}", t.elapsed());
+}
+
 /// A call in a fresh DM: both sides gossip in it, the callee sees the
 /// call, and once it answers, each hears the other.
 #[tokio::test(flavor = "multi_thread")]
