@@ -874,8 +874,12 @@ async fn a_storage_node_rings_a_phone_through_irpush() {
     cfg.relay = Some(RelayConfig::new(([127, 0, 0, 1], 0)));
     let relay = Server::spawn(cfg).await.unwrap();
     let at = format!("http://{}", relay.http_addr().unwrap());
+    // As systemd hands it over (LoadCredential), never in the Nix store.
+    let creds = dir("creds");
+    std::fs::create_dir_all(&creds).unwrap();
+    std::fs::write(creds.join("push-relay"), format!("{at}\n")).unwrap();
     // SAFETY: storage nodes read it as they start; no test wants another.
-    unsafe { std::env::set_var("IRCH_PUSH_RELAY", at) };
+    unsafe { std::env::set_var("CREDENTIALS_DIRECTORY", &creds) };
     let s = start(&dir("s"), "s", None, true).await;
     let db = dir("b");
     let (a, b) = (node("a").await, start(&db, "b", None, false).await);

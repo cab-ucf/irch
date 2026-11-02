@@ -140,11 +140,17 @@ fn kek(dir: &Path) -> Result<[u8; 32]> {
     Ok(k)
 }
 
-/// Where a storage node's irpush meets phones: `IRCH_PUSH_RELAY`, else
-/// irch's relays (n0's last unless they are your own). LAN only, none.
+/// Where a storage node's irpush meets phones: the systemd credential
+/// `push-relay` ("https://irpush.you.example#TOKEN", kept out of the Nix
+/// store), or `IRCH_PUSH_RELAY`; else irch's relays (n0's last unless they
+/// are your own). LAN only, none.
 fn relays(net: &Net) -> Option<Vec<irpush::Relay>> {
-    let l = match (std::env::var("IRCH_PUSH_RELAY"), net) {
-        (Ok(l), _) => l,
+    let cred = std::env::var_os("CREDENTIALS_DIRECTORY").and_then(|d| {
+        std::fs::read_to_string(Path::new(&d).join("push-relay")).ok()
+    });
+    let given = cred.or_else(|| std::env::var("IRCH_PUSH_RELAY").ok());
+    let l = match (given, net) {
+        (Some(l), _) => l.trim().to_string(),
         (_, Net::Default) => crate::node::RELAYS[0].into(),
         (_, Net::Relay(u)) => format!("{},!n0", u[0]),
         _ => return None,

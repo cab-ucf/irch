@@ -36,11 +36,14 @@ in {
         (_: u: u.isNormalUser && lib.hasPrefix "/home/" u.home) config.users.users);
       defaultText = "everyone with a home in /home";
     };
-    # irpush's relay for this node's phones: "https://irpush.you.example#TOKEN"
-    # (irpush's deploy/, `make token`). Unset, irch's relays (15 s pings).
-    services.irch.pushRelay = lib.mkOption {
+    # A root-only file outside the Nix store (agenix, sops-nix, or by hand)
+    # holding irpush's relay for this node's phones, from irpush's deploy/:
+    # "https://irpush.you.example#TOKEN". Given to the node as a systemd
+    # credential. Unset, irch's relays (15 s pings).
+    services.irch.pushRelayFile = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
+      example = "/run/secrets/irch-push-relay";
     };
     services.irch.signers = lib.mkOption {
       type = lib.types.lines; default = ""; visible = false;
@@ -49,6 +52,11 @@ in {
 
   config = lib.mkIf (cfg.enable || config.programs.irch.enable) (lib.mkMerge [
     {
+      assertions = [{
+        assertion = cfg.pushRelayFile == null
+          || !lib.hasPrefix builtins.storeDir cfg.pushRelayFile;
+        message = "services.irch.pushRelayFile: a path outside the Nix store (it is world-readable)";
+      }];
       warnings = lib.optional (cfg.signers != "")
         "services.irch.signers does nothing now (irch's own key checks releases): delete it";
       users.users.irch = {
@@ -129,8 +137,9 @@ in {
           StateDirectory = "irch/data"; StateDirectoryMode = "0700";
           RuntimeDirectory = "irch"; RuntimeDirectoryMode = "0750";
           UMask = "0027";
-          Environment = [ "IRCH_CODE_FILE=/run/irch/code" ]
-            ++ lib.optional (cfg.pushRelay != null) "IRCH_PUSH_RELAY=${cfg.pushRelay}";
+          Environment = "IRCH_CODE_FILE=/run/irch/code";
+          LoadCredential = lib.optional (cfg.pushRelayFile != null)
+            "push-relay:${cfg.pushRelayFile}";
           ProtectKernelTunables = true; ProtectControlGroups = true;
           RestrictSUIDSGID = true; LockPersonality = true;
           SystemCallArchitectures = "native";
