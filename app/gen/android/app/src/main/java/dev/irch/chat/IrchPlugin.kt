@@ -3,6 +3,7 @@ package dev.irch.chat
 import android.Manifest.permission.POST_NOTIFICATIONS
 import android.app.Activity
 import android.app.PendingIntent
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -10,6 +11,8 @@ import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
 import android.os.Build
+import android.provider.MediaStore
+import android.provider.MediaStore.MediaColumns
 import android.webkit.WebView
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationChannelCompat
@@ -225,6 +228,37 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     } catch (e: android.content.ActivityNotFoundException) {
       invoke.reject("no app opens it")
     }
+  }
+
+  /** Into Downloads, as a browser saves: Android 10 on needs no leave for
+   *  it. Off the main thread, a large file may take a while. */
+  @Command
+  fun download(invoke: Invoke) {
+    val file = java.io.File(invoke.parseArgs(FileArgs::class.java).path)
+    if (Build.VERSION.SDK_INT < 29) return invoke.resolve(JSObject())
+    Thread {
+      runCatching {
+        val d = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+        val type = java.net.URLConnection.guessContentTypeFromName(file.name)
+        val v = ContentValues().apply {
+          put(MediaColumns.DISPLAY_NAME, file.name)
+          put(MediaColumns.MIME_TYPE,
+            type ?: "application/octet-stream")
+          put(MediaColumns.IS_PENDING, 1)
+        }
+        val r = activity.contentResolver
+        val uri = r.insert(d, v) ?: error("no Downloads")
+        r.openOutputStream(uri)!!.use { o -> file.inputStream().use { it.copyTo(o) } }
+        v.clear()
+        v.put(MediaColumns.IS_PENDING, 0)
+        r.update(uri, v, null, null)
+        r.query(uri, arrayOf(MediaColumns.DISPLAY_NAME),
+          null, null, null)?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+      }.onSuccess { name ->
+        file.delete()
+        invoke.resolve(JSObject().put("name", name ?: file.name))
+      }.onFailure { invoke.reject("saving to Downloads: ${it.message}") }
+    }.start()
   }
 
   @Command

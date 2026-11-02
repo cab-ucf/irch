@@ -346,9 +346,16 @@ async fn save(
     let dir = p.download_dir().or_else(|_| p.home_dir());
     let dir = dir.map_err(|e| e.to_string())?;
     let f = n.save(&space, &file, &dir).await.map_err(err)?;
+    // Android: into Downloads (10 on), else the share sheet, saying nothing.
     #[cfg(target_os = "android")]
     if let Some(b) = app.try_state::<android::Bridge>() {
-        b.share_file(&f).await;
+        return match b.download(&f).await.map_err(err)? {
+            Some(name) => Ok(format!("Downloads/{name}")),
+            None => {
+                b.share_file(&f).await;
+                Ok(String::new())
+            }
+        };
     }
     Ok(f.display().to_string())
 }

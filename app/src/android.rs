@@ -112,6 +112,23 @@ impl Bridge {
         self.call("share", Text { text }).await;
     }
 
+    /// Into Downloads, as named there (a twin gets " (1)"); `None` on
+    /// Android 9 and before, which share it instead.
+    pub async fn download(
+        &self,
+        path: &std::path::Path,
+    ) -> anyhow::Result<Option<String>> {
+        let path = &path.to_string_lossy();
+        #[derive(serde::Deserialize)]
+        struct Saved {
+            name: Option<String>,
+        }
+        let r = self
+            .0
+            .run_mobile_plugin_async::<Saved>("download", FilePath { path });
+        Ok(r.await?.name)
+    }
+
     pub async fn share_file(&self, path: &std::path::Path) {
         let path = &path.to_string_lossy();
         self.call("shareFile", FilePath { path }).await;

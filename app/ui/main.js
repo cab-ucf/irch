@@ -1480,14 +1480,14 @@ const fileChip = (f) => h("div", { class: "file-chip" }, icon("file"),
   h("div", { class: "meta", title: "Preview", onclick: () => preview(f) },
     h("b", {}, f.name), h("small", {}, size(f.size),
       offered(f) ? " · from its sender's device, while online" : "")),
-  h("button", { title: android ? "Share" : ios ? "Save to Files"
-    : "Save to Downloads",
+  h("button", { title: ios ? "Save to Files" : "Save to Downloads",
     onclick: () => saveFile(f) }, icon("down")));
 
 async function saveFile(f) {
   const at = await invoke("save", { space: S.sid, file: f })
     .catch((e) => toast(String(e), true));
-  if (at && !android) toast(ios ? "Saved: Files › irch" : `Saved to ${at}`);
+  // Android 9 and before share it instead: the sheet says enough.
+  if (at) toast(ios ? "Saved: Files › irch" : `Saved to ${at}`);
 }
 
 const MEDIA = { mp3: "audio/mpeg", ogg: "audio/ogg", oga: "audio/ogg",
