@@ -10,10 +10,12 @@ let
   pinned = pkgs.callPackage ./package.nix { };
   latest = "https://github.com/cab-ucf/irch/releases";
   key = "RWSPfztwzR/MhakRL6cA70pN03n/nMCdTvoY5UHC2IcZuhcR+41RQI95";
-  # The newest release built here, else the pinned one.
+  # The newer of the release built here and the flake's own (a branch, or
+  # main ahead of a release): equal, the flake's.
   pick = bin: lib.hiPrio (pkgs.writeShellScriptBin bin ''
-    b=/var/lib/irch-app/app/bin/${bin}
-    [ -x "$b" ] || b=${pinned}/bin/${bin}
+    b=/var/lib/irch-app/app/bin/${bin} v=$(cat /var/lib/irch-app/built 2>/dev/null)
+    [ -x "$b" ] && [ "$(printf '%s\n' "$v" ${pinned.version} | sort -V | tail -1)" != ${pinned.version} ] ||
+      b=${pinned}/bin/${bin}
     exec "$b" "$@"
   '');
 in {
@@ -33,6 +35,12 @@ in {
       default = lib.attrNames (lib.filterAttrs
         (_: u: u.isNormalUser && lib.hasPrefix "/home/" u.home) config.users.users);
       defaultText = "everyone with a home in /home";
+    };
+    # irpush's relay for this node's phones: "https://irpush.you.example#TOKEN"
+    # (irpush's deploy/, `make token`). Unset, irch's relays (15 s pings).
+    services.irch.pushRelay = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
     };
     services.irch.signers = lib.mkOption {
       type = lib.types.lines; default = ""; visible = false;
@@ -58,7 +66,7 @@ in {
         startAt = "hourly";
         wants = [ "network-online.target" ];
         after = [ "network-online.target" ];
-        path = with pkgs; [ curl jq minisign gnutar gzip coreutils gnused nix ];
+        path = with pkgs; [ curl jq minisign gnutar gzip coreutils gnused git nix ];
         environment.HOME = "/var/lib/irch-app";
         serviceConfig = {
           Type = "oneshot"; User = "irch-update";
@@ -121,7 +129,8 @@ in {
           StateDirectory = "irch/data"; StateDirectoryMode = "0700";
           RuntimeDirectory = "irch"; RuntimeDirectoryMode = "0750";
           UMask = "0027";
-          Environment = "IRCH_CODE_FILE=/run/irch/code";
+          Environment = [ "IRCH_CODE_FILE=/run/irch/code" ]
+            ++ lib.optional (cfg.pushRelay != null) "IRCH_PUSH_RELAY=${cfg.pushRelay}";
           ProtectKernelTunables = true; ProtectControlGroups = true;
           RestrictSUIDSGID = true; LockPersonality = true;
           SystemCallArchitectures = "native";

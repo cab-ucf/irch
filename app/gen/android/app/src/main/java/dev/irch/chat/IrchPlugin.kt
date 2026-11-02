@@ -64,14 +64,6 @@ class WriteArgs {
 }
 
 @InvokeArg
-class FirebaseArgs {
-  var app = ""
-  var key = ""
-  var project = ""
-  var sender = ""
-}
-
-@InvokeArg
 class OnArgs {
   var on = false
 }
@@ -85,12 +77,10 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     if (!notificationsAllowed(activity) && Build.VERSION.SDK_INT >= 33) {
       ActivityCompat.requestPermissions(activity, arrayOf(POST_NOTIFICATIONS), 1)
     }
-    // Google's push through irch's push servers; else a push app; else
-    // a service keeps irch's own doorbell. The first costs no battery.
-    fcm(activity) { google ->
-      if (!google) UnifiedPush.tryUseCurrentOrDefaultDistributor(activity) { ok ->
-        if (ok) UnifiedPush.register(activity) else live(activity)
-      }
+    // A push app (its one socket); else a service keeps irpush's, through
+    // a storage node, or irch's own doorbell. No Google.
+    UnifiedPush.tryUseCurrentOrDefaultDistributor(activity) { ok ->
+      if (ok) UnifiedPush.register(activity) else live(activity)
     }
   }
 
@@ -114,9 +104,9 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
     invoke.resolve(JSObject()
       .put("notify", notificationsAllowed(activity))
       // Woken by a push, irch needs no leave to run in the background.
-      .put("background", push != null || google(activity) || unrestricted(activity))
+      .put("background", push != null || unrestricted(activity))
       .put("calls", fullScreen(activity))
-      .put("push", label ?: "Google's push".takeIf { google(activity) }))
+      .put("push", label))
   }
 
   @Command
@@ -126,7 +116,7 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
         .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE,
           activity.packageName)
       activity.startActivity(i)
-    } else if (!unrestricted(activity) && !google(activity)) unrestrict()
+    } else if (!unrestricted(activity)) unrestrict()
     else if (!fullScreen(activity)) runCatching {
       val uri = android.net.Uri.parse("package:" + activity.packageName)
       activity.startActivity(Intent(
@@ -194,20 +184,6 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
 
   @PermissionCallback
   private fun allowed(invoke: Invoke) = invoke.resolve()
-
-  /** A push server's Firebase project, found among our storage nodes: kept
-   *  for every process to come, and our token sent to it. */
-  @Command
-  fun firebase(invoke: Invoke) {
-    val f = invoke.parseArgs(FirebaseArgs::class.java)
-    activity.getSharedPreferences("irch", 0).edit()
-      .putString("fb_app", f.app).putString("fb_key", f.key)
-      .putString("fb_project", f.project).putString("fb_sender", f.sender)
-      .apply()
-    startFirebase(activity)
-    fcm(activity) {}
-    invoke.resolve()
-  }
 
   @Command
   fun share(invoke: Invoke) {

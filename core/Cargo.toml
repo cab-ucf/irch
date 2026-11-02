@@ -28,10 +28,10 @@ minisign-verify = "0.3"
 n0-future = "0.3"
 postcard = { version = "1", features = ["use-std"] }
 # Storage nodes wake phones; already built for iroh, TLS as iroh sets it.
-# Signs a push server's Firebase requests (already iroh's TLS).
-ring = "0.17"
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 x-wing = { version = "0.1", features = ["getrandom"] }
+# Phones: one quiet, shared socket; storage nodes push through it.
+irpush = { git = "https://github.com/cab-ucf/irpush", rev = "b49e564" }
 
 # A call's voice, native: the echo canceller hears what plays.
 cpal = { version = "0.18", optional = true }
@@ -47,4 +47,5 @@ iroh-mainline-address-lookup = "0.6"
 iroh = { version = "1.4", default-features = false, features = ["platform-verifier"] }
 
 [dev-dependencies]
+iroh-relay = { version = "1.4", default-features = false, features = ["server"] }
 tracing-subscriber.workspace = true

@@ -37,7 +37,7 @@ export const supported = () => typeof AudioEncoder === "function" &&
   typeof VideoDecoder === "function" && !!navigator.mediaDevices;
 export const canShare = () => !!navigator.mediaDevices?.getDisplayMedia;
 
-let ctx, mic, aenc, venc, timer, tuned, said, levels;
+let ctx, mic, aenc, venc, timer, tuned, levels;
 // Codecs this device decodes, once asked.
 let decodes = null;
 
@@ -99,8 +99,7 @@ export async function join(space, channel, rpc) {
   call.met = false;
   call.changed();
   decodes ??= await decodable();
-  sayCodecs();
-  said = setInterval(sayCodecs, 5000);
+  sayCodecs(); // and again as each peer appears, not on a timer
   if (call.native) {
     shut(ctx);
     ctx = null;
@@ -143,7 +142,7 @@ export async function leave(rpc) {
   call.on = null;
   call.native = false;
   quiet(core.invoke("in_call", { on: false }));
-  [said, levels].forEach(clearInterval);
+  clearInterval(levels);
   await video(null);
   mic?.getTracks().forEach((t) => t.stop());
   [aenc, ctx].forEach(shut);
@@ -269,6 +268,7 @@ function peer(id) {
   let p = call.peers.get(id);
   if (p) return p;
   p = { id, canvas: document.createElement("canvas"), video: 0, level: 0 };
+  if (decodes) sayCodecs(); // new here: tell it what we decode
   const adec = () => {
     p.adec = new AudioDecoder({ error: adec, output: (d) => {
       const s = new Float32Array(d.numberOfFrames);

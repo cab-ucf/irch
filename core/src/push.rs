@@ -1,48 +1,36 @@
-//! Push servers: a storage node given a Firebase project (its service
-//! account's key, `fcm.json`, and `google-services.json`) wakes phones
-//! through Google the moment a member rings, as their doorbell would, so no
-//! phone holds a connection open. Phones find it among the storage nodes
-//! they know (theirs, and their spaces'), learn the project from it, and
-//! give it their Firebase token, a ring token per space and epoch, and a
-//! key (wake.rs). Members ring with those; Google carries the ring sealed
-//! to that key, always the same size: when, and nothing else.
+//! Push servers: every storage node with a relay is one, through irpush.
+//! A phone pairs with one it knows (its own first) once, then holds one
+//! quiet socket, shared, with heartbeats as long as its network allows,
+//! and gives it `irpush:DEVICE` and a ring token per space and epoch
+//! (wake.rs). Members ring with those; each ring reaches the phone sealed
+//! end to end (post-quantum), always the same size. The push server learns
+//! when, and for which space, nothing else. No Google: no Firebase.
 
-use crate::crypto::Key;
 use crate::wake::{HEAD, MAX, News};
-use crate::{Id, node::lock, store};
-use anyhow::{Context, Result, ensure};
-use data_encoding::{BASE64, BASE64URL_NOPAD};
+use crate::{Id, Net, node::lock, store};
+use anyhow::{Result, ensure};
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr, EndpointId};
-use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-pub const ALPN: &[u8] = b"irch/push/3";
+pub const ALPN: &[u8] = b"irch/push/4";
 /// Ring tokens a phone may have here: one per space it is in.
 const MOST: usize = 4096;
-/// Every push's sealed size: a short message or a call fits whole.
-const SIZE: usize = 2048;
 const SLOW: Duration = Duration::from_secs(15);
-
-/// A Firebase project's public half: what a phone needs for a token.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-pub struct Firebase {
-    pub app: String,
-    pub key: String,
-    pub project: String,
-    pub sender: String,
-}
+/// irpush's address for irch on a phone.
+const APP: &str = "dev.irch.chat";
 
 #[derive(Serialize, Deserialize)]
 enum Ask {
-    Firebase,
-    /// Our Firebase token, ring tokens, and the key pushes are sealed to.
-    Register(String, Vec<[u8; 16]>, Key),
+    /// A one-time irpush ticket, to pair with.
+    Ticket,
+    /// `irpush:DEVICE` (paired here) and our ring tokens.
+    Register(String, Vec<[u8; 16]>),
 }
 
 async fn ask(ep: &Endpoint, to: EndpointAddr, a: &Ask) -> Result<Vec<u8>> {
@@ -58,73 +46,52 @@ async fn ask(ep: &Endpoint, to: EndpointAddr, a: &Ask) -> Result<Vec<u8>> {
     tokio::time::timeout(SLOW, go).await?
 }
 
-/// Its Firebase project, if `to` is a push server.
-pub async fn firebase(ep: &Endpoint, to: EndpointAddr) -> Result<Firebase> {
-    Ok(postcard::from_bytes(&ask(ep, to, &Ask::Firebase).await?)?)
+/// A ticket to pair our irpush device with `to`.
+pub async fn ticket(ep: &Endpoint, to: EndpointAddr) -> Result<String> {
+    Ok(String::from_utf8(ask(ep, to, &Ask::Ticket).await?)?)
 }
 
 pub async fn register(
     ep: &Endpoint,
     to: EndpointAddr,
-    fcm: &str,
+    route: &str,
     rings: &[[u8; 16]],
-    key: Key,
 ) -> Result<()> {
-    let a = Ask::Register(fcm.into(), rings.to_vec(), key);
-    ensure!(ask(ep, to, &a).await? == [1], "no push here");
+    let a = Ask::Register(route.into(), rings.to_vec());
+    ensure!(ask(ep, to, &a).await? == [1], "not paired there");
     Ok(())
 }
 
-/// A ring (the space, then its sealed op) sealed again to a phone, padded
-/// to one size; too big, the space alone, for the phone to catch up.
-pub fn seal(key: &Key, ring: &[u8]) -> Vec<u8> {
-    let ring = if ring.len() + 2 <= SIZE { ring } else { &ring[..32] };
-    let mut b = (ring.len() as u16).to_le_bytes().to_vec();
-    b.extend_from_slice(ring);
-    b.resize(SIZE, 0);
-    crate::crypto::seal(key, b"irch push", &b)
-}
-
-pub fn open(key: &Key, b: &[u8]) -> Option<News> {
-    let b = crate::crypto::open(key, b"irch push", b)?;
-    let (len, rest) = b.split_first_chunk::<2>()?;
-    let ring = rest.get(..u16::from_le_bytes(*len) as usize)?;
-    let (space, raw) = ring.split_first_chunk::<32>()?;
-    Some((Id(*space), raw.to_vec()))
-}
-
-type Phones = BTreeMap<EndpointId, (String, Vec<[u8; 16]>, Key)>;
+type Phones = BTreeMap<EndpointId, (String, Vec<[u8; 16]>)>;
 
 #[derive(Clone)]
-pub struct Server(Arc<(PathBuf, Mutex<Phones>, Google, Firebase)>);
+pub struct Server(Arc<(PathBuf, Mutex<Phones>, Arc<irpush::Node>)>);
 
 impl Server {
-    pub fn open(dir: &Path) -> Result<Option<Self>> {
-        let (Ok(key), Ok(app)) = (
-            std::fs::read(dir.join("fcm.json")),
-            std::fs::read(dir.join("google-services.json")),
-        ) else {
-            return Ok(None);
-        };
-        let google = Google::new(&key).context("fcm.json")?;
-        let firebase = app_of(&app).context("google-services.json")?;
+    pub fn open(dir: &Path, net: &Net) -> Result<Option<Self>> {
+        let Some(irpush) = host(dir, net)? else { return Ok(None) };
         let file = dir.join("phones");
         let phones = Mutex::new(store::load(&file));
-        Ok(Some(Self(Arc::new((file, phones, google, firebase)))))
+        Ok(Some(Self(Arc::new((file, phones, irpush)))))
     }
 
     async fn asked(&self, c: &Connection) -> Result<()> {
         let (mut tx, mut rx) = c.accept_bi().await?;
         let b = crate::sync::rest(&mut rx, 1024 + 17 * MOST + 64).await?;
-        let (file, phones, _, firebase) = &*self.0;
+        let (file, phones, irpush) = &*self.0;
         let reply = match postcard::from_bytes(&b)? {
-            Ask::Firebase => postcard::to_allocvec(firebase)?,
-            Ask::Register(fcm, rings, key) => {
-                ensure!(fcm.len() <= 1024 && rings.len() <= MOST, "too big");
-                let mut p = lock(phones);
-                p.insert(c.remote_id(), (fcm, rings, key));
-                store::save(file, &*p)?;
-                vec![1]
+            Ask::Ticket => irpush.ticket(irpush::Role::Device)?.into_bytes(),
+            Ask::Register(to, rings) => {
+                ensure!(to.len() <= 128 && rings.len() <= MOST, "too big");
+                // Only a device paired here.
+                let d = to.strip_prefix("irpush:").unwrap_or_default();
+                let ok = irpush.peers().iter().any(|p| p.0.to_string() == d);
+                if ok {
+                    let mut p = lock(phones);
+                    p.insert(c.remote_id(), (to, rings));
+                    store::save(file, &*p)?;
+                }
+                vec![ok as u8]
             }
         };
         tx.write_all(&reply).await?;
@@ -133,24 +100,27 @@ impl Server {
         Ok(())
     }
 
-    /// A doorbell's ring, to whichever phones hold its token.
+    /// A doorbell's ring, to whichever phones hold its token: as it is, or
+    /// too big for one frame, the space alone, for the phone to catch up.
     async fn ring(&self, c: &Connection) -> Result<()> {
         let (mut tx, mut rx) = c.accept_bi().await?;
         let mut head = [0u8; HEAD];
         rx.read_exact(&mut head).await?;
         let raw = crate::sync::rest(&mut rx, MAX).await?;
-        let (_, phones, google, _) = &*self.0;
-        let to: Vec<(String, Key)> = lock(phones)
+        let (_, phones, irpush) = &*self.0;
+        let to: Vec<String> = lock(phones)
             .values()
             .filter(|p| p.1.iter().any(|t| t[..] == head[..16]))
-            .map(|p| (p.0.clone(), p.2))
+            .map(|p| p.0.clone())
             .collect();
         let ring = [&head[16..48], &raw[..]].concat();
+        let r =
+            if ring.len() <= irpush::BODY { &ring[..] } else { &ring[..32] };
         let mut ok = false;
-        for (fcm, key) in to {
-            let r = BASE64.encode(&seal(&key, &ring));
-            let sent = google.send(&fcm, &r).await;
-            ok |= sent.inspect_err(|e| tracing::warn!("fcm: {e:#}")).is_ok();
+        for d in to.iter().filter_map(|t| t.strip_prefix("irpush:")) {
+            let sent = d.parse().map_err(Into::into);
+            let sent = sent.and_then(|d| irpush.push(d, &irpush::app(APP), r));
+            ok |= sent.inspect_err(|e| tracing::warn!("push: {e:#}")).is_ok();
         }
         tx.write_all(&[ok as u8]).await?;
         tx.finish()?;
@@ -159,23 +129,121 @@ impl Server {
     }
 }
 
-/// From `google-services.json`: the Android app `dev.irch.chat`'s settings.
-fn app_of(json: &[u8]) -> Result<Firebase> {
-    let v: serde_json::Value = serde_json::from_slice(json)?;
-    let p = &v["project_info"];
-    let us = |c: &&serde_json::Value| {
-        c["client_info"]["android_client_info"]["package_name"]
-            == "dev.irch.chat"
+/// The state key of an irpush node kept here, as the doorbell's are.
+fn kek(dir: &Path) -> Result<[u8; 32]> {
+    let f = dir.join("irpush.kek");
+    if let Some(k) = std::fs::read(&f).ok().and_then(|k| k.try_into().ok()) {
+        return Ok(k);
+    }
+    let k = crate::crypto::rand::<32>();
+    store::write(&f, &k)?;
+    Ok(k)
+}
+
+/// Where a storage node's irpush meets phones: `IRCH_PUSH_RELAY`, else
+/// irch's relays (n0's last unless they are your own). LAN only, none.
+fn relays(net: &Net) -> Option<Vec<irpush::Relay>> {
+    let l = match (std::env::var("IRCH_PUSH_RELAY"), net) {
+        (Ok(l), _) => l,
+        (_, Net::Default) => crate::node::RELAYS[0].into(),
+        (_, Net::Relay(u)) => format!("{},!n0", u[0]),
+        _ => return None,
     };
-    let c = v["client"].as_array().and_then(|c| c.iter().find(us));
-    let c = c.context("no Android app dev.irch.chat in it")?;
-    let s = |v: &serde_json::Value| v.as_str().unwrap_or_default().to_string();
-    Ok(Firebase {
-        app: s(&c["client_info"]["mobilesdk_app_id"]),
-        key: s(&c["api_key"][0]["current_key"]),
-        project: s(&p["project_id"]),
-        sender: s(&p["project_number"]),
-    })
+    irpush::Relay::list(&l).ok().filter(|l| !l.is_empty())
+}
+
+/// A storage node's irpush host, running.
+fn host(dir: &Path, net: &Net) -> Result<Option<Arc<irpush::Node>>> {
+    let Some(relays) = relays(net) else { return Ok(None) };
+    let (f, kek) = (dir.join("irpush"), kek(dir)?);
+    let n = match f.exists() {
+        true => irpush::Node::open(&f, kek, vec![])?,
+        false => irpush::Node::create(&f, kek, relays.clone())?,
+    };
+    if n.relays() != relays {
+        n.set_relays(relays)?;
+    }
+    let n = Arc::new(n);
+    let run = n.clone();
+    tokio::spawn(async move { run.run(|_, _, _| {}).await });
+    Ok(Some(n))
+}
+
+/// A phone's irpush device: one per profile, its pushes as rings.
+pub struct Device {
+    pub node: Arc<irpush::Node>,
+    rx: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<News>>,
+    run: tokio::task::AbortHandle,
+}
+
+impl Drop for Device {
+    fn drop(&mut self) {
+        self.run.abort();
+    }
+}
+
+impl Device {
+    /// What a phone gives its push server.
+    pub fn url(&self) -> String {
+        format!("irpush:{}", self.node.id())
+    }
+
+    pub fn paired(&self) -> bool {
+        !self.node.peers().is_empty()
+    }
+
+    /// The next ring that came as a push.
+    pub async fn next(&self) -> Option<News> {
+        self.rx.lock().await.recv().await
+    }
+}
+
+static DEVICES: Mutex<BTreeMap<PathBuf, Arc<Device>>> =
+    Mutex::new(BTreeMap::new());
+
+/// Ours, running: kept from before, or joined now with `ticket`.
+pub fn device(dir: &Path, ticket: Option<&str>) -> Result<Option<Arc<Device>>> {
+    let mut all = lock(&DEVICES);
+    if let Some(d) = all.get(dir) {
+        return Ok(Some(d.clone()));
+    }
+    let (f, kek) = (dir.join("irpush"), kek(dir)?);
+    let node = match (f.exists(), ticket) {
+        (true, _) => irpush::Node::open(&f, kek, vec![])?,
+        (false, Some(t)) => irpush::Node::join(&f, kek, t, vec![])?,
+        (false, None) => return Ok(None),
+    };
+    let (node, (tx, rx)) =
+        (Arc::new(node), tokio::sync::mpsc::unbounded_channel());
+    let (run, me) = (node.clone(), irpush::app(APP));
+    let on = move |_, app, b: &[u8]| {
+        if let Some((sp, raw)) =
+            b.split_first_chunk::<32>().filter(|_| app == me)
+        {
+            let _ = tx.send((Id(*sp), raw.to_vec()));
+        }
+    };
+    let run = tokio::spawn(async move { run.run(on).await }).abort_handle();
+    let d = Arc::new(Device { node, rx: rx.into(), run });
+    all.insert(dir.into(), d.clone());
+    Ok(Some(d))
+}
+
+/// Ours, never paired (its ticket ran out): gone, for a new one.
+pub fn forget(dir: &Path) {
+    lock(&DEVICES).remove(dir);
+    let _ = std::fs::remove_file(dir.join("irpush"));
+}
+
+/// Heartbeat now (an alarm rang): seconds to the next, 0 with no device.
+pub fn kick() -> u64 {
+    let all = lock(&DEVICES);
+    all.values().map(|d| d.node.kick().as_secs()).min().unwrap_or(0)
+}
+
+/// Another network (a stable id for each), or none (`irpush::OFFLINE`).
+pub fn network(id: u64) {
+    lock(&DEVICES).values().for_each(|d| d.node.network(id));
 }
 
 impl std::fmt::Debug for Server {
@@ -193,115 +261,5 @@ impl ProtocolHandler for Server {
         r.map_err(|e| {
             AcceptError::from_err(std::io::Error::other(e.to_string()))
         })
-    }
-}
-
-/// Firebase Cloud Messaging, as a service account: a signed JWT for an
-/// hour's token, then one POST a message.
-struct Google {
-    project: String,
-    email: String,
-    token_uri: String,
-    fcm: String,
-    key: RsaKeyPair,
-    web: reqwest::Client,
-    token: tokio::sync::Mutex<(String, Instant)>,
-}
-
-#[derive(serde::Deserialize)]
-struct Account {
-    project_id: String,
-    client_email: String,
-    private_key: String,
-    token_uri: String,
-    // Not Google's: elsewhere only to test.
-    #[serde(default = "fcm")]
-    fcm_uri: String,
-}
-
-fn fcm() -> String {
-    "https://fcm.googleapis.com".into()
-}
-
-impl Google {
-    fn new(json: &[u8]) -> Result<Self> {
-        let a: Account = serde_json::from_slice(json)?;
-        let pem: String =
-            a.private_key.lines().filter(|l| !l.starts_with("-----")).collect();
-        let key = RsaKeyPair::from_pkcs8(&BASE64.decode(pem.as_bytes())?)
-            .map_err(|e| anyhow::anyhow!("private_key: {e}"))?;
-        Ok(Self {
-            project: a.project_id,
-            email: a.client_email,
-            token_uri: a.token_uri,
-            fcm: a.fcm_uri,
-            key,
-            web: crate::node::client().build()?,
-            token: tokio::sync::Mutex::new((String::new(), Instant::now())),
-        })
-    }
-
-    fn jwt(&self) -> Result<String> {
-        let b64 = |v: serde_json::Value| {
-            BASE64URL_NOPAD.encode(v.to_string().as_bytes())
-        };
-        let now = crate::now() / 1000;
-        let claims = serde_json::json!({
-            "iss": self.email, "iat": now, "exp": now + 3600,
-            "scope": "https://www.googleapis.com/auth/firebase.messaging",
-            "aud": self.token_uri,
-        });
-        let alg = serde_json::json!({ "alg": "RS256", "typ": "JWT" });
-        let msg = format!("{}.{}", b64(alg), b64(claims));
-        let mut sig = vec![0; self.key.public().modulus_len()];
-        let rng = ring::rand::SystemRandom::new();
-        self.key
-            .sign(&RSA_PKCS1_SHA256, &rng, msg.as_bytes(), &mut sig)
-            .map_err(|_| anyhow::anyhow!("signing"))?;
-        Ok(format!("{msg}.{}", BASE64URL_NOPAD.encode(&sig)))
-    }
-
-    async fn bearer(&self) -> Result<String> {
-        let mut t = self.token.lock().await;
-        if t.0.is_empty() || t.1 < Instant::now() {
-            let form = "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type\
-                %3Ajwt-bearer&assertion="
-                .to_string()
-                + &self.jwt()?;
-            let r = self
-                .web
-                .post(&self.token_uri)
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(form)
-                .send()
-                .await?
-                .error_for_status()?;
-            #[derive(serde::Deserialize)]
-            struct Got {
-                access_token: String,
-                expires_in: u64,
-            }
-            let g: Got = serde_json::from_slice(&r.bytes().await?)?;
-            let left = Duration::from_secs(g.expires_in.saturating_sub(60));
-            *t = (g.access_token, Instant::now() + left);
-        }
-        Ok(t.0.clone())
-    }
-
-    /// High priority wakes a phone from its deepest sleep. Kept by Google
-    /// for a phone that is off as long as it keeps any (four weeks); past
-    /// that, irch catches up when opened.
-    async fn send(&self, to: &str, r: &str) -> Result<()> {
-        let m = serde_json::json!({ "message": {
-            "token": to, "data": { "r": r },
-            "android": { "priority": "high", "ttl": "2419200s" },
-        }});
-        let url =
-            format!("{}/v1/projects/{}/messages:send", self.fcm, self.project);
-        let b = self.bearer().await?;
-        let r = self.web.post(url).bearer_auth(b);
-        let r = r.header("content-type", "application/json");
-        r.body(m.to_string()).send().await?.error_for_status()?;
-        Ok(())
     }
 }

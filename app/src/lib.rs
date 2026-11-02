@@ -18,15 +18,15 @@ type Started = Option<Result<Arc<Node>, String>>;
 /// Shared with push wakes (android.rs).
 static NODE: std::sync::Mutex<Option<Arc<Node>>> = std::sync::Mutex::new(None);
 /// In sight; never in a process Android started for the service alone.
-#[cfg(target_os = "android")]
 static FG: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// The room on screen: no notifications for it while in sight.
 static VIEW: std::sync::Mutex<Option<(Id, Ch)>> = std::sync::Mutex::new(None);
 
-/// Out of sight a minute, the node stops: keepalives would wake the radio.
-#[cfg(target_os = "android")]
+/// Out of sight a minute, the node stops: its links' keepalives and relay
+/// pings cost battery and packets; a push wakes it (desktops: irpush).
+#[cfg(any(desktop, target_os = "android"))]
 async fn seen(app: &AppHandle, fg: bool) {
     use std::sync::atomic::Ordering::SeqCst;
     // Only a change counts: at launch, the app starts the node itself.
@@ -40,21 +40,72 @@ async fn seen(app: &AppHandle, fg: bool) {
             _ => drop(start(app, None).await),
         }
     } else {
-        tokio::time::sleep(Duration::from_secs(60)).await;
-        if !FG.load(SeqCst) {
-            app.state::<App>().0.send_replace(None);
-            nap().await;
-        }
+        doze(app.clone()).await;
     }
 }
 
-#[cfg(target_os = "android")]
-async fn nap() {
+/// A minute, then asleep if still out of sight.
+#[cfg(any(desktop, target_os = "android"))]
+async fn doze(app: AppHandle) {
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    if nap().await {
+        app.state::<App>().0.send_replace(None);
+    }
+}
+
+/// Asleep, out of sight and out of calls (desktops: only if irpush wakes
+/// them; else they stay up in the tray). True if it stopped.
+#[cfg(any(desktop, target_os = "android"))]
+async fn nap() -> bool {
     use std::sync::atomic::Ordering::SeqCst;
     let n = running().filter(|n| n.in_call().is_none() && !FG.load(SeqCst));
-    if let Some(n) = n {
-        *NODE.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        n.shutdown().await;
+    #[cfg(desktop)]
+    let n = n.filter(|n| n.pushing());
+    let Some(n) = n else { return false };
+    *NODE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    n.shutdown().await;
+    true
+}
+
+/// Desktop: in sight is a window shown, not minimized.
+#[cfg(desktop)]
+fn sight(app: &AppHandle) {
+    let up = |w: &tauri::WebviewWindow| {
+        w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false)
+    };
+    let fg = app.webview_windows().values().any(up);
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move { seen(&app, fg).await });
+}
+
+/// Desktop: paired with a storage node (ours first), irch sleeps
+/// out of sight and irpush wakes it; its rings shown from the phonebook,
+/// a call starting the node at once, so it connects as it is answered.
+#[cfg(desktop)]
+async fn pair(app: AppHandle, n: Arc<Node>) {
+    let Some(url) = n.irpush().await else { return };
+    n.set_push(Some(url)).await;
+    let (Ok(dir), true) = (home(&app), n.pushing()) else { return };
+    drop(n); // asleep, a node goes
+    let Ok(Some(d)) = irch_core::push::device(&dir, None) else { return };
+    tauri::async_runtime::spawn(doze(app.clone()));
+    while let Some(news) = d.next().await {
+        if let Some(n) = running() {
+            n.deliver(news);
+            continue;
+        }
+        let (x, catch) = Node::woken(&dir, &news);
+        if let Some(x) = &x {
+            notify(&app, x).await;
+        }
+        if catch || x.as_ref().is_some_and(|x| x.ring) {
+            if start(&app, None).await.is_ok()
+                && let Some(n) = running()
+            {
+                n.deliver(news);
+            }
+            tauri::async_runtime::spawn(doze(app.clone()));
+        }
     }
 }
 
@@ -229,6 +280,7 @@ fn tray(app: &tauri::App) {
         && let Some(w) = app.get_webview_window("main")
     {
         let _ = w.hide();
+        sight(app.handle());
     }
 }
 
@@ -683,17 +735,19 @@ pub fn run() {
             Some(vec!["--hidden"]),
         ))
         // Closed, irch stays in the tray: still told of messages and calls.
-        .on_window_event(|w, e| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = e
-                && TRAY.load(std::sync::atomic::Ordering::SeqCst)
+        .on_window_event(|w, e| match e {
+            tauri::WindowEvent::CloseRequested { api, .. }
+                if TRAY.load(std::sync::atomic::Ordering::SeqCst) =>
             {
                 api.prevent_close();
                 let _ = w.hide();
+                sight(w.app_handle());
             }
+            tauri::WindowEvent::Focused(_) => sight(w.app_handle()),
+            _ => {}
         });
     let b = b.setup(|app| {
         app.manage(App(watch::channel(None).0));
-        #[cfg(target_os = "android")]
         FG.store(true, std::sync::atomic::Ordering::SeqCst);
         #[cfg(desktop)]
         tray(app);
@@ -743,7 +797,12 @@ pub fn run() {
                 use tauri_plugin_notification::NotificationExt;
                 let _ = h.notification().request_permission();
             }
-            start(&h, None).await
+            let r = start(&h, None).await;
+            #[cfg(desktop)]
+            if let Some(n) = running() {
+                pair(h, n).await;
+            }
+            r
         });
         Ok(())
     });
@@ -826,8 +885,6 @@ async fn start(app: &AppHandle, link: Option<String>) -> Result<(), String> {
     let r = r.await.map_err(err);
     if let Ok(n) = &r {
         forward(app.clone(), n.clone());
-        #[cfg(target_os = "android")]
-        tauri::async_runtime::spawn(android::firebase(app.clone(), n.clone()));
     }
     let done = r.as_ref().map(drop).map_err(Clone::clone);
     app.state::<App>().0.send_replace(Some(r));

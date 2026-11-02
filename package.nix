@@ -10,7 +10,8 @@ rustPlatform.buildRustPackage {
     src = lib.cleanSource ./.;
     filter = p: _: baseNameOf p != "target";
   };
-  cargoLock.lockFile = ./Cargo.lock;
+  # irpush comes from git, at the commit Cargo.lock names.
+  cargoLock = { lockFile = ./Cargo.lock; allowBuiltinFetchGit = true; };
   # typst asks for rustc 1.92 and builds with NixOS 25.11's 1.91.
   cargoBuildFlags = [ "-p" "irch" "-p" "irch-app" "--ignore-rust-version" ];
   buildFeatures = [ "irch-app/custom-protocol" ];
@@ -25,9 +26,11 @@ rustPlatform.buildRustPackage {
     ++ (with gst_all_1; [
       gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav
     ]);
-  # The tray loads it at run time.
+  # The tray loads it at run time. WebKit's DMA-BUF renderer leaves a blank
+  # window on some GPUs under Wayland (sway): off unless set otherwise.
   preFixup = ''
     gappsWrapperArgs+=(--prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ libayatana-appindicator ]})
+    gappsWrapperArgs+=(--set-default WEBKIT_DISABLE_DMABUF_RENDERER 1)
   '';
   desktopItems = [
     (makeDesktopItem {
