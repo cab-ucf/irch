@@ -805,13 +805,15 @@ impl App {
                 let mut t = format!(
                     "The last day: iroh on {} min over {} runs, woken by a \
                      push {woke} times; {} kB out ({} kB by relay), {} kB \
-                     in, {} packets in.\n",
+                     in, {} packets in, {} probes (iroh's count: no TLS \
+                     or DNS).\n",
                     sum("s") / 60,
                     runs.len(),
                     kb("out"),
                     kb("relay_out"),
                     kb("in"),
                     sum("datagrams_in"),
+                    sum("probes"),
                 );
                 for e in log.iter().rev().take(30) {
                     t.push_str(&format!("\n{e}"));

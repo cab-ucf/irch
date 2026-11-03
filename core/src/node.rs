@@ -77,10 +77,10 @@ const LOCKED: &str = "keys changed without you: ask for a new invite";
 
 #[derive(Clone, Debug, Default)]
 pub enum Net {
-    /// The lab's relay, then n0's US East; n0's DNS and the Mainline DHT.
+    /// The lab's relay, then n0's US East; n0's DNS.
     #[default]
     Default,
-    /// Your own relays and the Mainline DHT; nothing of n0's.
+    /// Your own relays; nothing of n0's.
     Relay(Vec<RelayUrl>),
     Lan,
     /// Only addresses from codes and the address book (tests).
@@ -656,13 +656,41 @@ pub(crate) fn public(ip: &std::net::IpAddr) -> bool {
     }
 }
 
-pub(crate) fn endpoint(net: &Net) -> iroh::endpoint::Builder {
+fn relays(urls: &[RelayUrl], quiet: bool) -> iroh::RelayMap {
+    let map = urls.iter().enumerate().map(|(i, u)| {
+        let mut c = iroh::RelayConfig::from(u.clone());
+        c.quic = c.quic.filter(|_| i == 0 && !quiet);
+        c
+    });
+    map.collect()
+}
+
+#[test]
+fn only_the_first_relay_is_probed_and_none_when_quiet() {
+    let urls = RELAYS.map(|r| r.parse().expect("relay url"));
+    let probed = |quiet| {
+        let m = relays(&urls, quiet);
+        let q = |u: &RelayUrl| m.get(u).and_then(|c| c.quic.clone()).is_some();
+        urls.iter().map(q).collect::<Vec<_>>()
+    };
+    assert_eq!(probed(false), [true, false]);
+    assert_eq!(probed(true), [false, false]);
+}
+
+/// Probing kept to what reaching peers needs: our public address asked of
+/// the first relay alone, and of none once irpush and a storage node keep
+/// us reachable (the relay's long-lived TCP; peers' links tell us the
+/// rest); no https latency or captive-portal probes; no DHT.
+pub(crate) fn endpoint(net: &Net, quiet: bool) -> iroh::endpoint::Builder {
+    let relays = |urls: &[RelayUrl]| RelayMode::Custom(relays(urls, quiet));
+    let ours = RELAYS.map(|r| r.parse().expect("relay url"));
     let b = match net {
-        Net::Default => Endpoint::builder(presets::N0).relay_mode(
-            RelayMode::custom(RELAYS.map(|r| r.parse().expect("relay url"))),
-        ),
-        Net::Relay(urls) => Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::custom(urls.clone())),
+        Net::Default => {
+            Endpoint::builder(presets::N0).relay_mode(relays(&ours))
+        }
+        Net::Relay(urls) => {
+            Endpoint::builder(presets::Minimal).relay_mode(relays(urls))
+        }
         Net::Lan => Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
             .address_lookup(
@@ -688,6 +716,7 @@ pub(crate) fn endpoint(net: &Net) -> iroh::endpoint::Builder {
             .max_idle_timeout(Some(idle.try_into().expect("60 s")))
             .build(),
     );
+    let b = b.net_report_config(iroh::endpoint::NetReportConfig::minimal());
     // A phone's network has no router to map ports on: no probing it.
     #[cfg(target_os = "android")]
     let b = b.portmapper_config(iroh::endpoint::PortmapperConfig::Disabled);
@@ -794,15 +823,6 @@ fn gate(n: std::sync::Weak<Node>) -> iroh_blobs::provider::events::EventSender {
     tx
 }
 
-// Phones skip the Mainline DHT's always-on routing table; relays suffice.
-fn dht(b: iroh::endpoint::Builder) -> iroh::endpoint::Builder {
-    #[cfg(not(target_os = "android"))]
-    let b = b.address_lookup(
-        iroh_mainline_address_lookup::DhtAddressLookup::builder(),
-    );
-    b
-}
-
 impl Node {
     pub async fn start(cfg: Config) -> Result<Arc<Self>> {
         std::fs::create_dir_all(&cfg.dir)?;
@@ -835,10 +855,7 @@ impl Node {
         let lookup = MemoryLookup::new();
         local.peers.values().for_each(|a| lookup.add_endpoint_info(a.clone()));
         let bind = async |port: u16| {
-            let b = match &cfg.net {
-                Net::Default | Net::Relay(_) => dht(endpoint(&cfg.net)),
-                _ => endpoint(&cfg.net),
-            };
+            let b = endpoint(&cfg.net, prefs.push.is_some());
             let v6 = BindOpts::default().set_is_required(false);
             let b = b.secret_key(dev.clone()).address_lookup(lookup.clone());
             let b = b
