@@ -50,6 +50,22 @@ async fn ask(ep: &Endpoint, to: EndpointAddr, a: &Ask) -> Result<Vec<u8>> {
     tokio::time::timeout(SLOW, go).await?
 }
 
+/// Our home relay, and whether it is irpush's (a token: quiet).
+pub fn relay(dir: &Path) -> (String, bool) {
+    let r = std::fs::read_to_string(dir.join("relays"));
+    let r = r.unwrap_or_else(|_| crate::node::RELAYS[0].into());
+    let first = r.split(',').next().unwrap_or_default();
+    let (url, token) = first.split_once('#').unwrap_or((first, ""));
+    (url.into(), !token.is_empty())
+}
+
+/// A storage node's irpush relay, checked, kept in DIR/push-relay.
+pub fn set_relay(dir: &Path, l: &str) -> Result<()> {
+    ensure!(!irpush::Relay::list(l)?.is_empty(), "no relay given");
+    std::fs::create_dir_all(dir)?;
+    store::write(&dir.join("push-relay"), l.trim().as_bytes())
+}
+
 /// A ticket to pair our irpush device with `to`.
 pub async fn ticket(ep: &Endpoint, to: EndpointAddr) -> Result<String> {
     Ok(String::from_utf8(ask(ep, to, &Ask::Ticket).await?)?)
@@ -188,14 +204,16 @@ fn kek(dir: &Path) -> Result<[u8; 32]> {
     Ok(k)
 }
 
-/// Where a storage node's irpush meets phones: the systemd credential
-/// `push-relay` ("https://irpush.you.example#TOKEN", kept out of the Nix
-/// store), or `IRCH_PUSH_RELAY`; else irch's relays (n0's last unless they
-/// are your own). LAN only, none.
-fn relays(net: &Net) -> Option<Vec<irpush::Relay>> {
-    let cred = std::env::var_os("CREDENTIALS_DIRECTORY").and_then(|d| {
-        std::fs::read_to_string(Path::new(&d).join("push-relay")).ok()
-    });
+/// Where a storage node's irpush meets phones, and so the relay its phones
+/// use for everything: "https://irpush.you.example#TOKEN", from the systemd
+/// credential `push-relay` (kept out of the Nix store), DIR/push-relay
+/// (`irch --install --push-relay`) or `IRCH_PUSH_RELAY`; else irch's relays
+/// (n0's last unless they are your own). LAN only, none.
+fn relays(dir: &Path, net: &Net) -> Option<Vec<irpush::Relay>> {
+    let read = |d: &Path| std::fs::read_to_string(d.join("push-relay")).ok();
+    let cred = std::env::var_os("CREDENTIALS_DIRECTORY")
+        .and_then(|d| read(Path::new(&d)))
+        .or_else(|| read(dir));
     let given = cred.or_else(|| std::env::var("IRCH_PUSH_RELAY").ok());
     let l = match (given, net) {
         (Some(l), _) => l.trim().to_string(),
@@ -208,7 +226,13 @@ fn relays(net: &Net) -> Option<Vec<irpush::Relay>> {
 
 /// A storage node's irpush host, running.
 fn host(dir: &Path, net: &Net) -> Result<Option<Arc<irpush::Node>>> {
-    let Some(relays) = relays(net) else { return Ok(None) };
+    let Some(relays) = relays(dir, net) else { return Ok(None) };
+    if relays.iter().all(|r| r.token.is_none()) {
+        tracing::warn!(
+            "no irpush relay: phones use a stock one, pinged every 15 s \
+             (irch --install --push-relay https://irpush…#TOKEN)"
+        );
+    }
     let (f, kek) = (dir.join("irpush"), kek(dir)?);
     let n = match f.exists() {
         true => irpush::Node::open(&f, kek, vec![])?,
@@ -380,4 +404,19 @@ impl ProtocolHandler for Server {
             AcceptError::from_err(std::io::Error::other(e.to_string()))
         })
     }
+}
+
+#[test]
+fn a_storage_nodes_relay_is_checked_kept_and_told() {
+    let n = u64::from_le_bytes(crate::crypto::rand());
+    let d = std::env::temp_dir().join(format!("irch-relay-{n}"));
+    assert!(set_relay(&d, "not a url").is_err());
+    let r = format!("https://irpush.example./#{}", "ab".repeat(32));
+    set_relay(&d, &r).unwrap();
+    assert_eq!(std::fs::read_to_string(d.join("push-relay")).unwrap(), r);
+    assert!(!relay(&d).1, "unpaired: a stock relay");
+    std::fs::write(d.join("relays"), format!("{r},https://b.example./"))
+        .unwrap();
+    assert_eq!(relay(&d), ("https://irpush.example./".into(), true));
+    let _ = std::fs::remove_dir_all(d);
 }

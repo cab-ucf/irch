@@ -815,6 +815,15 @@ impl App {
                     sum("datagrams_in"),
                     sum("probes"),
                 );
+                let (relay, quiet) = irch_core::push::relay(n.dir());
+                t.push_str(&match quiet {
+                    true => format!("Relay {relay}: irpush's, quiet.\n"),
+                    false => format!(
+                        "Relay {relay}: a stock one, pinged every 15 s; \
+                         pair with a storage node that has an irpush relay \
+                         (irch --install --push-relay).\n"
+                    ),
+                });
                 for e in log.iter().rev().take(30) {
                     t.push_str(&format!("\n{e}"));
                 }
