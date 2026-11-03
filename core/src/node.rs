@@ -177,8 +177,11 @@ struct Page {
     dm: bool,
     ring: bool,
     level: Level,
-    // `@our name`, as messages mention us.
+    // `@our name`, as messages mention us; and our newest posts, a reply
+    // to which is to us.
     tag: String,
+    #[serde(default)]
+    ours: Vec<Id>,
     key: Key,
     names: BTreeMap<Id, String>,
     rooms: BTreeMap<Ch, String>,
@@ -1177,12 +1180,14 @@ impl Node {
             let (s, dm) = (&b.st, b.st.dm.is_some());
             let ring = level != Level::Off && (dm || level == Level::All);
             let tag = format!("@{}", s.display_name(&me).to_lowercase());
+            let ours = s.recent_by(&me, 200);
             let page = Page {
                 name: s.name().to_string(),
                 dm,
                 ring: ring && loud,
                 level,
                 tag,
+                ours,
                 key,
                 names,
                 rooms: s.rooms().into_iter().collect(),
@@ -1237,8 +1242,10 @@ impl Node {
             hush,
         };
         let shown = match s.op {
-            Op::Post { channel, text, .. } => {
-                let mention = p.dm || text.to_lowercase().contains(&p.tag);
+            Op::Post { channel, text, reply, .. } => {
+                let mention = p.dm
+                    || text.to_lowercase().contains(&p.tag)
+                    || reply.is_some_and(|r| p.ours.contains(&r));
                 let tell = match p.level {
                     Level::All => true,
                     Level::Mentions => mention,

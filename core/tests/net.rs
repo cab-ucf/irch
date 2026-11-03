@@ -1155,3 +1155,46 @@ async fn a_small_spaces_call_rings() {
     assert_eq!(rings.len(), 1, "it rings");
     assert!(b.loud(&id));
 }
+
+/// On "mentions only", a sleeping phone is told of a reply to one of its
+/// messages, no @name needed, and not of the rest.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_to_you_is_a_mention_while_asleep() {
+    use irch_core::wake;
+    let db = dir("b");
+    let a = node("a").await;
+    let b = start(&db, "b", None, false).await;
+    let id = a.create("hub").await.unwrap();
+    let ch = general(&a, &id);
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let mine = say(&b, &id, ch, "anyone up?").await;
+    until("a has it", || texts(&a, &id, &ch) == ["anyone up?"]).await;
+    b.set_level(&id, irch_core::Level::Mentions);
+    let url = wake::doorbell(&db, &Net::Direct).await.unwrap();
+    b.set_push(Some(url)).await;
+    let ring = |p: &(iroh::EndpointId, String)| p.1.starts_with("irch:ring:");
+    let told = || a.view(&id, |s| s.pushes_of(None).iter().any(ring));
+    until("a knows b's doorbell", || told() == Some(true)).await;
+    let named = || b.view(&id, |s| s.profile(&a.id()).is_some()) == Some(true);
+    until("b knows a", named).await;
+    b.shutdown().await;
+    drop(b);
+    let rung = async |op: Op| {
+        let d = db.clone();
+        let phone =
+            tokio::spawn(async move { wake::rung(&d, &Net::Direct).await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        a.publish(&id, op).await.unwrap();
+        let news = phone.await.unwrap().unwrap().expect("sealed");
+        Node::woken(&db, &news).0
+    };
+    let post = |text: &str, reply| Op::Post {
+        channel: ch,
+        text: text.into(),
+        reply,
+        files: vec![],
+    };
+    assert!(rung(post("morning all", None)).await.is_none(), "not to b");
+    let n = rung(post("me!", Some(mine))).await.expect("to b: told");
+    assert_eq!(n.body, "me!");
+}
