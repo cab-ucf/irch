@@ -471,6 +471,18 @@ impl State {
         v
     }
 
+    /// `user`'s newest posts here, at most `n`: a reply to one is to them.
+    pub fn recent_by(&self, user: &Id, n: usize) -> Vec<Id> {
+        let mut v: Vec<_> = self
+            .posts
+            .values()
+            .flat_map(|ch| ch.iter().rev().filter(|(_, p)| p.author == *user))
+            .map(|(at, _)| *at)
+            .collect();
+        v.sort_unstable_by(|a, b| b.cmp(a));
+        v.into_iter().take(n).map(|at| at.1).collect()
+    }
+
     /// Up to when `user` has read `ch`.
     pub fn read_by(&self, user: &Id, ch: &Ch) -> u64 {
         self.reads.get(&(*user, *ch)).copied().unwrap_or(0)
