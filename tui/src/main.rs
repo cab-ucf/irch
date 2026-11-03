@@ -49,6 +49,10 @@ struct Cli {
     /// Keep a storage node running here, from now on (as you)
     #[arg(long)]
     install: bool,
+    /// With --install: its phones' relay, "https://irpush.you.example#TOKEN"
+    /// (irpush's deploy/: `make token`); quiet, pinged after 130 min
+    #[arg(long, value_name = "URL#TOKEN", requires = "install")]
+    push_relay: Option<String>,
     /// Stop the storage node --install keeps
     #[arg(long)]
     uninstall: bool,
@@ -113,6 +117,10 @@ async fn main() -> Result<()> {
     // Before any update: Linux names a replaced binary "… (deleted)".
     let exe = std::env::current_exe()?;
     if c.install {
+        if let Some(r) = &c.push_relay {
+            let d = dirs::data_dir().unwrap_or_default().join("irch-serve");
+            irch_core::push::set_relay(&d, r)?;
+        }
         return service::install(&exe);
     }
     if c.uninstall {

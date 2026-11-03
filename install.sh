@@ -1,7 +1,8 @@
 #!/bin/sh
 # Self-updating irch: curl -fsSL $R/install.sh | sh [-s -- --server]
 # --server: an always-on storage node instead (a service), which is also
-# its phones' push server (irpush).
+# its phones' push server (irpush); then --push-relay URL#TOKEN, its
+# phones' quiet relay.
 # Fetched by curl, nothing is quarantined: no Gatekeeper, no xattr.
 set -eu
 R=https://github.com/cab-ucf/irch/releases/latest/download
@@ -29,7 +30,8 @@ if [ "${1:-}" = --server ]; then
   mkdir -p "$bin"
   get "$R/irch-$cpu-$t" "$bin/irch.part"
   chmod +x "$bin/irch.part" && mv "$bin/irch.part" "$bin/irch"
-  exec "$bin/irch" --install
+  shift
+  exec "$bin/irch" --install "$@"
 fi
 
 if [ "$(uname -s)" = Darwin ]; then

@@ -2462,6 +2462,10 @@ async function usageFlow() {
         `through a relay), received ${amount(sum("in"))}; ` +
         `${sum("datagrams_in")} packets in; ${sum("probes")} network ` +
         "probes. iroh's own count: not the TLS or DNS around it."),
+      h("p", { class: "sub" }, `Relay: ${u.relay}, ` + (u.quiet
+        ? "irpush's: pinged after 130 min, not 15 s."
+        : "a stock one, pinged every 15 s: pair with a storage node that " +
+          "has an irpush relay (irch --install --push-relay).")),
       phone && h("p", { class: "sub" }, `Since the phone started, irch ` +
         `sent ${phone.tx_packets} packets (${amount(phone.tx_bytes)}) and ` +
         `received ${phone.rx_packets} (${amount(phone.rx_bytes)}), ` +

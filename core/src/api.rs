@@ -332,7 +332,9 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
         Call::Usage => {
             let log = crate::usage::read(n.dir());
             let log = &log[log.len().saturating_sub(500)..];
-            json!({ "log": log, "now": n.usage() })
+            let (relay, quiet) = crate::push::relay(n.dir());
+            json!({ "log": log, "now": n.usage(), "relay": relay,
+                "quiet": quiet })
         }
         Call::Ringing { space, channel } => {
             json!(n.ringing(&space, channel).await)

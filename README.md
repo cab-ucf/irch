@@ -21,7 +21,9 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
   (updated by hand), or TestFlight once releases have an App Store
   Connect key.
 - **Storage node** (always on): a space's *Storage Nodes → Run one on this
-  computer*, or `install.sh … | sh -s -- --server`.
+  computer*, or `install.sh … | sh -s -- --server`. Add `--push-relay
+  https://irpush.you.example#TOKEN` (irpush's `make token`) so its
+  phones relay through irpush's quiet relay, not a stock one.
 - **NixOS**: `inputs.irch.url = "github:cab-ucf/irch";` and
   `irch.nixosModules.default` among the modules: the app and a storage
   node, kept up to date (checked against irch's key, built by Nix; the
