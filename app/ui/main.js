@@ -2430,7 +2430,7 @@ async function usageFlow() {
   const relay = sum("out") && Math.round(100 * sum("relay_out") / sum("out"));
   const line = (e) => e.ev === "down"
     ? `iroh off after ${Math.round(e.s / 60)} min: ${amount(e.out)} out, ` +
-      `${amount(e.in)} in, ${e.conns} connections`
+      `${amount(e.in)} in, ${e.conns} connections, ${e.probes ?? 0} probes`
     : e.ev === "up" ? "iroh on" : "woken by a push";
   modal((finish) => h("div", {},
     h("div", { class: "m-body" }, h("h2", {}, "Network use"),
@@ -2438,7 +2438,8 @@ async function usageFlow() {
         `${Math.round(sum("s") / 60)} min over ${runs.length} runs, woken ` +
         `by a push ${woke} times. Sent ${amount(sum("out"))} (${relay}% ` +
         `through a relay), received ${amount(sum("in"))}; ` +
-        `${sum("datagrams_in")} packets in.`),
+        `${sum("datagrams_in")} packets in; ${sum("probes")} network ` +
+        "probes. iroh's own count: not the TLS or DNS around it."),
       phone && h("p", { class: "sub" }, `Since the phone started, irch ` +
         `sent ${phone.tx_packets} packets (${amount(phone.tx_bytes)}) and ` +
         `received ${phone.rx_packets} (${amount(phone.rx_bytes)}), ` +

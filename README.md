@@ -184,12 +184,14 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   A call is said as it starts, and a ring for one starts the node at once,
   so it connects as it is answered.
   Idle links keep alive every 25 s only while irch runs; asleep, a device
-  holds irpush's socket alone.
+  holds irpush's socket alone. Running, iroh asks one relay for the
+  public address (none once irpush and a storage node keep it reachable),
+  with no https latency, captive-portal or DHT probing.
 
 | network | terminal (app env) | who else is involved |
 |---|---|---|
-| default | | relays iroh.cxn.center and n0; n0 DNS; Mainline DHT |
-| own relays | `--relay URL` (`IRCH_RELAY`) | your relays; Mainline DHT |
+| default | | relays iroh.cxn.center and n0; n0 DNS |
+| own relays | `--relay URL` (`IRCH_RELAY`) | your relays |
 | LAN only | `--lan` (`IRCH_LAN=1`) | nobody (mDNS) |
 
 ## Limits
@@ -201,8 +203,7 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   identity, not alone; you then start a new one and rejoin.
 - Signatures are Ed25519; stored data is post-quantum, transport is not.
 - Peers see each other's addresses, relays see endpoint ids and traffic,
-  storage nodes see sizes, times and devices. The Mainline DHT says an
-  endpoint id is online, to anyone.
+  storage nodes see sizes, times and devices.
 - A member's UnifiedPush server learns when each member writes, and from
   where. A push server learns that much, and which spaces a ring is for;
   irpush's relay, when and the phone's address. Doorbell codes are per

@@ -1,6 +1,8 @@
 //! What the network cost, a line each time it changed: the node up, the
 //! node down (how long, and what iroh sent and heard), a push woke it.
-//! Written only then: logging costs no packets and wakes nothing.
+//! Written only then: logging costs no packets and wakes nothing. iroh's
+//! own count: its UDP and what relays carried, and how often it probed;
+//! not TLS or DNS around them (Android's count of the app has all).
 
 use serde_json::{Value, json};
 use std::io::Write;
@@ -38,6 +40,8 @@ pub fn counted(ep: &iroh::Endpoint) -> Value {
         "relay_in": s.recv_data_relay.get(),
         "datagrams_in": s.recv_datagrams.get(),
         "conns": s.num_conns_opened.get(),
+        "probes": ep.metrics().net_report.reports.get(),
+        "relay_conns": s.relay_conns_success.get(),
     })
 }
 
