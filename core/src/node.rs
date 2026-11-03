@@ -566,6 +566,8 @@ impl Space {
 }
 
 pub struct Node {
+    /// Since when this node is up: its run, in the usage log.
+    up: Instant,
     me: Me,
     own: Id,
     dir: PathBuf,
@@ -872,6 +874,7 @@ impl Node {
             hosts.entry(id).or_default().users.insert(Id::default(), d);
         }
         let n = Arc::new(Self {
+            up: Instant::now(),
             own: own_inv.id(),
             me,
             dir: cfg.dir,
@@ -951,6 +954,7 @@ impl Node {
             n.reconcile().await;
         }
         tokio::spawn(heartbeat(Arc::downgrade(&n)));
+        crate::usage::note(&n.dir, "up", serde_json::json!({}));
         Ok(n)
     }
 
@@ -1181,6 +1185,7 @@ impl Node {
         dir: &Path,
         (space, raw): &crate::wake::News,
     ) -> (Option<Notice>, bool) {
+        crate::usage::note(dir, "woken", serde_json::json!({}));
         let pb: BTreeMap<Id, Page> = store::load(&dir.join("phonebook"));
         let opened = postcard::from_bytes::<Env>(raw).ok().and_then(|e| {
             let p = pb.get(space)?;
@@ -3670,6 +3675,18 @@ impl Node {
             let _ = r.shutdown().await;
         }
         lock(&self.held).take();
+        crate::usage::note(&self.dir, "down", self.usage());
+    }
+
+    /// This run so far: seconds up, and what iroh moved.
+    pub fn usage(&self) -> serde_json::Value {
+        let mut v = crate::usage::counted(&self.ep);
+        v["s"] = self.up.elapsed().as_secs().into();
+        v
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 }
 

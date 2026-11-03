@@ -9,6 +9,9 @@ import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
+import android.net.TrafficStats
+import android.os.BatteryManager
+import android.os.Process
 import android.net.Uri
 import android.os.Build
 import android.webkit.WebView
@@ -107,6 +110,29 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
       .put("background", push != null || unrestricted(activity))
       .put("calls", fullScreen(activity))
       .put("push", label))
+  }
+
+  /** This app's traffic since boot, irpush's socket too; the battery. */
+  @Command
+  fun traffic(invoke: Invoke) {
+    val u = Process.myUid()
+    val b = activity.getSystemService(BatteryManager::class.java)
+    val pct = b?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+    invoke.resolve(JSObject()
+      .put("tx_packets", TrafficStats.getUidTxPackets(u))
+      .put("rx_packets", TrafficStats.getUidRxPackets(u))
+      .put("tx_bytes", TrafficStats.getUidTxBytes(u))
+      .put("rx_bytes", TrafficStats.getUidRxBytes(u))
+      .put("battery", pct))
+  }
+
+  /** Android's own count of each app's battery. */
+  @Command
+  fun batteryUse(invoke: Invoke) {
+    runCatching {
+      activity.startActivity(Intent(Intent.ACTION_POWER_USAGE_SUMMARY))
+    }
+    invoke.resolve()
   }
 
   @Command

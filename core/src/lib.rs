@@ -13,6 +13,7 @@ pub mod release;
 pub mod state;
 mod store;
 mod sync;
+pub mod usage;
 #[cfg(feature = "voice")]
 pub mod voice;
 pub mod wake;

@@ -17,7 +17,9 @@ chacha20poly1305 = "0.11"
 data-encoding = "2"
 getrandom = "0.4"
 dirs = "7"
-iroh = { version = "1.4", default-features = false, features = ["tls-ring"] }
+iroh = { version = "1.4", default-features = false, features = [
+  "tls-ring", "metrics",
+] }
 iroh-gossip = { version = "0.101", default-features = false, features = ["net"] }
 noq-proto = { version = "1.4", default-features = false }
 # Files kept on their sender's device: verified, resumable, any size.

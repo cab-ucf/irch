@@ -29,6 +29,7 @@ x         close a DM (kept; back with its next message)
 
 :create NAME  :join CODE  :invite  :dm USER  :b NAME (go)  :nick NAME
 :contact      your code: whoever joins it can DM you
+:usage        when iroh ran, what it sent, pushes that woke it
 :leave        leave a space; in a DM, delete it from your devices
 :close        put a DM away, kept     :invisible  no presence or typing
 :channel NAME  :rmchannel  :rename NAME  :room NAME (a named thread)
@@ -785,6 +786,37 @@ impl App {
                     "Your contact code, copied if your terminal allows. \
                      Whoever :joins it gets a DM with you.\n\n{code}"
                 ));
+            }
+            "usage" => {
+                let day = irch_core::now().saturating_sub(86_400_000);
+                let log = irch_core::usage::read(n.dir());
+                let log: Vec<_> = log
+                    .into_iter()
+                    .filter(|e| e["ts"].as_u64() > Some(day))
+                    .collect();
+                let now = n.usage();
+                let downs = log.iter().filter(|e| e["ev"] == "down");
+                let runs: Vec<_> = downs.chain([&now]).collect();
+                let sum = |k: &str| -> u64 {
+                    runs.iter().filter_map(|e| e[k].as_u64()).sum()
+                };
+                let woke = log.iter().filter(|e| e["ev"] == "woken").count();
+                let kb = |k| sum(k) / 1000;
+                let mut t = format!(
+                    "The last day: iroh on {} min over {} runs, woken by a \
+                     push {woke} times; {} kB out ({} kB by relay), {} kB \
+                     in, {} packets in.\n",
+                    sum("s") / 60,
+                    runs.len(),
+                    kb("out"),
+                    kb("relay_out"),
+                    kb("in"),
+                    sum("datagrams_in"),
+                );
+                for e in log.iter().rev().take(30) {
+                    t.push_str(&format!("\n{e}"));
+                }
+                self.notice = Some(t);
             }
             "link" => {
                 self.notice = Some(format!(
