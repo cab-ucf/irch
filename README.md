@@ -183,14 +183,14 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   unheard from 20. Typing is said as the input fills and as it empties.
   A call is said as it starts, and a ring for one starts the node at once,
   so it connects as it is answered.
-  Idle links keep alive every 25 s only while irch runs; asleep, a device
-  holds irpush's socket alone. Running, iroh asks one relay for the
-  public address (none once irpush and a storage node keep it reachable),
-  with no https latency, captive-portal or DHT probing.
+  Open links are pinged every 5 s (iroh's fixed rate), so irch holds them
+  only while in sight or in a call; asleep, a device holds irpush's socket
+  alone. iroh does no address, https latency, captive-portal or DHT
+  probing.
 
 | network | terminal (app env) | who else is involved |
 |---|---|---|
-| default | | relays iroh.cxn.center and n0; n0 DNS |
+| default | | relays irpush.cxn.center (iroh.cxn.center if built without `IRCH_RELAY_TOKEN`) and n0; n0 DNS |
 | own relays | `--relay URL` (`IRCH_RELAY`) | your relays |
 | LAN only | `--lan` (`IRCH_LAN=1`) | nobody (mDNS) |
 

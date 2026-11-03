@@ -199,7 +199,7 @@ fn relays(net: &Net) -> Option<Vec<irpush::Relay>> {
     let given = cred.or_else(|| std::env::var("IRCH_PUSH_RELAY").ok());
     let l = match (given, net) {
         (Some(l), _) => l.trim().to_string(),
-        (_, Net::Default) => crate::node::RELAYS[0].into(),
+        (_, Net::Default) => crate::node::relays_ours()[0].clone(),
         (_, Net::Relay(u)) => format!("{},!n0", u[0]),
         _ => return None,
     };
