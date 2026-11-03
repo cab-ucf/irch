@@ -40,8 +40,7 @@ async fn bell(dir: &Path, net: &Net) -> Result<Bell> {
     }
     let k = kept(dir)?;
     let key = SecretKey::from_bytes(&k[..32].try_into()?);
-    // Reached through its relay: no probing of its own.
-    let b = crate::node::endpoint(net, true).secret_key(key);
+    let b = crate::node::endpoint(net).secret_key(key);
     let ep = b.alpns(vec![ALPN.to_vec()]).bind().await?;
     let bell = (ep, k[32..].try_into()?);
     bells.insert(dir.into(), bell.clone());
@@ -223,8 +222,7 @@ mod tests {
             std::env::temp_dir().join(format!("irch-bell-{}", crate::now()));
         let bell = doorbell(&dir, &Net::Direct).await.unwrap();
         assert_eq!(bell, doorbell(&dir, &Net::Direct).await.unwrap(), "kept");
-        let ep =
-            crate::node::endpoint(&Net::Direct, true).bind().await.unwrap();
+        let ep = crate::node::endpoint(&Net::Direct).bind().await.unwrap();
         let (sp, other) = (Id([7; 32]), Id([8; 32]));
         let (old, new) =
             (for_space(&bell, &sp, &[1; 8]), for_space(&bell, &sp, &[2; 8]));

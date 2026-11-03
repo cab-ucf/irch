@@ -54,8 +54,18 @@ pub const AWAY: Duration = Duration::from_secs(600);
 const TYPING: Duration = Duration::from_secs(50);
 // A callee says once that it rings; its caller hears ringback this long.
 const RANG: Duration = Duration::from_secs(45);
-pub(crate) const RELAYS: [&str; 2] =
-    ["https://iroh.cxn.center./", "https://use1-1.relay.n0.iroh.link./"];
+/// Ours, then n0's US East. Ours is irpush's relay, which pings a quiet
+/// client only after 130 min: its token (not a secret: it keeps strangers
+/// off) given at build time as IRCH_RELAY_TOKEN; built without one, the
+/// lab's stock relay. `url#token`, as irpush lists relays.
+pub(crate) fn relays_ours() -> [String; 2] {
+    let token = option_env!("IRCH_RELAY_TOKEN").filter(|t| !t.is_empty());
+    let first = match token {
+        Some(t) => format!("https://irpush.cxn.center./#{t}"),
+        None => "https://iroh.cxn.center./".into(),
+    };
+    [first, "https://use1-1.relay.n0.iroh.link./".into()]
+}
 pub use crate::op::{MAX_NAME, MAX_TEXT};
 /// What storage nodes keep without their password.
 pub const MAX_FILE: u64 = 5 << 30;
@@ -656,41 +666,37 @@ pub(crate) fn public(ip: &std::net::IpAddr) -> bool {
     }
 }
 
-fn relays(urls: &[RelayUrl], quiet: bool) -> iroh::RelayMap {
-    let map = urls.iter().enumerate().map(|(i, u)| {
-        let mut c = iroh::RelayConfig::from(u.clone());
-        c.quic = c.quic.filter(|_| i == 0 && !quiet);
-        c
-    });
-    map.collect()
+/// `url#token` each; none asked for our address (irpush's relay has no
+/// QUIC for it): peers' links tell us, and the relay's TCP reaches us.
+fn relays<'a>(list: impl IntoIterator<Item = &'a str>) -> iroh::RelayMap {
+    let one = |l: &str| {
+        let (u, t) = l.split_once('#').unwrap_or((l, ""));
+        let mut c = iroh::RelayConfig::from(u.parse::<RelayUrl>().ok()?);
+        c.quic = None;
+        Some(if t.is_empty() { c } else { c.with_auth_token(t) })
+    };
+    list.into_iter().filter_map(one).collect()
 }
 
 #[test]
-fn only_the_first_relay_is_probed_and_none_when_quiet() {
-    let urls = RELAYS.map(|r| r.parse().expect("relay url"));
-    let probed = |quiet| {
-        let m = relays(&urls, quiet);
-        let q = |u: &RelayUrl| m.get(u).and_then(|c| c.quic.clone()).is_some();
-        urls.iter().map(q).collect::<Vec<_>>()
-    };
-    assert_eq!(probed(false), [true, false]);
-    assert_eq!(probed(true), [false, false]);
+fn relays_carry_their_tokens_and_are_never_probed() {
+    let m = relays(["https://a.example./#tok", "https://b.example./"]);
+    let c = |u: &str| m.get(&u.parse().expect("url")).expect("listed");
+    assert_eq!(c("https://a.example./").auth_token.as_deref(), Some("tok"));
+    assert_eq!(c("https://b.example./").auth_token, None);
+    assert!(m.relays::<Vec<_>>().iter().all(|c| c.quic.is_none()));
 }
 
-/// Probing kept to what reaching peers needs: our public address asked of
-/// the first relay alone, and of none once irpush and a storage node keep
-/// us reachable (the relay's long-lived TCP; peers' links tell us the
-/// rest); no https latency or captive-portal probes; no DHT.
-pub(crate) fn endpoint(net: &Net, quiet: bool) -> iroh::endpoint::Builder {
-    let relays = |urls: &[RelayUrl]| RelayMode::Custom(relays(urls, quiet));
-    let ours = RELAYS.map(|r| r.parse().expect("relay url"));
+/// Probing kept to what reaching peers needs: no address discovery, no
+/// https latency or captive-portal probes, no DHT.
+pub(crate) fn endpoint(net: &Net) -> iroh::endpoint::Builder {
     let b = match net {
-        Net::Default => {
-            Endpoint::builder(presets::N0).relay_mode(relays(&ours))
-        }
-        Net::Relay(urls) => {
-            Endpoint::builder(presets::Minimal).relay_mode(relays(urls))
-        }
+        Net::Default => Endpoint::builder(presets::N0).relay_mode(
+            RelayMode::Custom(relays(relays_ours().iter().map(|s| &s[..]))),
+        ),
+        Net::Relay(urls) => Endpoint::builder(presets::Minimal).relay_mode(
+            RelayMode::Custom(relays(urls.iter().map(|u| u.as_str()))),
+        ),
         Net::Lan => Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
             .address_lookup(
@@ -703,17 +709,13 @@ pub(crate) fn endpoint(net: &Net, quiet: bool) -> iroh::endpoint::Builder {
     // BBRv3, as loss is the norm: at 0.1% and 50 ms Cubic moves 1.1 MB/s a
     // stream, BBRv3 23; a 2 MiB window, 16 MB/s at 130 ms (default: 10).
     let cc = noq_proto::congestion::Bbr3Config::default();
-    // Idle links: a keepalive every 25 s (iroh's: 5), as seldom as a NAT's
-    // 30 s for UDP allows; the timeouts outlast it. Traffic needs none.
-    let (alive, idle) = (Duration::from_secs(25), Duration::from_secs(60));
+    // An open link's paths are pinged every 5 s: iroh allows no less
+    // (longer is ignored, path timeouts clamp at 15 s). So links are held
+    // only while irch is in sight or in a call; else irpush's socket alone.
     let b = b.transport_config(
         iroh::endpoint::QuicTransportConfig::builder()
             .stream_receive_window((2u32 << 20).into())
             .congestion_controller_factory(Arc::new(cc))
-            .keep_alive_interval(alive)
-            .default_path_keep_alive_interval(alive)
-            .default_path_max_idle_timeout(idle)
-            .max_idle_timeout(Some(idle.try_into().expect("60 s")))
             .build(),
     );
     let b = b.net_report_config(iroh::endpoint::NetReportConfig::minimal());
@@ -855,7 +857,7 @@ impl Node {
         let lookup = MemoryLookup::new();
         local.peers.values().for_each(|a| lookup.add_endpoint_info(a.clone()));
         let bind = async |port: u16| {
-            let b = endpoint(&cfg.net, prefs.push.is_some());
+            let b = endpoint(&cfg.net);
             let v6 = BindOpts::default().set_is_required(false);
             let b = b.secret_key(dev.clone()).address_lookup(lookup.clone());
             let b = b
