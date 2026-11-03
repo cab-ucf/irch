@@ -53,9 +53,15 @@ pub async fn notify_check(
     ask: &str,
 ) -> anyhow::Result<serde_json::Value> {
     let b = app.try_state::<Bridge>().context("no bridge")?;
+    // The app's own traffic and the battery, for Network use.
+    if ask == "traffic" {
+        let got = b.0.run_mobile_plugin_async("traffic", serde_json::json!({}));
+        return Ok(got.await?);
+    }
     let cmd = match ask {
         "fix" => Some("allowAlerts"),
         "test" => Some("testAlert"),
+        "battery" => Some("batteryUse"),
         _ => None,
     };
     if let Some(cmd) = cmd {

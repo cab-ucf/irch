@@ -2339,6 +2339,9 @@ function settings() {
           class: "choice", onclick: () => { finish(null); sharedFlow(); },
         }, icon("disk"), "Files shared from this device"),
         h("button", {
+          class: "choice", onclick: () => { finish(null); usageFlow(); },
+        }, icon("speaker"), "Network use"),
+        h("button", {
           class: "choice", onclick: () => { finish(null); profilesFlow(); },
         }, icon("users"), "Devices, profiles and signing out"),
         h("button", {
@@ -2408,6 +2411,48 @@ function forgetPage() {
     }
   } catch {}
   theme(t);
+}
+
+const amount = (b = 0) => b < 1e6 ? `${(b / 1e3).toFixed(1)} kB`
+  : `${(b / 1e6).toFixed(1)} MB`;
+
+/** When iroh ran and what it moved (usage log), and on Android the app's
+ * own packets, irpush's socket among them, as the phone counts them. */
+async function usageFlow() {
+  const u = await rpc("usage").catch(() => null);
+  if (!u) return toast("No usage log here", true);
+  const phone = android &&
+    await invoke("notify_check", { ask: "traffic" }).catch(() => null);
+  const day = u.log.filter((e) => e.ts > Date.now() - 864e5);
+  const runs = [...day.filter((e) => e.ev === "down"), u.now];
+  const sum = (k) => runs.reduce((n, e) => n + (e[k] ?? 0), 0);
+  const woke = day.filter((e) => e.ev === "woken").length;
+  const relay = sum("out") && Math.round(100 * sum("relay_out") / sum("out"));
+  const line = (e) => e.ev === "down"
+    ? `iroh off after ${Math.round(e.s / 60)} min: ${amount(e.out)} out, ` +
+      `${amount(e.in)} in, ${e.conns} connections`
+    : e.ev === "up" ? "iroh on" : "woken by a push";
+  modal((finish) => h("div", {},
+    h("div", { class: "m-body" }, h("h2", {}, "Network use"),
+      h("p", { class: "sub" }, `The last day: iroh on ` +
+        `${Math.round(sum("s") / 60)} min over ${runs.length} runs, woken ` +
+        `by a push ${woke} times. Sent ${amount(sum("out"))} (${relay}% ` +
+        `through a relay), received ${amount(sum("in"))}; ` +
+        `${sum("datagrams_in")} packets in.`),
+      phone && h("p", { class: "sub" }, `Since the phone started, irch ` +
+        `sent ${phone.tx_packets} packets (${amount(phone.tx_bytes)}) and ` +
+        `received ${phone.rx_packets} (${amount(phone.rx_bytes)}), ` +
+        `irpush's socket included. Battery: ${phone.battery}% (the whole ` +
+        "phone; Android counts each app's share)."),
+      phone && h("button", { class: "choice", onclick: () =>
+        quiet(invoke("notify_check", { ask: "battery" })) },
+      icon("speaker"), "Android's battery use by app"),
+      h("div", { class: "qs-list" }, [...day].reverse().slice(0, 100)
+        .map((e) => h("div", { class: "row shared" },
+          h("small", {}, new Date(e.ts).toLocaleTimeString()),
+          h("span", {}, line(e)))))),
+    foot(h("button", { class: "btn grey", onclick: () => finish(null) },
+      "Done"))));
 }
 
 async function devicesFlow() {

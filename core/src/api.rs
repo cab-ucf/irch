@@ -161,6 +161,8 @@ pub enum Call {
         on: bool,
     },
     Levels,
+    /// What the network cost: the log, and this run so far.
+    Usage,
     /// A call to us rings here.
     Ringing {
         space: Id,
@@ -327,6 +329,11 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
         Call::Hangup => json!(n.call(None).await?),
         Call::Mute { on } => json!(n.mute(on)),
         Call::Levels => json!(n.levels()),
+        Call::Usage => {
+            let log = crate::usage::read(n.dir());
+            let log = &log[log.len().saturating_sub(500)..];
+            json!({ "log": log, "now": n.usage() })
+        }
         Call::Ringing { space, channel } => {
             json!(n.ringing(&space, channel).await)
         }
