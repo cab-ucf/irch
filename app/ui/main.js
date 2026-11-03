@@ -582,7 +582,9 @@ function renderSidebar() {
     store.set("asked", v);
     askAlerts();
   }
-  put($("server-header"), h("span", { class: "brand" }, "irch"),
+  put($("server-header"), h("button", { class: "brand",
+    title: "Settings and more", "aria-label": "Settings and more",
+    onclick: (e) => mainMenu(e.currentTarget) }, "irch"),
     h("button", { title: "Add a space (create or join)", onclick: addSpace },
       icon("plus")));
   const d = dms();
@@ -1880,6 +1882,26 @@ function menu(anchor, items, align) {
     items.map((it) => it === "-" ? h("hr") : it && item(it))), align);
 }
 
+// As Signal's: everything about you and this device, from the logo.
+function mainMenu(anchor) {
+  const alerts = () => modal((finish) => h("div", {},
+    h("div", { class: "m-body" }, h("h2", {}, "Notifications"), notifyCheck()),
+    foot(h("button", { class: "btn", onclick: () => finish() }, "OK"))));
+  menu(anchor, [
+    ["Settings", "gear", settings, "accent"],
+    ["Your devices", "phone", devicesFlow],
+    ["Link a device", "userPlus", linkDevice],
+    ["Profiles and signing out", "users", profilesFlow],
+    android && ["Notifications", "chat", alerts],
+    "-",
+    ["Files shared from this device", "disk", sharedFlow],
+    ["Network use", "speaker", usageFlow],
+    !mobile() && ["Keyboard shortcuts", "key", keysHelp],
+    "-",
+    [`Check for updates (irch ${S.me.version})`, "down", () => updates(false)],
+  ]);
+}
+
 function closeDm(d) {
   quiet(call("hide", { space: d.id, on: true }));
   if (S.sid === d.id) S.sid = null;
@@ -3064,8 +3086,8 @@ const KEYS = [
   [":", "a /command"], ["i, a, o", "back to typing"],
   ["Ctrl+K", "jump to a channel or DM; @ for anyone to message"],
   ["Ctrl+F", "search"], ["Alt+↑/↓", "previous / next channel"],
-  ["/nick, /join, /dm, /me, /shrug, /thread, /invite, /close, /leave, /notes",
-    "in the composer"],
+  ["/command", "in the composer: /nick, /join, /dm, /me, /shrug, /thread, " +
+    "/invite, /close, /leave, /notes"],
 ];
 
 function keysHelp() {

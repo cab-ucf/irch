@@ -175,6 +175,11 @@ svg.icon {
 }
 #channels { flex: 1; overflow-y: auto; padding: 4px 6px 12px; }
 #server-header .brand {
+  display: flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  cursor: pointer;
   background: var(--neon);
   -webkit-background-clip: text;
   background-clip: text;
@@ -188,10 +193,12 @@ svg.icon {
   width: 26px;
   height: 26px;
   margin-right: 8px;
-  vertical-align: -7px;
   background: url(logo.svg) center / contain no-repeat;
 }
+/* The Pegasus is tall: given the header's height, not a square. */
 :root[data-theme="ucf"] #server-header .brand::before {
+  width: 28px;
+  height: 40px;
   background-image: url(ucf.svg);
 }
 #server-header button { display: grid; color: var(--muted); }
@@ -500,10 +507,13 @@ svg.icon {
 }
 .msg.cont { margin-top: 0; }
 .msg.sel { background: var(--hover); box-shadow: inset 2px 0 0 var(--cyan); }
-table.keys { border-collapse: collapse; width: 100%; }
-table.keys td { padding: 4px 6px; vertical-align: top; color: var(--muted); }
+dialog:has(table.keys) { width: min(760px, calc(100vw - 32px)); }
+table.keys { border-collapse: collapse; width: 100%; font-size: 15px; }
+table.keys td { padding: 6px 8px; vertical-align: top; color: var(--text); }
+table.keys td:first-child { white-space: nowrap; width: 1%; }
+table.keys tr:nth-child(odd) { background: var(--msg-hover); }
 table.keys kbd {
-  font: 12px var(--mono);
+  font: 14px var(--mono);
   color: var(--cyan);
   border: 1px solid var(--line);
   border-radius: 4px;
@@ -899,6 +909,7 @@ table.keys kbd {
   width: 100%;
   align-items: center;
   justify-content: space-between;
+  gap: 16px;
   padding: 6px 8px;
   margin: 2px 0;
   border-radius: 2px;
