@@ -21,9 +21,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   TAG: ${{ inputs.tag || github.ref_name }}
-  # irpush.cxn.center's relay token, baked into the apps (not a secret:
-  # it keeps strangers off the relay). Unset: the lab's stock relay.
-  IRCH_RELAY_TOKEN: ${{ vars.IRCH_RELAY_TOKEN }}
 
 jobs:
   # Nothing is built, signed or published unless irch's own tests pass.

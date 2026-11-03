@@ -54,18 +54,8 @@ pub const AWAY: Duration = Duration::from_secs(600);
 const TYPING: Duration = Duration::from_secs(50);
 // A callee says once that it rings; its caller hears ringback this long.
 const RANG: Duration = Duration::from_secs(45);
-/// Ours, then n0's US East. Ours is irpush's relay, which pings a quiet
-/// client only after 130 min: its token (not a secret: it keeps strangers
-/// off) given at build time as IRCH_RELAY_TOKEN; built without one, the
-/// lab's stock relay. `url#token`, as irpush lists relays.
-pub(crate) fn relays_ours() -> [String; 2] {
-    let token = option_env!("IRCH_RELAY_TOKEN").filter(|t| !t.is_empty());
-    let first = match token {
-        Some(t) => format!("https://irpush.cxn.center./#{t}"),
-        None => "https://iroh.cxn.center./".into(),
-    };
-    [first, "https://use1-1.relay.n0.iroh.link./".into()]
-}
+pub(crate) const RELAYS: [&str; 2] =
+    ["https://iroh.cxn.center./", "https://use1-1.relay.n0.iroh.link./"];
 pub use crate::op::{MAX_NAME, MAX_TEXT};
 /// What storage nodes keep without their password.
 pub const MAX_FILE: u64 = 5 << 30;
@@ -685,15 +675,25 @@ fn relays_carry_their_tokens_and_are_never_probed() {
     assert_eq!(c("https://a.example./").auth_token.as_deref(), Some("tok"));
     assert_eq!(c("https://b.example./").auth_token, None);
     assert!(m.relays::<Vec<_>>().iter().all(|c| c.quic.is_none()));
+    assert_eq!(relays(["https://a.example./", "!n0"]).len(), 1);
 }
 
 /// Probing kept to what reaching peers needs: no address discovery, no
 /// https latency or captive-portal probes, no DHT.
-pub(crate) fn endpoint(net: &Net) -> iroh::endpoint::Builder {
+/// Paired with irpush, its relays are ours (`url#token,…`, from the
+/// storage node): one long-lived socket, pinged after 130 min, not 15 s.
+pub(crate) fn endpoint(
+    net: &Net,
+    paired: Option<&str>,
+) -> iroh::endpoint::Builder {
+    let ours = match paired {
+        Some(l) if l.contains("!n0") => l.to_string(),
+        Some(l) => format!("{l},{}", RELAYS[1]),
+        None => RELAYS.join(","),
+    };
     let b = match net {
-        Net::Default => Endpoint::builder(presets::N0).relay_mode(
-            RelayMode::Custom(relays(relays_ours().iter().map(|s| &s[..]))),
-        ),
+        Net::Default => Endpoint::builder(presets::N0)
+            .relay_mode(RelayMode::Custom(relays(ours.split(',')))),
         Net::Relay(urls) => Endpoint::builder(presets::Minimal).relay_mode(
             RelayMode::Custom(relays(urls.iter().map(|u| u.as_str()))),
         ),
@@ -857,7 +857,8 @@ impl Node {
         let lookup = MemoryLookup::new();
         local.peers.values().for_each(|a| lookup.add_endpoint_info(a.clone()));
         let bind = async |port: u16| {
-            let b = endpoint(&cfg.net);
+            let paired = std::fs::read_to_string(cfg.dir.join("relays"));
+            let b = endpoint(&cfg.net, paired.ok().as_deref());
             let v6 = BindOpts::default().set_is_required(false);
             let b = b.secret_key(dev.clone()).address_lookup(lookup.clone());
             let b = b
@@ -1332,8 +1333,14 @@ impl Node {
             return None;
         }
         let d = crate::push::device(&self.dir, None).ok().flatten();
+        // Its relays, kept for our endpoint's next start.
+        let mine = |d: &crate::push::Device| {
+            let _ =
+                store::write(&self.dir.join("relays"), d.relays().as_bytes());
+            Some(d.url())
+        };
         match d {
-            Some(d) if d.paired() => return Some(d.url()),
+            Some(d) if d.paired() => return mine(&d),
             Some(_) => crate::push::forget(&self.dir),
             None => {}
         }
@@ -1346,7 +1353,7 @@ impl Node {
             };
             for _ in 0..80 {
                 if d.paired() {
-                    return Some(d.url());
+                    return mine(&d);
                 }
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }

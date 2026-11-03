@@ -190,7 +190,7 @@ space = a grow-only set of envs;   state = a deterministic fold of it
 
 | network | terminal (app env) | who else is involved |
 |---|---|---|
-| default | | relays irpush.cxn.center (iroh.cxn.center if built without `IRCH_RELAY_TOKEN`) and n0; n0 DNS |
+| default | | relays iroh.cxn.center (paired: irpush's, e.g. irpush.cxn.center) and n0; n0 DNS |
 | own relays | `--relay URL` (`IRCH_RELAY`) | your relays |
 | LAN only | `--lan` (`IRCH_LAN=1`) | nobody (mDNS) |
 
