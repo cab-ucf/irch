@@ -713,19 +713,21 @@ fn order(dir: &Path) -> Vec<String> {
         .into_iter()
         .filter_map(|u| {
             let url = relay(u)?.0;
-            let k = keys.iter().find(|k| k.0 == url).map(|k| &k.1);
+            let given = u.split_once('#').map(|x| x.1);
+            let k = keys.iter().find(|k| k.0 == url).map(|k| k.1).or(given);
             Some(k.map_or(url.to_string(), |k| format!("{url}#{k}")))
         })
         .collect()
 }
 
 /// Where we may home, best first: a storage node's relays (irpush's, with
-/// pings hours apart), then irch's, then n0's (never, given `!n0`).
+/// pings hours apart), then irch's, then n0's (never, given `!n0`). A key
+/// the storage node gave (`url#key`) goes along: a relay from before open
+/// relays asks for it, an open one lets it lift the rate limit.
 fn home<'a>(paired: Option<&'a str>, ours: [&'a str; 2]) -> Vec<&'a str> {
     let l = paired.unwrap_or_default();
-    let url =
-        |r: &'a str| r.split('#').next().filter(|u| u.starts_with("http"));
-    let mut v: Vec<&str> = l.split(',').filter_map(url).collect();
+    let mut v: Vec<&str> =
+        l.split(',').filter(|r| r.starts_with("http")).collect();
     let own = l.contains("!n0");
     if !own || v.is_empty() {
         v.push(ours[0]);
@@ -734,7 +736,7 @@ fn home<'a>(paired: Option<&'a str>, ours: [&'a str; 2]) -> Vec<&'a str> {
         v.push(ours[1]);
     }
     let mut seen = HashSet::new();
-    v.retain(|u| seen.insert(*u));
+    v.retain(|u| seen.insert(u.split('#').next().unwrap_or(u)));
     v
 }
 
@@ -749,17 +751,24 @@ fn our_keys_go_to_their_relay_only() {
     let o = order(&d);
     assert_eq!(o[0], "https://lab.example/#k");
     assert!(o[1..].iter().all(|l| !l.contains('#')), "not to theirs");
+    // The storage node's own key for its relay, ours overriding it.
+    std::fs::write(d.join("relays"), "https://lab.example/#s").unwrap();
+    assert_eq!(order(&d)[0], "https://lab.example/#k");
+    std::fs::remove_file(d.join("relay-keys")).unwrap();
+    assert_eq!(order(&d)[0], "https://lab.example/#s");
     let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
 fn relays_are_open_and_tried_best_first() {
     let m = relays(["https://a.example./#old", "https://b.example./", "!n0"]);
-    assert_eq!(m.len(), 2, "a token is dropped, !n0 is no relay");
+    assert_eq!(m.len(), 2, "!n0 is no relay");
+    let c = m.get(&"https://a.example./".parse().unwrap()).unwrap();
+    assert_eq!(c.auth_token.as_deref(), Some("old"), "a key goes along");
     let d = ["https://d.example./", "https://n0.example./"];
     assert_eq!(home(None, d), d);
     let p = "https://a.example./#old";
-    assert_eq!(home(Some(p), d), ["https://a.example./", d[0], d[1]]);
+    assert_eq!(home(Some(p), d), [p, d[0], d[1]]);
     let mine = "https://a.example./,https://b.example./,!n0";
     assert_eq!(
         home(Some(mine), d),
