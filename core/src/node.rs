@@ -104,11 +104,29 @@ pub struct Config {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 pub enum Event {
-    Changed { space: Id },
-    Typing { space: Id, channel: Ch, user: Id, on: bool },
-    Presence { space: Id },
-    Synced { space: Id, count: usize },
-    Call { space: Id },
+    Changed {
+        space: Id,
+    },
+    Typing {
+        space: Id,
+        channel: Ch,
+        user: Id,
+        on: bool,
+    },
+    Presence {
+        space: Id,
+    },
+    Synced {
+        space: Id,
+        count: usize,
+    },
+    Call {
+        space: Id,
+    },
+    /// A big file comes through a relay, not direct: at its rate limit.
+    Relayed {
+        size: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -663,10 +681,40 @@ pub(crate) fn public(ip: &std::net::IpAddr) -> bool {
     }
 }
 
-/// An older `url#token` is read as `url`: relays are open.
+/// `url` or `url#key`: relays are open; a key from whoever runs one lifts
+/// its rate limit for us (irpush's relay), for transfers too big to wait.
+fn relay(l: &str) -> Option<(RelayUrl, iroh::RelayConfig)> {
+    let (u, k) = l.split_once('#').unwrap_or((l, ""));
+    let u: RelayUrl = u.parse().ok()?;
+    let c = iroh::RelayConfig::from(u.clone());
+    Some((u, if k.is_empty() { c } else { c.with_auth_token(k) }))
+}
+
 fn relays<'a>(list: impl IntoIterator<Item = &'a str>) -> iroh::RelayMap {
-    let one = |l: &str| l.split('#').next()?.parse::<RelayUrl>().ok();
-    list.into_iter().filter_map(one).map(iroh::RelayConfig::from).collect()
+    list.into_iter().filter_map(|l| relay(l).map(|r| r.1)).collect()
+}
+
+/// Our relays, best first (`home`), each with our key for it, if any
+/// (`relay-keys`: `url#key` lines).
+fn order(dir: &Path) -> Vec<String> {
+    let paired = std::fs::read_to_string(dir.join("relays")).ok();
+    let keys = std::fs::read_to_string(dir.join("relay-keys"));
+    let keys = keys.unwrap_or_default();
+    let keys: Vec<(RelayUrl, &str)> = keys
+        .lines()
+        .filter_map(|l| {
+            let (u, k) = l.trim().split_once('#')?;
+            Some((u.parse().ok()?, k))
+        })
+        .collect();
+    home(paired.as_deref(), RELAYS)
+        .into_iter()
+        .filter_map(|u| {
+            let url = relay(u)?.0;
+            let k = keys.iter().find(|k| k.0 == url).map(|k| &k.1);
+            Some(k.map_or(url.to_string(), |k| format!("{url}#{k}")))
+        })
+        .collect()
 }
 
 /// Where we may home, best first: a storage node's relays (irpush's, with
@@ -689,6 +737,20 @@ fn home<'a>(paired: Option<&'a str>, ours: [&'a str; 2]) -> Vec<&'a str> {
 }
 
 #[test]
+fn our_keys_go_to_their_relay_only() {
+    let n = u64::from_le_bytes(crate::crypto::rand());
+    let d = std::env::temp_dir().join(format!("irch-keys-{n}"));
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("relays"), "https://lab.example").unwrap();
+    std::fs::write(d.join("relay-keys"), "https://lab.example/#k\nbad")
+        .unwrap();
+    let o = order(&d);
+    assert_eq!(o[0], "https://lab.example/#k");
+    assert!(o[1..].iter().all(|l| !l.contains('#')), "not to theirs");
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
 fn relays_are_open_and_tried_best_first() {
     let m = relays(["https://a.example./#old", "https://b.example./", "!n0"]);
     assert_eq!(m.len(), 2, "a token is dropped, !n0 is no relay");
@@ -703,7 +765,7 @@ fn relays_are_open_and_tried_best_first() {
     );
 }
 
-/// One relay at a time, best first (`home`; `Node::rehome` moves on). iroh
+/// One relay at a time, best first (`order`; `Node::roam` moves on). iroh
 /// finds its home by timing its relays over https, every 20–26 s while
 /// running: without it, no home and no relay reaches us. No captive-portal
 /// probes, no DHT.
@@ -711,12 +773,12 @@ fn relays_are_open_and_tried_best_first() {
 /// while in sight or in a call; asleep, a phone holds irpush's socket.
 pub(crate) fn endpoint(
     net: &Net,
-    paired: Option<&str>,
+    best: Option<&str>,
 ) -> iroh::endpoint::Builder {
-    let best = home(paired, RELAYS).into_iter().take(1);
+    let best = best.unwrap_or(RELAYS[0]);
     let b = match net {
         Net::Default => Endpoint::builder(presets::N0)
-            .relay_mode(RelayMode::Custom(relays(best))),
+            .relay_mode(RelayMode::Custom(relays([best]))),
         Net::Relay(urls) => Endpoint::builder(presets::Minimal).relay_mode(
             RelayMode::Custom(relays(urls.iter().map(|u| u.as_str()))),
         ),
@@ -881,8 +943,8 @@ impl Node {
         let lookup = MemoryLookup::new();
         local.peers.values().for_each(|a| lookup.add_endpoint_info(a.clone()));
         let bind = async |port: u16| {
-            let paired = std::fs::read_to_string(cfg.dir.join("relays"));
-            let b = endpoint(&cfg.net, paired.ok().as_deref());
+            let best = order(&cfg.dir).into_iter().next();
+            let b = endpoint(&cfg.net, best.as_deref());
             let v6 = BindOpts::default().set_is_required(false);
             let b = b.secret_key(dev.clone()).address_lookup(lookup.clone());
             let b = b
@@ -2961,6 +3023,9 @@ impl Node {
             ensure!(size == len, "not the file its post said");
             // Who answered first, then the rest; a link may drop mid-way
             // (relay losses): asked again, it resumes.
+            if len > 1 << 28 && !self.direct(from).await {
+                self.emit(Event::Relayed { size: len });
+            }
             peers.retain(|p| *p != from);
             peers.insert(0, from);
             let got =
@@ -3726,6 +3791,37 @@ impl Node {
         }
     }
 
+    /// Whether our link to `d` is direct (peer to peer), not relayed.
+    async fn direct(&self, d: EndpointId) -> bool {
+        use iroh::endpoint::TransportAddrUsage::Active;
+        let Some(i) = self.ep.remote_info(d).await else { return false };
+        i.addrs().any(|a| matches!(a.usage(), Active) && a.addr().is_ip())
+    }
+
+    /// Our key for a relay (`url#key`, from whoever runs it), or none
+    /// (`url`): kept in `relay-keys`, used from the next start.
+    pub fn relay_key(&self, line: &str) -> Result<()> {
+        let (u, k) = line.trim().split_once('#').unwrap_or((line.trim(), ""));
+        let (url, _) = relay(u).context("not a relay's address")?;
+        ensure!(
+            k.is_empty() || k.len() >= 32,
+            "a key is 32 characters or more"
+        );
+        let f = self.dir.join("relay-keys");
+        let old = std::fs::read_to_string(&f).unwrap_or_default();
+        let mut v: Vec<&str> = old
+            .lines()
+            .filter(|l| {
+                l.split('#').next().and_then(relay).is_none_or(|r| r.0 != url)
+            })
+            .collect();
+        let new = format!("{url}#{k}");
+        if !k.is_empty() {
+            v.push(&new);
+        }
+        store::write(&f, v.join("\n").as_bytes())
+    }
+
     /// Our relay, best first (`home`): a beat without it, the next; every
     /// half hour, the best again if it answers.
     async fn roam(&self, beat: u64) {
@@ -3733,18 +3829,19 @@ impl Node {
         if !matches!(self.net, Net::Default) {
             return;
         }
-        let paired = std::fs::read_to_string(self.dir.join("relays")).ok();
-        let order = home(paired.as_deref(), RELAYS).into_iter();
-        let order: Vec<RelayUrl> =
-            order.filter_map(|u| u.parse().ok()).collect();
+        let order: Vec<_> = order(&self.dir)
+            .iter()
+            .map(String::as_str)
+            .filter_map(relay)
+            .collect();
         let on = self.ep.home_relay_status().get();
         let up = on.iter().any(|s| s.is_connected());
         let at =
-            on.first().and_then(|h| order.iter().position(|o| o == h.url()));
+            on.first().and_then(|h| order.iter().position(|o| o.0 == *h.url()));
         let to = match (up, at) {
             (false, _) if beat > 0 => at.map_or(0, |a| (a + 1) % order.len()),
             (true, Some(a)) if a > 0 && beat.is_multiple_of(30) => {
-                let Ok(u) = order[0].join("ping") else { return };
+                let Ok(u) = order[0].0.join("ping") else { return };
                 let r = http().get(u).send().await;
                 if !r.is_ok_and(|r| r.status().is_success()) {
                     return;
@@ -3754,9 +3851,9 @@ impl Node {
             (_, None) if beat > 0 => 0,
             _ => return,
         };
-        let c = Arc::new(iroh::RelayConfig::from(order[to].clone()));
-        self.ep.insert_relay(order[to].clone(), c).await;
-        for u in order.iter().filter(|u| **u != order[to]) {
+        let (url, c) = order[to].clone();
+        self.ep.insert_relay(url.clone(), Arc::new(c)).await;
+        for (u, _) in order.iter().filter(|o| o.0 != url) {
             self.ep.remove_relay(u).await;
         }
     }

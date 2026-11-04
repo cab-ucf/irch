@@ -60,8 +60,11 @@ const ICONS = {
     "3.5-1.5 3.5-1.5M9 9.5h.01M15 9.5h.01",
   pencil: "M4 20h4L19 9l-4-4L4 16v4M13.5 6.5l4 4",
   trash: "M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3",
-  gear: "M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7M12 2v3M12 19v3M2 " +
-    "12h3M19 12h3M4.9 4.9 7 7M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1",
+  gear: "M19.3 9.8 21.9 10.3 21.9 13.7 19.3 14.2 18.7 15.5 20.2 17.8 17.8 " +
+    "20.2 15.5 18.7 14.2 19.3 13.7 21.9 10.3 21.9 9.8 19.3 8.5 18.7 6.2 20.2 " +
+    "3.8 17.8 5.3 15.5 4.7 14.2 2.1 13.7 2.1 10.3 4.7 9.8 5.3 8.5 3.8 6.2 6.2 " +
+    "3.8 8.5 5.3 9.8 4.7 10.3 2.1 13.7 2.1 14.2 4.7 15.5 5.3 17.8 3.8 20.2 " +
+    "6.2 18.7 8.5zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6",
   eye: "M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12M12 15a3 3 0 1 0 " +
     "0-6 3 3 0 0 0 0 6",
   eyeOff: "M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12M12 15a3 3 0 1 0 " +
@@ -1943,19 +1946,20 @@ function storageFlow(s) {
   const keep = (node, on) => quiet(call("store", { space: s.id, node, on }));
   const paired = s.storage.some((x) => x.node === local);
   modal((finish) => {
-    const sw = (x) => h("label", { class: "switch" },
-      h("span", {}, x.name ?? (x.node === local ? "This computer" : x.short),
-        h("small", {}, `device ${x.short}` +
-          (x.node === local ? " · this computer" : "") +
-          " · " + (x.seen ? `synced ${ago(x.seen)}`
-            : "not reached since irch started")),
-        h("button", { class: "gear", title: "Rename", onclick: (e) => {
-          e.preventDefault();
-          finish(null);
-          rename(x.node, x.name, () => storageFlow(s));
-        } }, icon("pencil"))),
-      h("input", { type: "checkbox", checked: x.on,
-        onchange: (e) => keep(x.node, e.target.checked) }), h("i"));
+    // The button outside the label: a click on the switch toggles it.
+    const sw = (x) => h("div", { class: "row" },
+      h("button", { class: "gear", title: "Rename", onclick: () => {
+        finish(null);
+        rename(x.node, x.name, () => storageFlow(s));
+      } }, icon("pencil")),
+      h("label", { class: "switch" },
+        h("span", {}, x.name ?? (x.node === local ? "This computer" : x.short),
+          h("small", {}, `device ${x.short}` +
+            (x.node === local ? " · this computer" : "") +
+            " · " + (x.seen ? `synced ${ago(x.seen)}`
+              : "not reached since irch started"))),
+        h("input", { type: "checkbox", checked: x.on,
+          onchange: (e) => keep(x.node, e.target.checked) }), h("i")));
     const pair = async () => {
       await quiet(call("store_local").then(() => keep(S.me.local_storage, true)));
       finish(true);
@@ -2466,6 +2470,8 @@ async function usageFlow() {
         ? "irpush's: pinged after 130 min, not 15 s."
         : "a stock one, pinged every 15 s: pair with a storage node that " +
           "has an irpush relay (irch --install --push-relay).")),
+      h("button", { class: "choice", onclick: relayKey }, icon("pencil"),
+        "Relay key: no speed limit through a relay"),
       phone && h("p", { class: "sub" }, `Since the phone started, irch ` +
         `sent ${phone.tx_packets} packets (${amount(phone.tx_bytes)}) and ` +
         `received ${phone.rx_packets} (${amount(phone.rx_bytes)}), ` +
@@ -2496,6 +2502,16 @@ async function devicesFlow() {
           () => devicesFlow()) }, "Rename")))),
     foot(h("button", { class: "btn grey", onclick: () => finish(null) },
       "Done"))));
+}
+
+/** A key from whoever runs a relay lifts its speed limit for us: big
+ * files that cannot go direct. Sent to that relay only. */
+async function relayKey() {
+  const line = await ask({ title: "Relay key", label: "Relay and key",
+    sub: "From whoever runs the relay (irpush: make key). Only that relay " +
+      "sees it. Used from irch's next start; the relay alone, to remove.",
+    placeholder: "https://irpush.example#key", maxLength: 300 });
+  if (line) await quiet(call("relay_key", { line }));
 }
 
 /** Name a device or storage node of ours, on every device of ours. */
@@ -3438,6 +3454,10 @@ async function start() {
       members();
     } else if (e.t === "call") {
       schedule("side");
+    } else if (e.t === "relayed") {
+      toast(`Not direct: ${amount(e.size)} comes through a relay, at its ` +
+        "speed limit. A key from whoever runs it lifts that (Network use).",
+        false, 15e3);
     } else if (e.t === "typing" && !isMe(e.user)) {
       // Said once each way; a stop lost, it fades in a minute.
       const k = `${e.space}|${e.channel}`;

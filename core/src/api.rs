@@ -163,6 +163,9 @@ pub enum Call {
     Levels,
     /// What the network cost: the log, and this run so far.
     Usage,
+    RelayKey {
+        line: String,
+    },
     /// A call to us rings here.
     Ringing {
         space: Id,
@@ -336,6 +339,7 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
             json!({ "log": log, "now": n.usage(), "relay": relay,
                 "quiet": quiet })
         }
+        Call::RelayKey { line } => json!(n.relay_key(&line)?),
         Call::Ringing { space, channel } => {
             json!(n.ringing(&space, channel).await)
         }

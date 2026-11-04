@@ -6,6 +6,8 @@ See [PLAN.md](PLAN.md). irpush's own list: irpush's TODO.md.
 - [x] Time relays again, so a device has a home relay at all
 - [x] No relay tokens; one relay at a time, best first (storage node's
       irpush, iroh.cxn.center, n0), the next after a minute without it
+- [x] Relay keys (`url#key`, from whoever runs the relay): no speed limit
+      through it; a big download not direct says so
 - [ ] Probe only on a network change, not every 20–26 s
 - [ ] `irch --doctor [user]`: each device's home relay, reachable or not,
       direct or relayed, push routes, ring time
@@ -44,7 +46,7 @@ See [PLAN.md](PLAN.md). irpush's own list: irpush's TODO.md.
 - [ ] One button: a VPS provider's API token in, a relay out
 
 ## 7. UI
-- [ ] Storage Nodes: switch toggles (not Rename); Remove, optionally shut
-      down our own
-- [ ] Settings icon: a cog
+- [x] Storage Nodes: the switch toggles (not Rename)
+- [ ] Storage Nodes: Remove, optionally shut down our own
+- [x] Settings icon: a cog
 - [ ] Name the device at first start; storage nodes `hostname-storage`

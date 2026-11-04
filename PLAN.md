@@ -24,6 +24,12 @@ ops are sealed end to end, irpush frames are X-Wing per frame, the relay
 hop is post-quantum TLS. An open relay can tell anyone whether an id is
 connected there, nothing more.
 
+Relayed traffic is capped per client so one stranger cannot fill the
+operator's bandwidth; direct paths are never limited. Whoever runs a relay
+hands out keys (`make key`) that lift the cap: a lab's machines send
+terabytes through their own relay when a direct path cannot form. A key
+goes only to its relay. A big download that is not direct says so.
+
 A device holds one relay at a time, best first: its storage node's irpush
 relay (pings hours apart), then iroh.cxn.center, then n0's. A minute
 without it, the next; every half hour, the best again if it answers.
