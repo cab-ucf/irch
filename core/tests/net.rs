@@ -891,7 +891,9 @@ async fn a_storage_node_rings_a_phone_through_irpush() {
     unsafe { std::env::set_var("CREDENTIALS_DIRECTORY", &creds) };
     let s = start(&dir("s"), "s", None, true).await;
     let db = dir("b");
-    let (a, b) = (node("a").await, start(&db, "b", None, false).await);
+    let da = dir("a");
+    let a = start(&da, "a", None, false).await;
+    let b = start(&db, "b", None, false).await;
     let id = a.create("hub").await.unwrap();
     let ch = general(&a, &id);
     b.join(&a.invite(&id).await.unwrap()).await.unwrap();
@@ -900,8 +902,15 @@ async fn a_storage_node_rings_a_phone_through_irpush() {
     assert_eq!(b.irpush().await, Some(url.clone()), "kept");
     b.set_push(Some(url)).await;
     assert!(b.pushing(), "its storage node took the device");
-    let kept = std::fs::read_to_string(db.join("relays")).unwrap();
-    assert!(kept.starts_with(&at), "its storage node's relay, b's too");
+    // Its relay is theirs too: paired with irpush (b) or only syncing with
+    // it (a, whatever its push), as a sync with it ends.
+    pair(&a, &s, &[id]).await;
+    let has = |d: &std::path::Path| {
+        std::fs::read_to_string(d.join("relays"))
+            .is_ok_and(|l| l.starts_with(&at))
+    };
+    until("b has its storage node's relay", || has(&db)).await;
+    until("a has it, unpaired", || has(&da)).await;
     let ring = |p: &(iroh::EndpointId, String)| p.1.starts_with("irch:ring:");
     let told = || a.view(&id, |s| s.pushes_of(None).iter().any(ring));
     until("a knows b's push server", || told() == Some(true)).await;
