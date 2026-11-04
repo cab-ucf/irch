@@ -127,32 +127,37 @@ impl Phones {
     }
 }
 
+/// Devices this storage node admitted to sync: members it keeps for.
+pub type Served = Arc<Mutex<HashSet<EndpointId>>>;
+
 #[derive(Clone)]
-pub struct Server(Arc<(PathBuf, Mutex<Phones>, Arc<irpush::Node>)>);
+pub struct Server(Arc<(PathBuf, Mutex<Phones>, Arc<irpush::Node>, Served)>);
 
 impl Server {
-    pub fn open(dir: &Path, net: &Net) -> Result<Option<Self>> {
+    pub fn open(dir: &Path, net: &Net, s: Served) -> Result<Option<Self>> {
         let Some(irpush) = host(dir, net)? else { return Ok(None) };
         let file = dir.join("phones");
         let mut phones = Phones::default();
         let kept: BTreeMap<EndpointId, Phone> = store::load(&file);
         kept.into_iter().for_each(|(d, p)| phones.set(d, Some(p)));
         phones.at.clear();
-        Ok(Some(Self(Arc::new((file, Mutex::new(phones), irpush)))))
+        Ok(Some(Self(Arc::new((file, Mutex::new(phones), irpush, s)))))
     }
 
     async fn asked(&self, c: &Connection) -> Result<()> {
         let (mut tx, mut rx) = c.accept_bi().await?;
         let b = crate::sync::rest(&mut rx, 1024 + 17 * MOST + 64).await?;
-        let (file, phones, irpush) = &*self.0;
+        let (file, phones, irpush, served) = &*self.0;
         // Only a device paired here.
         let paired = |to: &str| {
             let d = to.strip_prefix("irpush:").unwrap_or_default();
             irpush.peers().iter().any(|p| p.0.to_string() == d)
         };
+        let ours = lock(served).contains(&c.remote_id());
         let reply = match postcard::from_bytes(&b)? {
             Ask::Ticket => irpush.ticket(irpush::Role::Device)?.into_bytes(),
-            Ask::Relays(to) => match paired(&to) {
+            // Paired, or a member's device we sync with: whatever its push.
+            Ask::Relays(to) => match ours || paired(&to) {
                 true => irpush::Relay::show(&irpush.relays()).into_bytes(),
                 false => vec![],
             },
@@ -190,7 +195,7 @@ impl Server {
         let mut head = [0u8; HEAD];
         rx.read_exact(&mut head).await?;
         let raw = crate::sync::rest(&mut rx, MAX).await?;
-        let (_, phones, irpush) = &*self.0;
+        let (_, phones, irpush, _) = &*self.0;
         let t: [u8; 16] = head[..16].try_into()?;
         let to: Vec<String> = {
             let p = lock(phones);

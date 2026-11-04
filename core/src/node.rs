@@ -571,6 +571,10 @@ impl Space {
 pub struct Node {
     /// Since when this node is up: its run, in the usage log.
     up: Instant,
+    /// Storage node: devices admitted to sync, told our irpush relay.
+    served: crate::push::Served,
+    /// Asked a storage node for its relay this run.
+    relayed: AtomicBool,
     me: Me,
     own: Id,
     dir: PathBuf,
@@ -898,6 +902,8 @@ impl Node {
         }
         let n = Arc::new(Self {
             up: Instant::now(),
+            served: Default::default(),
+            relayed: AtomicBool::new(false),
             own: own_inv.id(),
             me,
             dir: cfg.dir,
@@ -946,7 +952,8 @@ impl Node {
             .accept(call::ALPN, Proto(Arc::downgrade(&n)));
         // A storage node rings phones through irpush.
         if serve.is_some()
-            && let Some(p) = crate::push::Server::open(&n.dir, &n.net)?
+            && let Some(p) =
+                crate::push::Server::open(&n.dir, &n.net, n.served.clone())?
         {
             let r = router.accept(crate::push::ALPN, p.clone());
             router = r.accept(crate::wake::ALPN, p);
@@ -1381,16 +1388,7 @@ impl Node {
             async move { go.await.map(|_| a) }
         });
         let took = n0_future::join_all(tries).await.into_iter().flatten();
-        let took: Vec<_> = took.collect();
-        // Its irpush relay (token and all) is ours too, from the next start.
-        for a in &took {
-            let l = crate::push::relays_of(&self.ep, a.clone(), &push).await;
-            if let Ok(l) = l {
-                let _ = store::write(&self.dir.join("relays"), l.as_bytes());
-                break;
-            }
-        }
-        *lock(&self.via) = (took, rings);
+        *lock(&self.via) = (took.collect(), rings);
     }
 
     /// Our push, as this space's members should have it: a doorbell's
@@ -3264,15 +3262,25 @@ impl Node {
         }
         let sp = self.get(&h.space).ok();
         let owner = h.token.zip(self.serve).is_some_and(|(a, b)| same(&a, &b));
-        if owner {
+        let (sp, a) = if owner {
             self.vouch(h, from, who);
             let sp =
                 sp.or_else(|| self.open(None, h.space, vec![from.into()]).ok());
-            return (sp, Admit::Yes);
+            (sp, Admit::Yes)
+        } else {
+            let Some(sp) = sp else { return (None, Admit::No) };
+            let a = self.admits(&sp, h, from, who);
+            (Some(sp), a)
+        };
+        // A storage node: whom it syncs with may have its irpush relay.
+        if self.serve.is_some() && matches!(a, Admit::Yes) {
+            let mut s = lock(&self.served);
+            if s.len() >= 1 << 14 {
+                s.clear();
+            }
+            s.insert(from);
         }
-        let Some(sp) = sp else { return (None, Admit::No) };
-        let a = self.admits(&sp, h, from, who);
-        (Some(sp), a)
+        (sp, a)
     }
 
     fn admits(
@@ -3504,6 +3512,9 @@ impl Node {
             match r.unwrap_or_else(|e| Err(e.into())) {
                 Ok(count) => {
                     self.reached(&sp, id);
+                    if token.is_some() {
+                        self.ask_relays(peer.clone());
+                    }
                     if count > 0 {
                         self.emit(Event::Synced { space: sp.id, count });
                     }
@@ -3511,6 +3522,24 @@ impl Node {
                 Err(e) => debug!("sync with {}: {e:#}", id.fmt_short()),
             }
         }
+    }
+
+    /// Once a run, as a sync with a storage node of ours ends: its irpush
+    /// relay (token and all), ours from the next start, whatever our push.
+    fn ask_relays(self: &Arc<Self>, to: EndpointAddr) {
+        if self.serve.is_some() || self.relayed.swap(true, Relaxed) {
+            return;
+        }
+        let n = self.clone();
+        tokio::spawn(async move {
+            let route = lock(&n.prefs).push.clone().unwrap_or_default();
+            match crate::push::relays_of(&n.ep, to, &route).await {
+                Ok(l) => {
+                    drop(store::write(&n.dir.join("relays"), l.as_bytes()))
+                }
+                Err(_) => n.relayed.store(false, Relaxed),
+            }
+        });
     }
 
     fn neighbor(self: &Arc<Self>, sp: &Arc<Space>, peer: EndpointId) {
