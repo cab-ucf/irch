@@ -36,9 +36,8 @@ in {
         (_: u: u.isNormalUser && lib.hasPrefix "/home/" u.home) config.users.users);
       defaultText = "everyone with a home in /home";
     };
-    # A root-only file outside the Nix store (agenix, sops-nix, or by hand)
-    # holding irpush's relay for this node's phones, from irpush's deploy/:
-    # "https://irpush.you.example#TOKEN". Given to the node as a systemd
+    # A file holding irpush's relay for this node's devices, from irpush's
+    # deploy/: "https://irpush.you.example". Given to the node as a systemd
     # credential. Unset, irch's relays (15 s pings).
     services.irch.pushRelayFile = lib.mkOption {
       type = lib.types.nullOr lib.types.str;

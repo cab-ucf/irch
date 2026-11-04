@@ -663,64 +663,60 @@ pub(crate) fn public(ip: &std::net::IpAddr) -> bool {
     }
 }
 
-/// `url#token` each. Stock relays also tell us our public address (QUIC
-/// address discovery), so peers reach us directly; irpush's have no QUIC.
+/// An older `url#token` is read as `url`: relays are open.
 fn relays<'a>(list: impl IntoIterator<Item = &'a str>) -> iroh::RelayMap {
-    let one = |l: &str| {
-        let (u, t) = l.split_once('#').unwrap_or((l, ""));
-        let mut c = iroh::RelayConfig::from(u.parse::<RelayUrl>().ok()?);
-        if t.is_empty() {
-            return Some(c);
-        }
-        c.quic = None;
-        Some(c.with_auth_token(t))
-    };
-    list.into_iter().filter_map(one).collect()
+    let one = |l: &str| l.split('#').next()?.parse::<RelayUrl>().ok();
+    list.into_iter().filter_map(one).map(iroh::RelayConfig::from).collect()
 }
 
-/// Where we may home: relays anyone can send through. Behind a token we
-/// would be out of reach of everyone without it. `!n0`: never n0's.
+/// Where we may home, best first: a storage node's relays (irpush's, with
+/// pings hours apart), then irch's, then n0's (never, given `!n0`).
 fn home<'a>(paired: Option<&'a str>, ours: [&'a str; 2]) -> Vec<&'a str> {
     let l = paired.unwrap_or_default();
-    let open = |r: &&str| r.starts_with("http") && !r.contains('#');
-    let mut v: Vec<&str> = l.split(',').filter(open).collect();
-    if v.is_empty() {
+    let url =
+        |r: &'a str| r.split('#').next().filter(|u| u.starts_with("http"));
+    let mut v: Vec<&str> = l.split(',').filter_map(url).collect();
+    let own = l.contains("!n0");
+    if !own || v.is_empty() {
         v.push(ours[0]);
     }
-    if !l.contains("!n0") {
+    if !own {
         v.push(ours[1]);
     }
+    let mut seen = HashSet::new();
+    v.retain(|u| seen.insert(*u));
     v
 }
 
 #[test]
-fn relays_carry_their_tokens_and_home_only_where_anyone_reaches() {
-    let m = relays(["https://a.example./#tok", "https://b.example./"]);
-    let c = |u: &str| m.get(&u.parse().expect("url")).expect("listed");
-    assert_eq!(c("https://a.example./").auth_token.as_deref(), Some("tok"));
-    assert_eq!(c("https://b.example./").auth_token, None);
-    assert!(c("https://a.example./").quic.is_none(), "irpush's: no QUIC");
-    assert_eq!(relays(["https://a.example./", "!n0"]).len(), 1);
+fn relays_are_open_and_tried_best_first() {
+    let m = relays(["https://a.example./#old", "https://b.example./", "!n0"]);
+    assert_eq!(m.len(), 2, "a token is dropped, !n0 is no relay");
     let d = ["https://d.example./", "https://n0.example./"];
     assert_eq!(home(None, d), d);
-    assert_eq!(home(Some("https://a.example./#tok"), d), d);
-    let mine = "https://a.example./,https://b.example./#t,!n0";
-    assert_eq!(home(Some(mine), d), ["https://a.example./"]);
+    let p = "https://a.example./#old";
+    assert_eq!(home(Some(p), d), ["https://a.example./", d[0], d[1]]);
+    let mine = "https://a.example./,https://b.example./,!n0";
+    assert_eq!(
+        home(Some(mine), d),
+        ["https://a.example./", "https://b.example./"]
+    );
 }
 
-/// A home relay is found by timing each relay over https (iroh redoes it
-/// every 20–26 s while running; without it, no home and no relay reaches
-/// us). No captive-portal probes, no DHT.
+/// One relay at a time, best first (`home`; `Node::rehome` moves on). iroh
+/// finds its home by timing its relays over https, every 20–26 s while
+/// running: without it, no home and no relay reaches us. No captive-portal
+/// probes, no DHT.
 /// An open link's paths are pinged every 5 s, so irch holds links only
 /// while in sight or in a call; asleep, a phone holds irpush's socket.
 pub(crate) fn endpoint(
     net: &Net,
     paired: Option<&str>,
 ) -> iroh::endpoint::Builder {
-    let ours = home(paired, RELAYS);
+    let best = home(paired, RELAYS).into_iter().take(1);
     let b = match net {
         Net::Default => Endpoint::builder(presets::N0)
-            .relay_mode(RelayMode::Custom(relays(ours))),
+            .relay_mode(RelayMode::Custom(relays(best))),
         Net::Relay(urls) => Endpoint::builder(presets::Minimal).relay_mode(
             RelayMode::Custom(relays(urls.iter().map(|u| u.as_str()))),
         ),
@@ -3730,6 +3726,41 @@ impl Node {
         }
     }
 
+    /// Our relay, best first (`home`): a beat without it, the next; every
+    /// half hour, the best again if it answers.
+    async fn roam(&self, beat: u64) {
+        use iroh::Watcher as _;
+        if !matches!(self.net, Net::Default) {
+            return;
+        }
+        let paired = std::fs::read_to_string(self.dir.join("relays")).ok();
+        let order = home(paired.as_deref(), RELAYS).into_iter();
+        let order: Vec<RelayUrl> =
+            order.filter_map(|u| u.parse().ok()).collect();
+        let on = self.ep.home_relay_status().get();
+        let up = on.iter().any(|s| s.is_connected());
+        let at =
+            on.first().and_then(|h| order.iter().position(|o| o == h.url()));
+        let to = match (up, at) {
+            (false, _) if beat > 0 => at.map_or(0, |a| (a + 1) % order.len()),
+            (true, Some(a)) if a > 0 && beat.is_multiple_of(30) => {
+                let Ok(u) = order[0].join("ping") else { return };
+                let r = http().get(u).send().await;
+                if !r.is_ok_and(|r| r.status().is_success()) {
+                    return;
+                }
+                0
+            }
+            (_, None) if beat > 0 => 0,
+            _ => return,
+        };
+        let c = Arc::new(iroh::RelayConfig::from(order[to].clone()));
+        self.ep.insert_relay(order[to].clone(), c).await;
+        for u in order.iter().filter(|u| **u != order[to]) {
+            self.ep.remove_relay(u).await;
+        }
+    }
+
     /// Here (a state change: started, back, another network): one `Here`,
     /// and our call, if any, for whoever missed it.
     async fn here(&self, sp: &Space) {
@@ -3936,6 +3967,7 @@ async fn heartbeat(n: Weak<Node>) {
             n.resume().await;
         }
         last = now();
+        n.roam(i).await;
         // In a call is in use.
         if n.in_call().is_some() {
             n.active().await;
@@ -4004,47 +4036,27 @@ pub fn host_name() -> String {
 mod tests {
     use super::*;
 
-    #[derive(Debug)]
-    struct Token;
-
-    impl iroh_relay::server::AccessControl for Token {
-        async fn on_connect(
-            &self,
-            r: &iroh_relay::server::ClientRequest,
-        ) -> iroh_relay::server::Access {
-            match r.auth_token().as_deref() {
-                Some("tok") => iroh_relay::server::Access::Allow,
-                _ => iroh_relay::server::Access::Deny { reason: None },
-            }
-        }
-    }
-
-    async fn relay(token: bool) -> (iroh_relay::server::Server, String) {
+    async fn relay() -> (iroh_relay::server::Server, String) {
         use iroh_relay::server::{RelayConfig, Server, ServerConfig};
-        let mut c = RelayConfig::new(([127, 0, 0, 1], 0));
-        if token {
-            c.access = Arc::new(Token);
-        }
         let mut cfg = ServerConfig::default();
-        cfg.relay = Some(c);
+        cfg.relay = Some(RelayConfig::new(([127, 0, 0, 1], 0)));
         let s = Server::spawn(cfg).await.unwrap();
         let at = format!("http://{}/", s.http_addr().unwrap());
         (s, at)
     }
 
-    /// A device paired with a token relay is still reached by one
-    /// without the token: it homes where anyone can send.
+    /// Homed on one relay, a device is reached by one homed on another
+    /// (a storage node's irpush relay, irch's): iroh dials whichever relay
+    /// the address names.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_token_relay_never_hides_a_device() {
-        let ((_t, tok), (_o, open)) = (relay(true).await, relay(false).await);
-        let ep = async |l: Vec<&str>| {
-            let r = RelayMode::Custom(relays(l));
+    async fn a_device_is_reached_on_any_relay() {
+        let ((_x, one), (_y, two)) = (relay().await, relay().await);
+        let ep = async |l: &str| {
+            let r = RelayMode::Custom(relays([l]));
             let b = endpoint(&Net::Direct, None).relay_mode(r);
             b.alpns(vec![b"t".to_vec()]).bind().await.unwrap()
         };
-        let paired = format!("{tok}#tok");
-        let a = ep(home(Some(&paired), [&open, &open])).await;
-        let b = ep(vec![&open]).await;
+        let (a, b) = (ep(&one).await, ep(&two).await);
         let secs = Duration::from_secs(10);
         tokio::time::timeout(secs, a.online()).await.expect("a home");
         let ours = a.addr().addrs.into_iter().filter(|x| x.is_relay());

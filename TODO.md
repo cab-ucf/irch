@@ -3,13 +3,13 @@
 See [PLAN.md](PLAN.md). irpush's own list: irpush's TODO.md.
 
 ## 1. Reachable from anywhere
-- [x] Home on an open relay; token relays stay in the map, after it, so
-      devices homed there by 0.1.7–0.1.9 are still reached
-- [ ] After irpush's relay opens: home on it (long pings) everywhere
+- [x] Time relays again, so a device has a home relay at all
+- [x] No relay tokens; one relay at a time, best first (storage node's
+      irpush, iroh.cxn.center, n0), the next after a minute without it
+- [ ] Probe only on a network change, not every 20–26 s
 - [ ] `irch --doctor [user]`: each device's home relay, reachable or not,
       direct or relayed, push routes, ring time
-- [ ] Measure the direct-path rate with and without QUIC address
-      discovery (off since "Probe less"); keep it off only if it costs more
+- [ ] Measure the direct-path rate (address discovery is back on)
 - [ ] Close idle QUIC connections after ~30 s; Network use warns when an
       idle device holds one
 
@@ -33,10 +33,15 @@ See [PLAN.md](PLAN.md). irpush's own list: irpush's TODO.md.
 - [ ] A user's storage nodes share one irpush mesh
 - [ ] Phones pair once, register with every host
 
-## 6. Short invite codes
+## 6. Short invite and link codes
 - [ ] Security review: entropy, one guess, TTL, rendezvous, crate audit
 - [ ] PAKE over iroh, pkarr rendezvous, 60 s, single use
-- [ ] The invite handed over sealed to the joiner
+- [ ] The invite (or seed, to link) sealed to the joiner's X-Wing key
+- [ ] Optional password: an Argon2id-keyed layer around that
+
+## 8. Relays without the cloud
+- [ ] A storage node with a public address serves a relay
+- [ ] One button: a VPS provider's API token in, a relay out
 
 ## 7. UI
 - [ ] Storage Nodes: switch toggles (not Rename); Remove, optionally shut

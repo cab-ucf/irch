@@ -49,9 +49,9 @@ struct Cli {
     /// Keep a storage node running here, from now on (as you)
     #[arg(long)]
     install: bool,
-    /// With --install: its phones' relay, "https://irpush.you.example#TOKEN"
-    /// (irpush's deploy/: `make token`); quiet, pinged after 130 min
-    #[arg(long, value_name = "URL#TOKEN", requires = "install")]
+    /// With --install: its devices' relay, "https://irpush.you.example"
+    /// (irpush's deploy/); quiet, pinged after 130 min
+    #[arg(long, value_name = "URL", requires = "install")]
     push_relay: Option<String>,
     /// Stop the storage node --install keeps
     #[arg(long)]
