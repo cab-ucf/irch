@@ -377,7 +377,7 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
 }
 
 fn space(n: &Node, id: &Id) -> Option<Value> {
-    if n.card(id) {
+    if n.card(id) || !n.listed(id) {
         return None;
     }
     let me = n.id();

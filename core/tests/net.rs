@@ -1145,6 +1145,13 @@ async fn two_dms_at_once_become_one() {
         None
     };
     let dm = same().await.expect("one DM for both");
+    // Listed once each side: the other, empty, is not.
+    let listed = |n: &Node| {
+        let dms = n.spaces().into_iter();
+        let dms = dms.filter(|s| n.view(s, |s| s.dm.is_some()) == Some(true));
+        dms.filter(|s| n.listed(s)).collect::<Vec<_>>()
+    };
+    assert_eq!((listed(&a), listed(&b)), (vec![dm], vec![dm]));
     say(&a, &dm, DM, "found you").await;
     until("b reads it", || texts(&b, &dm, &DM) == ["found you"]).await;
 }
