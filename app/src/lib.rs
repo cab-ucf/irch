@@ -558,6 +558,24 @@ async fn serve_here(app: AppHandle) -> Result<(), String> {
     run.await.map_err(err)
 }
 
+/// The storage node `serve_here` started, stopped and left off.
+#[tauri::command]
+async fn stop_here(app: AppHandle) -> Result<(), String> {
+    let run = async {
+        anyhow::ensure!(!NIXOS, "on NixOS: services.irch.enable = false");
+        let dir = app.path().app_local_data_dir()?.join("bin");
+        let exe = dir.join(format!("irch{}", std::env::consts::EXE_SUFFIX));
+        let out = tokio::task::spawn_blocking(move || {
+            std::process::Command::new(exe).arg("--uninstall").output()
+        });
+        let out = out.await??;
+        let say = String::from_utf8_lossy(&out.stderr);
+        anyhow::ensure!(out.status.success(), "{}", say.trim());
+        Ok(())
+    };
+    run.await.map_err(err)
+}
+
 #[tauri::command]
 async fn update(app: AppHandle) -> Result<Option<String>, String> {
     // The App Store, TestFlight or AltStore updates an iPhone's.
@@ -858,6 +876,7 @@ pub fn run() {
         hush,
         upload,
         serve_here,
+        stop_here,
         notify_check,
         pick,
         log,

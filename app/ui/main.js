@@ -60,8 +60,11 @@ const ICONS = {
     "3.5-1.5 3.5-1.5M9 9.5h.01M15 9.5h.01",
   pencil: "M4 20h4L19 9l-4-4L4 16v4M13.5 6.5l4 4",
   trash: "M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3",
-  gear: "M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7M12 2v3M12 19v3M2 " +
-    "12h3M19 12h3M4.9 4.9 7 7M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1",
+  gear: "M19.3 9.8 21.9 10.3 21.9 13.7 19.3 14.2 18.7 15.5 20.2 17.8 17.8 " +
+    "20.2 15.5 18.7 14.2 19.3 13.7 21.9 10.3 21.9 9.8 19.3 8.5 18.7 6.2 20.2 " +
+    "3.8 17.8 5.3 15.5 4.7 14.2 2.1 13.7 2.1 10.3 4.7 9.8 5.3 8.5 3.8 6.2 6.2 " +
+    "3.8 8.5 5.3 9.8 4.7 10.3 2.1 13.7 2.1 14.2 4.7 15.5 5.3 17.8 3.8 20.2 " +
+    "6.2 18.7 8.5zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6",
   eye: "M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12M12 15a3 3 0 1 0 " +
     "0-6 3 3 0 0 0 0 6",
   eyeOff: "M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12M12 15a3 3 0 1 0 " +
@@ -954,10 +957,19 @@ const chime = () => tone([[880, 0, 0.12], [1320, 0.13, 0.25]], 0.15);
 const ringing = () => tone([[440, 0, 2], [480, 0, 2]], 0.07);
 const ringback = () => tone([[440, 0, 2], [480, 0, 2]], 0.04);
 
+/** The doctor's answer in a line: each device and push server, timed. */
+const reach = (d) => [
+  ...d.devices.map((x) => `${x.name ?? x.device}: ` + (x.ms == null
+    ? "unreachable" : `${x.ms} ms, ${x.path === "direct" ? "direct" : "relayed"}`)),
+  ...d.push.map((x) => `push via ${x.name ?? x.server}: ` +
+    (x.ms == null ? "unreachable" : `${x.ms} ms`)),
+].join(" · ") || "no device or push server of theirs known";
+
 /** A DM call of ours, alone in it: is it reaching them, ringing there,
- * or not getting through? Ringback only once it rings; a minute, then
- * no answer. */
+ * or not getting through (and why, from the doctor)? Ringback only once
+ * it rings; a minute, then no answer. */
 let back = 0;
+let probed = {};
 function dial() {
   const on = av.call.on;
   const s = on && S.spaces.find((x) => x.id === on.space);
@@ -978,7 +990,14 @@ function dial() {
     toast(`No answer from ${s.name}`);
     return av.leave(rpc);
   }
-  S.dial = rings ? "Ringing…" : t > 20e3
+  if (!rings && t > 5e3 && probed.since !== av.call.since) {
+    probed = { since: av.call.since };
+    const p = probed;
+    rpc("doctor", { user: s.with }).then((d) => { p.why = reach(d); dial(); },
+      () => {});
+  }
+  S.dial = rings ? "Ringing…" : probed.why && probed.since === av.call.since
+    ? `Not getting through: ${probed.why}` : t > 20e3
     ? `Not getting through: ${s.name}'s devices can't be reached now`
     : "Calling…";
   back = rings ? back + 1 : 0;
@@ -1943,19 +1962,24 @@ function storageFlow(s) {
   const keep = (node, on) => quiet(call("store", { space: s.id, node, on }));
   const paired = s.storage.some((x) => x.node === local);
   modal((finish) => {
-    const sw = (x) => h("label", { class: "switch" },
-      h("span", {}, x.name ?? (x.node === local ? "This computer" : x.short),
-        h("small", {}, `device ${x.short}` +
-          (x.node === local ? " · this computer" : "") +
-          " · " + (x.seen ? `synced ${ago(x.seen)}`
-            : "not reached since irch started")),
-        h("button", { class: "gear", title: "Rename", onclick: (e) => {
-          e.preventDefault();
-          finish(null);
-          rename(x.node, x.name, () => storageFlow(s));
-        } }, icon("pencil"))),
-      h("input", { type: "checkbox", checked: x.on,
-        onchange: (e) => keep(x.node, e.target.checked) }), h("i"));
+    // The button outside the label: a click on the switch toggles it.
+    const sw = (x) => h("div", { class: "row" },
+      h("button", { class: "gear", title: "Rename", onclick: () => {
+        finish(null);
+        rename(x.node, x.name, () => storageFlow(s));
+      } }, icon("pencil")),
+      h("button", { class: "gear", title: "Remove", onclick: () => {
+        finish(null);
+        forget(x, x.node === local).then(() => storageFlow(s));
+      } }, icon("trash")),
+      h("label", { class: "switch" },
+        h("span", {}, x.name ?? (x.node === local ? "This computer" : x.short),
+          h("small", {}, `device ${x.short}` +
+            (x.node === local ? " · this computer" : "") +
+            " · " + (x.seen ? `synced ${ago(x.seen)}`
+              : "not reached since irch started"))),
+        h("input", { type: "checkbox", checked: x.on,
+          onchange: (e) => keep(x.node, e.target.checked) }), h("i")));
     const pair = async () => {
       await quiet(call("store_local").then(() => keep(S.me.local_storage, true)));
       finish(true);
@@ -2178,6 +2202,20 @@ async function named() {
   S.me = await rpc("me");
   renderUserPanel();
   return true;
+}
+
+/** Once per device: what to call it (its hostname at first), so a
+ * user's devices and storage nodes are told apart. */
+async function nameDevice() {
+  if (store.get("named")) return;
+  const name = await ask({ title: "What is this device called?",
+    sub: "Your other devices list it by this name. You can change it in " +
+      "My Account › Your devices.", label: "Device name",
+    value: S.me.device_name ?? "", ok: "Save" });
+  store.set("named", "1");
+  if (name && name !== S.me.device_name) {
+    await quiet(call("name_device", { device: S.me.endpoint, name }));
+  }
 }
 
 async function createFlow() {
@@ -2466,6 +2504,15 @@ async function usageFlow() {
         ? "irpush's: pinged after 130 min, not 15 s."
         : "a stock one, pinged every 15 s: pair with a storage node that " +
           "has an irpush relay (irch --install --push-relay).")),
+      h("button", { class: "choice", onclick: relayKey }, icon("pencil"),
+        "Relay key: no speed limit through a relay"),
+      h("button", { class: "choice", onclick: (e) => {
+        e.target.textContent = "Checking…";
+        rpc("doctor", { user: null }).then((d) => {
+          e.target.textContent = `Relay ${d.relay.map((r) => r.url +
+            (r.up ? "" : " (down)")).join(", ") || "none"}. ` + reach(d);
+        }, (err) => { e.target.textContent = String(err); });
+      } }, icon("eye"), "Check connections to your devices"),
       phone && h("p", { class: "sub" }, `Since the phone started, irch ` +
         `sent ${phone.tx_packets} packets (${amount(phone.tx_bytes)}) and ` +
         `received ${phone.rx_packets} (${amount(phone.rx_bytes)}), ` +
@@ -2496,6 +2543,31 @@ async function devicesFlow() {
           () => devicesFlow()) }, "Rename")))),
     foot(h("button", { class: "btn grey", onclick: () => finish(null) },
       "Done"))));
+}
+
+/** A key from whoever runs a relay lifts its speed limit for us: big
+ * files that cannot go direct. Sent to that relay only. */
+async function relayKey() {
+  const line = await ask({ title: "Relay key", label: "Relay and key",
+    sub: "From whoever runs the relay (irpush: make key). Only that relay " +
+      "sees it. Used from irch's next start; the relay alone, to remove.",
+    placeholder: "https://irpush.example#key", maxLength: 300 });
+  if (line) await quiet(call("relay_key", { line }));
+}
+
+/** A storage node off our list (every device of ours); ours, here, it
+ * can be stopped too. One elsewhere runs on until stopped there. */
+async function forget(x, here) {
+  const ok = await confirmBox({ title: `Remove ${x.name ?? x.short}?`,
+    sub: "It leaves this list on all your devices and keeps nothing more " +
+      "for you. " + (here ? "It runs on this computer: you can stop it next."
+        : "It keeps running where it is: stop it there (irch --uninstall)."),
+    ok: "Remove" });
+  if (!ok) return;
+  await quiet(call("forget_storage", { node: x.node }));
+  if (here && await confirmBox({ title: "Stop it on this computer too?",
+    sub: "It stops now and does not start again with the computer.",
+    ok: "Stop" })) await quiet(invoke("stop_here"));
 }
 
 /** Name a device or storage node of ours, on every device of ours. */
@@ -3438,6 +3510,10 @@ async function start() {
       members();
     } else if (e.t === "call") {
       schedule("side");
+    } else if (e.t === "relayed") {
+      toast(`Not direct: ${amount(e.size)} comes through a relay, at its ` +
+        "speed limit. A key from whoever runs it lifts that (Network use).",
+        false, 15e3);
     } else if (e.t === "typing" && !isMe(e.user)) {
       // Said once each way; a stop lost, it fades in a minute.
       const k = `${e.space}|${e.channel}`;
@@ -3460,6 +3536,7 @@ async function start() {
   });
   await loadSidebar();
   health();
+  nameDevice();
   if (!S.spaces.length) renderHeader();
   const url = await invoke("opened").catch(() => null);
   if (url) openUrl(url);

@@ -49,9 +49,9 @@ struct Cli {
     /// Keep a storage node running here, from now on (as you)
     #[arg(long)]
     install: bool,
-    /// With --install: its phones' relay, "https://irpush.you.example#TOKEN"
-    /// (irpush's deploy/: `make token`); quiet, pinged after 130 min
-    #[arg(long, value_name = "URL#TOKEN", requires = "install")]
+    /// With --install: its devices' relay, "https://irpush.you.example"
+    /// (irpush's deploy/); quiet, pinged after 130 min
+    #[arg(long, value_name = "URL", requires = "install")]
     push_relay: Option<String>,
     /// Stop the storage node --install keeps
     #[arg(long)]
@@ -59,9 +59,27 @@ struct Cli {
     /// Replace this irch with the latest release, if newer
     #[arg(long)]
     update: bool,
+    /// How reaching someone (a name or id; else your devices) goes now,
+    /// as JSON: their devices and push servers, each timed. Rings nothing
+    #[arg(long, value_name = "WHO", num_args = 0..=1, default_missing_value = "")]
+    doctor: Option<String>,
 }
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Someone in a space of ours, by name (any case) or the start of their id.
+fn find(n: &Node, who: &str) -> Result<irch_core::Id> {
+    let low = who.to_lowercase();
+    let is = |s: &irch_core::State, u: &irch_core::Id| {
+        s.display_name(u).to_lowercase() == low
+            || u.to_string().starts_with(&low)
+    };
+    let all = n.spaces().into_iter().filter_map(|id| {
+        n.view(&id, |s| s.members().into_iter().find(|m| is(s, &m.id)))
+            .flatten()
+    });
+    all.map(|m| m.id).next().ok_or_else(|| anyhow::anyhow!("no {who} here"))
+}
 
 /// Only release builds (IRCH_RELEASE, from release.yml) update themselves.
 async fn updated(exe: &std::path::Path) {
@@ -146,7 +164,8 @@ async fn main() -> Result<()> {
         .dir
         .unwrap_or_else(|| dirs::data_dir().unwrap_or_default().join(home));
     let (api, web) = (c.api, c.web);
-    let ui = !(c.serve || c.headless || c.api || web.is_some());
+    let ui = !(c.serve || c.headless || c.api || web.is_some())
+        && c.doctor.is_none();
     // The web link rides irp's relays, or the first of ours; none on a LAN.
     let relays = match &net {
         Net::Default => Some(vec![]),
@@ -178,7 +197,7 @@ async fn main() -> Result<()> {
         Node::start(Config { dir, name, net, link, serve, notes, big }).await?;
     if let Some(code) = n.storage_code().await {
         // Which one it is, as the app lists it: not secret, unlike its code.
-        let (name, id) = (irch_core::host_name(), n.device());
+        let (name, id) = (irch_core::storage_name(), n.device());
         println!("Storage node {name}, device {}", id.fmt_short());
         std::fs::write(code_file, &code)?;
         // For nixos.nix; unprinted, so no wider-read journal holds it.
@@ -189,6 +208,12 @@ async fn main() -> Result<()> {
                 println!("{code}");
             }
         }
+    }
+    if let Some(who) = c.doctor {
+        let user = (!who.is_empty()).then(|| find(&n, &who)).transpose()?;
+        println!("{:#}", n.doctor(user).await);
+        n.shutdown().await;
+        return Ok(());
     }
     let mut fresh = false;
     if ui {

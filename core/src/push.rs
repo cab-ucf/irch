@@ -53,13 +53,16 @@ async fn ask(ep: &Endpoint, to: EndpointAddr, a: &Ask) -> Result<Vec<u8>> {
     tokio::time::timeout(SLOW, go).await?
 }
 
-/// Our home relay, and whether it is irpush's (a token: quiet).
+/// Our best relay, and whether it is a storage node's irpush relay
+/// (quiet: pinged hours apart).
 pub fn relay(dir: &Path) -> (String, bool) {
-    let r = std::fs::read_to_string(dir.join("relays"));
-    let r = r.unwrap_or_else(|_| crate::node::RELAYS[0].into());
-    let first = r.split(',').next().unwrap_or_default();
-    let (url, token) = first.split_once('#').unwrap_or((first, ""));
-    (url.into(), !token.is_empty())
+    let r = std::fs::read_to_string(dir.join("relays")).ok();
+    let first = r.as_deref().and_then(|r| r.split(',').next());
+    let url = first.and_then(|f| f.split('#').next());
+    match url.filter(|u| u.starts_with("http")) {
+        Some(u) => (u.into(), true),
+        None => (crate::node::RELAYS[0].into(), false),
+    }
 }
 
 /// A storage node's irpush relay, checked, kept in DIR/push-relay.
@@ -432,7 +435,7 @@ fn a_storage_nodes_relay_is_checked_kept_and_told() {
     let n = u64::from_le_bytes(crate::crypto::rand());
     let d = std::env::temp_dir().join(format!("irch-relay-{n}"));
     assert!(set_relay(&d, "not a url").is_err());
-    let r = format!("https://irpush.example./#{}", "ab".repeat(32));
+    let r = "https://irpush.example./".to_string();
     set_relay(&d, &r).unwrap();
     assert_eq!(std::fs::read_to_string(d.join("push-relay")).unwrap(), r);
     assert!(!relay(&d).1, "unpaired: a stock relay");

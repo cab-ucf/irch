@@ -104,11 +104,29 @@ pub struct Config {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 pub enum Event {
-    Changed { space: Id },
-    Typing { space: Id, channel: Ch, user: Id, on: bool },
-    Presence { space: Id },
-    Synced { space: Id, count: usize },
-    Call { space: Id },
+    Changed {
+        space: Id,
+    },
+    Typing {
+        space: Id,
+        channel: Ch,
+        user: Id,
+        on: bool,
+    },
+    Presence {
+        space: Id,
+    },
+    Synced {
+        space: Id,
+        count: usize,
+    },
+    Call {
+        space: Id,
+    },
+    /// A big file comes through a relay, not direct: at its rate limit.
+    Relayed {
+        size: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -663,44 +681,104 @@ pub(crate) fn public(ip: &std::net::IpAddr) -> bool {
     }
 }
 
-/// `url#token` each; none asked for our address (irpush's relay has no
-/// QUIC for it): peers' links tell us, and the relay's TCP reaches us.
+/// `url` or `url#key`: relays are open; a key from whoever runs one lifts
+/// its rate limit for us (irpush's relay), for transfers too big to wait.
+fn relay(l: &str) -> Option<(RelayUrl, iroh::RelayConfig)> {
+    let (u, k) = l.split_once('#').unwrap_or((l, ""));
+    let u: RelayUrl = u.parse().ok()?;
+    let c = iroh::RelayConfig::from(u.clone());
+    Some((u, if k.is_empty() { c } else { c.with_auth_token(k) }))
+}
+
 fn relays<'a>(list: impl IntoIterator<Item = &'a str>) -> iroh::RelayMap {
-    let one = |l: &str| {
-        let (u, t) = l.split_once('#').unwrap_or((l, ""));
-        let mut c = iroh::RelayConfig::from(u.parse::<RelayUrl>().ok()?);
-        c.quic = None;
-        Some(if t.is_empty() { c } else { c.with_auth_token(t) })
-    };
-    list.into_iter().filter_map(one).collect()
+    list.into_iter().filter_map(|l| relay(l).map(|r| r.1)).collect()
+}
+
+/// Our relays, best first (`home`), each with our key for it, if any
+/// (`relay-keys`: `url#key` lines).
+fn order(dir: &Path) -> Vec<String> {
+    let paired = std::fs::read_to_string(dir.join("relays")).ok();
+    let keys = std::fs::read_to_string(dir.join("relay-keys"));
+    let keys = keys.unwrap_or_default();
+    let keys: Vec<(RelayUrl, &str)> = keys
+        .lines()
+        .filter_map(|l| {
+            let (u, k) = l.trim().split_once('#')?;
+            Some((u.parse().ok()?, k))
+        })
+        .collect();
+    home(paired.as_deref(), RELAYS)
+        .into_iter()
+        .filter_map(|u| {
+            let url = relay(u)?.0;
+            let k = keys.iter().find(|k| k.0 == url).map(|k| &k.1);
+            Some(k.map_or(url.to_string(), |k| format!("{url}#{k}")))
+        })
+        .collect()
+}
+
+/// Where we may home, best first: a storage node's relays (irpush's, with
+/// pings hours apart), then irch's, then n0's (never, given `!n0`).
+fn home<'a>(paired: Option<&'a str>, ours: [&'a str; 2]) -> Vec<&'a str> {
+    let l = paired.unwrap_or_default();
+    let url =
+        |r: &'a str| r.split('#').next().filter(|u| u.starts_with("http"));
+    let mut v: Vec<&str> = l.split(',').filter_map(url).collect();
+    let own = l.contains("!n0");
+    if !own || v.is_empty() {
+        v.push(ours[0]);
+    }
+    if !own {
+        v.push(ours[1]);
+    }
+    let mut seen = HashSet::new();
+    v.retain(|u| seen.insert(*u));
+    v
 }
 
 #[test]
-fn relays_carry_their_tokens_and_are_never_probed() {
-    let m = relays(["https://a.example./#tok", "https://b.example./"]);
-    let c = |u: &str| m.get(&u.parse().expect("url")).expect("listed");
-    assert_eq!(c("https://a.example./").auth_token.as_deref(), Some("tok"));
-    assert_eq!(c("https://b.example./").auth_token, None);
-    assert!(m.relays::<Vec<_>>().iter().all(|c| c.quic.is_none()));
-    assert_eq!(relays(["https://a.example./", "!n0"]).len(), 1);
+fn our_keys_go_to_their_relay_only() {
+    let n = u64::from_le_bytes(crate::crypto::rand());
+    let d = std::env::temp_dir().join(format!("irch-keys-{n}"));
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("relays"), "https://lab.example").unwrap();
+    std::fs::write(d.join("relay-keys"), "https://lab.example/#k\nbad")
+        .unwrap();
+    let o = order(&d);
+    assert_eq!(o[0], "https://lab.example/#k");
+    assert!(o[1..].iter().all(|l| !l.contains('#')), "not to theirs");
+    let _ = std::fs::remove_dir_all(d);
 }
 
-/// Probing kept to what reaching peers needs: no address discovery, no
-/// https latency or captive-portal probes, no DHT.
-/// Paired with irpush, its relays are ours (`url#token,…`, from the
-/// storage node): one long-lived socket, pinged after 130 min, not 15 s.
+#[test]
+fn relays_are_open_and_tried_best_first() {
+    let m = relays(["https://a.example./#old", "https://b.example./", "!n0"]);
+    assert_eq!(m.len(), 2, "a token is dropped, !n0 is no relay");
+    let d = ["https://d.example./", "https://n0.example./"];
+    assert_eq!(home(None, d), d);
+    let p = "https://a.example./#old";
+    assert_eq!(home(Some(p), d), ["https://a.example./", d[0], d[1]]);
+    let mine = "https://a.example./,https://b.example./,!n0";
+    assert_eq!(
+        home(Some(mine), d),
+        ["https://a.example./", "https://b.example./"]
+    );
+}
+
+/// One relay at a time, best first (`order`; `Node::roam` moves on). iroh
+/// finds its home by timing its relays over https, every 20–26 s while
+/// running: without it, no home and no relay reaches us. No captive-portal
+/// probes, no DHT.
+/// An open link's paths are pinged every 5 s, so irch holds links only
+/// while in sight or in a call; asleep, a phone holds irpush's socket.
 pub(crate) fn endpoint(
     net: &Net,
-    paired: Option<&str>,
+    best: Option<&str>,
 ) -> iroh::endpoint::Builder {
-    let ours = match paired {
-        Some(l) if l.contains("!n0") => l.to_string(),
-        Some(l) => format!("{l},{}", RELAYS[1]),
-        None => RELAYS.join(","),
-    };
+    let best = best.unwrap_or(RELAYS[0]);
     let b = match net {
         Net::Default => Endpoint::builder(presets::N0)
-            .relay_mode(RelayMode::Custom(relays(ours.split(',')))),
+            .relay_mode(RelayMode::Custom(relays([best]))),
         Net::Relay(urls) => Endpoint::builder(presets::Minimal).relay_mode(
             RelayMode::Custom(relays(urls.iter().map(|u| u.as_str()))),
         ),
@@ -716,20 +794,21 @@ pub(crate) fn endpoint(
     // BBRv3, as loss is the norm: at 0.1% and 50 ms Cubic moves 1.1 MB/s a
     // stream, BBRv3 23; a 2 MiB window, 16 MB/s at 130 ms (default: 10).
     let cc = noq_proto::congestion::Bbr3Config::default();
-    // An open link's paths are pinged every 5 s: iroh allows no less
-    // (longer is ignored, path timeouts clamp at 15 s). So links are held
-    // only while irch is in sight or in a call; else irpush's socket alone.
     let b = b.transport_config(
         iroh::endpoint::QuicTransportConfig::builder()
             .stream_receive_window((2u32 << 20).into())
             .congestion_controller_factory(Arc::new(cc))
             .build(),
     );
-    let b = b.net_report_config(iroh::endpoint::NetReportConfig::minimal());
+    let mut probes = iroh::endpoint::NetReportConfig::default();
+    probes.captive_portal_check = false;
+    let b = b.net_report_config(probes);
     // A phone's network has no router to map ports on: no probing it.
     #[cfg(target_os = "android")]
     let b = b.portmapper_config(iroh::endpoint::PortmapperConfig::Disabled);
-    // Desktops: the network's proxy and system roots, as any other https.
+    // Desktops: the network's proxy and system roots, as any other https
+    // (unit tests: their own relays, on loopback).
+    #[cfg(not(test))]
     let b = b.proxy_from_env();
     #[cfg(not(target_os = "android"))]
     let b = b.ca_tls_config(iroh::tls::CaTlsConfig::system());
@@ -864,8 +943,8 @@ impl Node {
         let lookup = MemoryLookup::new();
         local.peers.values().for_each(|a| lookup.add_endpoint_info(a.clone()));
         let bind = async |port: u16| {
-            let paired = std::fs::read_to_string(cfg.dir.join("relays"));
-            let b = endpoint(&cfg.net, paired.ok().as_deref());
+            let best = order(&cfg.dir).into_iter().next();
+            let b = endpoint(&cfg.net, best.as_deref());
             let v6 = BindOpts::default().set_is_required(false);
             let b = b.secret_key(dev.clone()).address_lookup(lookup.clone());
             let b = b
@@ -2359,8 +2438,17 @@ impl Node {
         let sp = self.get(&id)?;
         ensure!(!self.locked(&id), LOCKED);
         let run = u64::from_le_bytes(rand());
-        #[allow(unused_mut)]
-        let mut call = Call::new(id, ch, run);
+        let dev = self.ep.id();
+        let on = self.callers(&sp, Some(ch)).iter().any(|c| c.0 != dev);
+        *lock(&self.call) = Some(Call::new(id, ch, run));
+        let raw = self.signal(&sp, Op::Call { channel: Some(ch) }).await;
+        self.emit(Event::Call { space: id });
+        // Sleeping phones: someone is calling; one answering rings no one.
+        if !on {
+            self.wake(&id, raw);
+        }
+        tokio::spawn(self.clone().ring(run));
+        // Rung first: opening the sound devices can take a while.
         #[cfg(feature = "voice")]
         {
             let n = Arc::downgrade(self);
@@ -2371,18 +2459,12 @@ impl Node {
             let start = move || crate::voice::Voice::start(send, media);
             let v = tokio::task::spawn_blocking(start).await?;
             // No devices here: the page's audio, as before.
-            call.voice = v.inspect_err(|e| warn!("voice: {e:#}")).ok();
+            let v = v.inspect_err(|e| warn!("voice: {e:#}")).ok();
+            if let Some(c) = lock(&self.call).as_mut().filter(|c| c.run == run)
+            {
+                c.voice = v;
+            }
         }
-        let dev = self.ep.id();
-        let on = self.callers(&sp, Some(ch)).iter().any(|c| c.0 != dev);
-        *lock(&self.call) = Some(call);
-        let raw = self.signal(&sp, Op::Call { channel: Some(ch) }).await;
-        self.emit(Event::Call { space: id });
-        // Sleeping phones: someone is calling; one answering rings no one.
-        if !on {
-            self.wake(&id, raw);
-        }
-        tokio::spawn(self.clone().ring(run));
         Ok(())
     }
 
@@ -2558,7 +2640,7 @@ impl Node {
     pub async fn storage_code(&self) -> Option<String> {
         let token = self.serve?;
         // Its name rides along: older irch reads the first two only.
-        Some(code("host", &(self.addr().await, token, host_name())))
+        Some(code("host", &(self.addr().await, token, storage_name())))
     }
 
     pub async fn add_storage(self: &Arc<Self>, code: &str) -> Result<()> {
@@ -2645,6 +2727,22 @@ impl Node {
             }
             false => {}
         }
+        Ok(())
+    }
+
+    /// Off our list, on every device of ours. The node runs on: it is
+    /// stopped where it runs (`irch --uninstall`).
+    pub async fn forget_storage(
+        self: &Arc<Self>,
+        node: &EndpointId,
+    ) -> Result<()> {
+        let all = self.view(&self.own, |s| s.storage()).unwrap_or_default();
+        let (addr, token) = all
+            .into_iter()
+            .find(|s| s.0.id == *node)
+            .context("not one of your storage nodes")?;
+        let own = self.get(&self.own)?;
+        self.post(&own, Op::Storage { addr, token, on: false }).await?;
         Ok(())
     }
 
@@ -2944,6 +3042,9 @@ impl Node {
             ensure!(size == len, "not the file its post said");
             // Who answered first, then the rest; a link may drop mid-way
             // (relay losses): asked again, it resumes.
+            if len > 1 << 28 && !self.direct(from).await {
+                self.emit(Event::Relayed { size: len });
+            }
             peers.retain(|p| *p != from);
             peers.insert(0, from);
             let got =
@@ -3709,6 +3810,165 @@ impl Node {
         }
     }
 
+    /// Whether our link to `d` is direct (peer to peer), not relayed.
+    async fn direct(&self, d: EndpointId) -> bool {
+        self.path(d).await == "direct"
+    }
+
+    /// How we reach `d` now: "direct", the relay's address, or "none".
+    async fn path(&self, d: EndpointId) -> String {
+        use iroh::endpoint::TransportAddrUsage::Active;
+        let Some(i) = self.ep.remote_info(d).await else {
+            return "none".into();
+        };
+        let on: Vec<_> =
+            i.addrs().filter(|a| matches!(a.usage(), Active)).collect();
+        match on.iter().find(|a| a.addr().is_ip()) {
+            Some(_) => "direct".into(),
+            None => on.first().map_or("none".into(), |a| match a.addr() {
+                iroh::TransportAddr::Relay(u) => u.to_string(),
+                _ => "none".into(),
+            }),
+        }
+    }
+
+    /// A link to `to` made and closed: how long it took (none: not in
+    /// 10 s), and how it went.
+    async fn probe(&self, to: EndpointAddr, alpn: &[u8]) -> serde_json::Value {
+        let (d, t) = (to.id, Instant::now());
+        let ten = Duration::from_secs(10);
+        let c = tokio::time::timeout(ten, self.ep.connect(to, alpn)).await;
+        let Ok(Ok(c)) = c else {
+            return serde_json::json!({ "ms": null, "path": "none" });
+        };
+        let ms = t.elapsed().as_millis() as u64;
+        let path = self.path(d).await;
+        c.close(0u32.into(), b"doctor");
+        serde_json::json!({ "ms": ms, "path": path })
+    }
+
+    /// What reaching `user` (else our own devices) takes now: our relay,
+    /// and a link timed to each of their devices and push servers. A push
+    /// server is reached, not asked: nothing rings.
+    pub async fn doctor(
+        self: &Arc<Self>,
+        user: Option<Id>,
+    ) -> serde_json::Value {
+        use iroh::Watcher as _;
+        // Started just now (irch --doctor): our relay first.
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.ep.online())
+            .await;
+        let who = user.unwrap_or_else(|| self.id());
+        let (mut devs, mut push) = (BTreeMap::new(), BTreeSet::new());
+        for id in self.spaces() {
+            self.view(&id, |s| {
+                for (d, t) in s.devices_of(&who) {
+                    let at = devs.entry(d).or_insert(t);
+                    *at = (*at).max(t);
+                }
+                for (d, url) in s.pushes_of(Some(&who)) {
+                    push.extend(
+                        url.split_whitespace().map(|r| (d, r.to_string())),
+                    );
+                }
+            });
+        }
+        devs.remove(&self.ep.id());
+        let devices = devs.into_iter().map(|(d, wrote)| async move {
+            let mut v = self.probe(d.into(), sync::ALPN).await;
+            v["device"] = d.fmt_short().to_string().into();
+            v["name"] = self.label(&d).into();
+            v["wrote"] = wrote.into();
+            v
+        });
+        type Ring = (EndpointAddr, [u8; 8], [u8; 16]);
+        let rings = push
+            .into_iter()
+            .filter_map(|(d, r)| Some((d, uncode::<Ring>("ring", &r).ok()?.0)));
+        let pushes = rings.map(|(d, to)| async move {
+            let server = to.id;
+            let mut v = self.probe(to, crate::wake::ALPN).await;
+            v["for"] = d.fmt_short().to_string().into();
+            v["server"] = server.fmt_short().to_string().into();
+            v["name"] = self.label(&server).into();
+            v
+        });
+        let relay = self.ep.home_relay_status().get();
+        let relay = relay.iter().map(
+            |s| serde_json::json!({ "url": s.url(), "up": s.is_connected() }),
+        );
+        let order = order(&self.dir).into_iter();
+        let order: Vec<_> = order
+            .map(|l| l.split('#').next().unwrap_or_default().to_string())
+            .collect();
+        serde_json::json!({
+            "relay": relay.collect::<Vec<_>>(),
+            "order": order,
+            "devices": n0_future::join_all(devices).await,
+            "push": n0_future::join_all(pushes).await,
+        })
+    }
+
+    /// Our key for a relay (`url#key`, from whoever runs it), or none
+    /// (`url`): kept in `relay-keys`, used from the next start.
+    pub fn relay_key(&self, line: &str) -> Result<()> {
+        let (u, k) = line.trim().split_once('#').unwrap_or((line.trim(), ""));
+        let (url, _) = relay(u).context("not a relay's address")?;
+        ensure!(
+            k.is_empty() || k.len() >= 32,
+            "a key is 32 characters or more"
+        );
+        let f = self.dir.join("relay-keys");
+        let old = std::fs::read_to_string(&f).unwrap_or_default();
+        let mut v: Vec<&str> = old
+            .lines()
+            .filter(|l| {
+                l.split('#').next().and_then(relay).is_none_or(|r| r.0 != url)
+            })
+            .collect();
+        let new = format!("{url}#{k}");
+        if !k.is_empty() {
+            v.push(&new);
+        }
+        store::write(&f, v.join("\n").as_bytes())
+    }
+
+    /// Our relay, best first (`home`): a beat without it, the next; every
+    /// half hour, the best again if it answers.
+    async fn roam(&self, beat: u64) {
+        use iroh::Watcher as _;
+        if !matches!(self.net, Net::Default) {
+            return;
+        }
+        let order: Vec<_> = order(&self.dir)
+            .iter()
+            .map(String::as_str)
+            .filter_map(relay)
+            .collect();
+        let on = self.ep.home_relay_status().get();
+        let up = on.iter().any(|s| s.is_connected());
+        let at =
+            on.first().and_then(|h| order.iter().position(|o| o.0 == *h.url()));
+        let to = match (up, at) {
+            (false, _) if beat > 0 => at.map_or(0, |a| (a + 1) % order.len()),
+            (true, Some(a)) if a > 0 && beat.is_multiple_of(30) => {
+                let Ok(u) = order[0].0.join("ping") else { return };
+                let r = http().get(u).send().await;
+                if !r.is_ok_and(|r| r.status().is_success()) {
+                    return;
+                }
+                0
+            }
+            (_, None) if beat > 0 => 0,
+            _ => return,
+        };
+        let (url, c) = order[to].clone();
+        self.ep.insert_relay(url.clone(), Arc::new(c)).await;
+        for (u, _) in order.iter().filter(|o| o.0 != url) {
+            self.ep.remove_relay(u).await;
+        }
+    }
+
     /// Here (a state change: started, back, another network): one `Here`,
     /// and our call, if any, for whoever missed it.
     async fn here(&self, sp: &Space) {
@@ -3915,6 +4175,7 @@ async fn heartbeat(n: Weak<Node>) {
             n.resume().await;
         }
         last = now();
+        n.roam(i).await;
         // In a call is in use.
         if n.in_call().is_some() {
             n.active().await;
@@ -3957,6 +4218,11 @@ async fn heartbeat(n: Weak<Node>) {
     }
 }
 
+/// A storage node's name at first: its computer's, marked as one.
+pub fn storage_name() -> String {
+    format!("{}-storage", host_name())
+}
+
 /// This computer's name, or what kind of device it is.
 pub fn host_name() -> String {
     let file = std::fs::read_to_string("/etc/hostname").ok();
@@ -3982,6 +4248,36 @@ pub fn host_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn relay() -> (iroh_relay::server::Server, String) {
+        use iroh_relay::server::{RelayConfig, Server, ServerConfig};
+        let mut cfg = ServerConfig::default();
+        cfg.relay = Some(RelayConfig::new(([127, 0, 0, 1], 0)));
+        let s = Server::spawn(cfg).await.unwrap();
+        let at = format!("http://{}/", s.http_addr().unwrap());
+        (s, at)
+    }
+
+    /// Homed on one relay, a device is reached by one homed on another
+    /// (a storage node's irpush relay, irch's): iroh dials whichever relay
+    /// the address names.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_device_is_reached_on_any_relay() {
+        let ((_x, one), (_y, two)) = (relay().await, relay().await);
+        let ep = async |l: &str| {
+            let r = RelayMode::Custom(relays([l]));
+            let b = endpoint(&Net::Direct, None).relay_mode(r);
+            b.alpns(vec![b"t".to_vec()]).bind().await.unwrap()
+        };
+        let (a, b) = (ep(&one).await, ep(&two).await);
+        let secs = Duration::from_secs(10);
+        tokio::time::timeout(secs, a.online()).await.expect("a home");
+        let ours = a.addr().addrs.into_iter().filter(|x| x.is_relay());
+        let to = EndpointAddr::from_parts(a.id(), ours);
+        tokio::spawn(async move { a.accept().await?.await.ok() });
+        let c = tokio::time::timeout(secs, b.connect(to, b"t")).await;
+        assert!(c.expect("in time").is_ok(), "b reached a");
+    }
 
     fn book(name: &str, owner: Id) -> (Book, PathBuf) {
         let p = std::env::temp_dir().join(format!("irch-{name}-{}", now()));

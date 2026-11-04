@@ -22,15 +22,14 @@ curl -fsSL https://github.com/cab-ucf/irch/releases/latest/download/install.sh |
   Connect key.
 - **Storage node** (always on): a space's *Storage Nodes → Run one on this
   computer*, or `install.sh … | sh -s -- --server`. Add `--push-relay
-  https://irpush.you.example#TOKEN` (irpush's `make token`) so its
-  phones relay through irpush's quiet relay, not a stock one.
+  https://irpush.you.example` so its devices home on irpush's quiet
+  relay, not a stock one.
 - **NixOS**: `inputs.irch.url = "github:cab-ucf/irch";` and
   `irch.nixosModules.default` among the modules: the app and a storage
   node, kept up to date (checked against irch's key, built by Nix; the
   newer of the latest release and the flake's own runs).
-  `services.irch.pushRelayFile = "/run/secrets/irch-push-relay";` for
-  irpush's relay: a root-only file outside the Nix store holding
-  `https://irpush.you.example#TOKEN`. `services.irch.enable = false;` leaves the node out (a
+  `services.irch.pushRelayFile` for irpush's relay: a file holding
+  `https://irpush.you.example`. `services.irch.enable = false;` leaves the node out (a
   laptop: keep it on a computer that is always on). Sway: `exec irch-app
   --hidden` in its config (it skips XDG autostart) and a tray in the bar
   (waybar's).
@@ -53,7 +52,7 @@ beside theirs. Each ring is sealed end to end
 (post-quantum) and always the same size. Stock iroh relays ping every 15 s,
 which keeps a phone's radio awake, so for the battery saving give the
 storage node irpush's patched relay:
-`IRCH_PUSH_RELAY=https://irpush.you.example#TOKEN` (default: irch's relays).
+`IRCH_PUSH_RELAY=https://irpush.you.example` (default: irch's relays).
 
 ## On the web
 
@@ -98,6 +97,10 @@ there then; the node itself is an always-on device of yours (`--link`).
   space and DM, most messaged first, searchable. *My contact code* (or
   `:contact`) is a code or QR: whoever adds it can DM you, no space shared.
 - A deleted message can be undone for a few seconds (*Undo*, or `u`).
+- *Check connections* (Network use, `irch --doctor [who]`, and on its own
+  in a call not getting through): our relay, and each of someone's
+  devices and push servers reached and timed, direct or relayed. Nothing
+  rings.
 - *Network use* (My Account, or `:usage`): when iroh ran, what it sent and
   received, and the pushes that woke it, from a log written only as that
   changes; on Android, the app's own packets (irpush's too) and battery.
@@ -113,8 +116,10 @@ there then; the node itself is an always-on device of yours (`--link`).
 - A camera button takes a photo and sends it: never in the gallery, no
   location in it. Link previews are made by the sender's device as it
   sends (the site sees only the sender; off in My Account).
-- Devices and storage nodes have names (a computer's hostname, at first;
-  renamed in My Account or Storage Nodes); My Account shows the version.
+- Devices and storage nodes have names: asked at first start (the
+  computer's hostname; a storage node's, `hostname-storage`), renamed in
+  My Account or Storage Nodes, where a storage node can also be removed
+  (and stopped, if it runs here). My Account shows the version.
 - On phones, a call of two fills the screen, upright, like FaceTime.
 - *Add to notes*: a message or thread lands in a
   [loroh](https://github.com/cab-ucf/siroh) note as a task, event or quote,
@@ -187,12 +192,17 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   so it connects as it is answered.
   Open links are pinged every 5 s (iroh's fixed rate), so irch holds them
   only while in sight or in a call; asleep, a device holds irpush's socket
-  alone. iroh does no address, https latency, captive-portal or DHT
-  probing.
+  alone. A device holds one relay at a time, best first: its storage
+  node's (irpush's, pinged hours apart), then iroh.cxn.center, then n0's;
+  a minute without it, the next; every half hour, the best again if it
+  answers. Relays are open, so anyone reaches anyone homed on any of them.
+  While running, iroh times its relay over https every 20–26 s: without
+  that it has no home, and no one reaches it but over a LAN. No
+  captive-portal or DHT probing.
 
 | network | terminal (app env) | who else is involved |
 |---|---|---|
-| default | | relays iroh.cxn.center (paired: irpush's, e.g. irpush.cxn.center) and n0; n0 DNS |
+| default | | relays iroh.cxn.center (or a storage node's open relays) and n0; n0 DNS |
 | own relays | `--relay URL` (`IRCH_RELAY`) | your relays |
 | LAN only | `--lan` (`IRCH_LAN=1`) | nobody (mDNS) |
 
