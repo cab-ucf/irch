@@ -35,6 +35,9 @@ enum Ask {
     Ticket,
     /// `irpush:DEVICE` (paired here) and our ring tokens.
     Register(String, Vec<[u8; 16]>),
+    /// `irpush:DEVICE` (paired here): our irpush relays, `url#token,…`,
+    /// which its iroh relays through too.
+    Relays(String),
 }
 
 async fn ask(ep: &Endpoint, to: EndpointAddr, a: &Ask) -> Result<Vec<u8>> {
@@ -69,6 +72,17 @@ pub fn set_relay(dir: &Path, l: &str) -> Result<()> {
 /// A ticket to pair our irpush device with `to`.
 pub async fn ticket(ep: &Endpoint, to: EndpointAddr) -> Result<String> {
     Ok(String::from_utf8(ask(ep, to, &Ask::Ticket).await?)?)
+}
+
+/// The irpush relays of `to`, where `route` is paired.
+pub async fn relays_of(
+    ep: &Endpoint,
+    to: EndpointAddr,
+    route: &str,
+) -> Result<String> {
+    let l = String::from_utf8(ask(ep, to, &Ask::Relays(route.into())).await?)?;
+    ensure!(!irpush::Relay::list(&l)?.is_empty(), "no relays there");
+    Ok(l)
 }
 
 pub async fn register(
@@ -131,13 +145,20 @@ impl Server {
         let (mut tx, mut rx) = c.accept_bi().await?;
         let b = crate::sync::rest(&mut rx, 1024 + 17 * MOST + 64).await?;
         let (file, phones, irpush) = &*self.0;
+        // Only a device paired here.
+        let paired = |to: &str| {
+            let d = to.strip_prefix("irpush:").unwrap_or_default();
+            irpush.peers().iter().any(|p| p.0.to_string() == d)
+        };
         let reply = match postcard::from_bytes(&b)? {
             Ask::Ticket => irpush.ticket(irpush::Role::Device)?.into_bytes(),
+            Ask::Relays(to) => match paired(&to) {
+                true => irpush::Relay::show(&irpush.relays()).into_bytes(),
+                false => vec![],
+            },
             Ask::Register(to, rings) => {
                 ensure!(to.len() <= 128 && rings.len() <= MOST, "too big");
-                // Only a device paired here.
-                let d = to.strip_prefix("irpush:").unwrap_or_default();
-                let ok = irpush.peers().iter().any(|p| p.0.to_string() == d);
+                let ok = paired(&to);
                 if ok {
                     // A second apart each, so none rewrites the file flat out.
                     let (d, second) = (c.remote_id(), Duration::from_secs(1));
@@ -264,11 +285,6 @@ impl Device {
     /// What a phone gives its push server.
     pub fn url(&self) -> String {
         format!("irpush:{}", self.node.id())
-    }
-
-    /// Its relays, `url#token,…`, as its hosts gave them.
-    pub fn relays(&self) -> String {
-        irpush::Relay::show(&self.node.relays())
     }
 
     pub fn paired(&self) -> bool {

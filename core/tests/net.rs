@@ -900,6 +900,8 @@ async fn a_storage_node_rings_a_phone_through_irpush() {
     assert_eq!(b.irpush().await, Some(url.clone()), "kept");
     b.set_push(Some(url)).await;
     assert!(b.pushing(), "its storage node took the device");
+    let kept = std::fs::read_to_string(db.join("relays")).unwrap();
+    assert!(kept.starts_with(&at), "its storage node's relay, b's too");
     let ring = |p: &(iroh::EndpointId, String)| p.1.starts_with("irch:ring:");
     let told = || a.view(&id, |s| s.pushes_of(None).iter().any(ring));
     until("a knows b's push server", || told() == Some(true)).await;
