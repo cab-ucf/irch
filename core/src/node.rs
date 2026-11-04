@@ -1340,14 +1340,8 @@ impl Node {
             return None;
         }
         let d = crate::push::device(&self.dir, None).ok().flatten();
-        // Its relays, kept for our endpoint's next start.
-        let mine = |d: &crate::push::Device| {
-            let _ =
-                store::write(&self.dir.join("relays"), d.relays().as_bytes());
-            Some(d.url())
-        };
         match d {
-            Some(d) if d.paired() => return mine(&d),
+            Some(d) if d.paired() => return Some(d.url()),
             Some(_) => crate::push::forget(&self.dir),
             None => {}
         }
@@ -1360,7 +1354,7 @@ impl Node {
             };
             for _ in 0..80 {
                 if d.paired() {
-                    return mine(&d);
+                    return Some(d.url());
                 }
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
@@ -1387,7 +1381,16 @@ impl Node {
             async move { go.await.map(|_| a) }
         });
         let took = n0_future::join_all(tries).await.into_iter().flatten();
-        *lock(&self.via) = (took.collect(), rings);
+        let took: Vec<_> = took.collect();
+        // Its irpush relay (token and all) is ours too, from the next start.
+        for a in &took {
+            let l = crate::push::relays_of(&self.ep, a.clone(), &push).await;
+            if let Ok(l) = l {
+                let _ = store::write(&self.dir.join("relays"), l.as_bytes());
+                break;
+            }
+        }
+        *lock(&self.via) = (took, rings);
     }
 
     /// Our push, as this space's members should have it: a doorbell's
