@@ -593,6 +593,8 @@ pub struct Node {
     served: crate::push::Served,
     /// Asked a storage node for its relay this run.
     relayed: AtomicBool,
+    // Which of `order`'s relays we hold (`roam`).
+    roamed: AtomicUsize,
     me: Me,
     own: Id,
     dir: PathBuf,
@@ -711,19 +713,21 @@ fn order(dir: &Path) -> Vec<String> {
         .into_iter()
         .filter_map(|u| {
             let url = relay(u)?.0;
-            let k = keys.iter().find(|k| k.0 == url).map(|k| &k.1);
+            let given = u.split_once('#').map(|x| x.1);
+            let k = keys.iter().find(|k| k.0 == url).map(|k| k.1).or(given);
             Some(k.map_or(url.to_string(), |k| format!("{url}#{k}")))
         })
         .collect()
 }
 
 /// Where we may home, best first: a storage node's relays (irpush's, with
-/// pings hours apart), then irch's, then n0's (never, given `!n0`).
+/// pings hours apart), then irch's, then n0's (never, given `!n0`). A key
+/// the storage node gave (`url#key`) goes along: a relay from before open
+/// relays asks for it, an open one lets it lift the rate limit.
 fn home<'a>(paired: Option<&'a str>, ours: [&'a str; 2]) -> Vec<&'a str> {
     let l = paired.unwrap_or_default();
-    let url =
-        |r: &'a str| r.split('#').next().filter(|u| u.starts_with("http"));
-    let mut v: Vec<&str> = l.split(',').filter_map(url).collect();
+    let mut v: Vec<&str> =
+        l.split(',').filter(|r| r.starts_with("http")).collect();
     let own = l.contains("!n0");
     if !own || v.is_empty() {
         v.push(ours[0]);
@@ -732,7 +736,7 @@ fn home<'a>(paired: Option<&'a str>, ours: [&'a str; 2]) -> Vec<&'a str> {
         v.push(ours[1]);
     }
     let mut seen = HashSet::new();
-    v.retain(|u| seen.insert(*u));
+    v.retain(|u| seen.insert(u.split('#').next().unwrap_or(u)));
     v
 }
 
@@ -747,17 +751,24 @@ fn our_keys_go_to_their_relay_only() {
     let o = order(&d);
     assert_eq!(o[0], "https://lab.example/#k");
     assert!(o[1..].iter().all(|l| !l.contains('#')), "not to theirs");
+    // The storage node's own key for its relay, ours overriding it.
+    std::fs::write(d.join("relays"), "https://lab.example/#s").unwrap();
+    assert_eq!(order(&d)[0], "https://lab.example/#k");
+    std::fs::remove_file(d.join("relay-keys")).unwrap();
+    assert_eq!(order(&d)[0], "https://lab.example/#s");
     let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
 fn relays_are_open_and_tried_best_first() {
     let m = relays(["https://a.example./#old", "https://b.example./", "!n0"]);
-    assert_eq!(m.len(), 2, "a token is dropped, !n0 is no relay");
+    assert_eq!(m.len(), 2, "!n0 is no relay");
+    let c = m.get(&"https://a.example./".parse().unwrap()).unwrap();
+    assert_eq!(c.auth_token.as_deref(), Some("old"), "a key goes along");
     let d = ["https://d.example./", "https://n0.example./"];
     assert_eq!(home(None, d), d);
     let p = "https://a.example./#old";
-    assert_eq!(home(Some(p), d), ["https://a.example./", d[0], d[1]]);
+    assert_eq!(home(Some(p), d), [p, d[0], d[1]]);
     let mine = "https://a.example./,https://b.example./,!n0";
     assert_eq!(
         home(Some(mine), d),
@@ -983,6 +994,7 @@ impl Node {
             up: Instant::now(),
             served: Default::default(),
             relayed: AtomicBool::new(false),
+            roamed: AtomicUsize::new(0),
             own: own_inv.id(),
             me,
             dir: cfg.dir,
@@ -2316,6 +2328,26 @@ impl Node {
         };
         let card = |sp: &Arc<Space>| sp.inv.as_ref().is_some_and(Invite::card);
         self.all().into_iter().filter(|s| !card(s)).filter_map(with).collect()
+    }
+
+    /// Of several DMs with one person, whether this is one to list: the
+    /// one both are in (as both pick), else ours with the latest post; a
+    /// duplicate only if something was said in it.
+    pub fn listed(&self, id: &Id) -> bool {
+        use crate::state::DM;
+        let me = self.id();
+        let Some(peer) = self.view(id, |s| s.peer(&me)).flatten() else {
+            return true;
+        };
+        if self.view(id, |s| s.count(&DM) > 0) == Some(true) {
+            return true;
+        }
+        let latest = |sp: &Arc<Space>| self.view(&sp.id, |s| s.latest(&DM));
+        let best = self.dm_of(&peer).or_else(|| {
+            let all = self.dms_with(&peer).into_iter().map(|x| x.0);
+            all.max_by_key(|sp| (latest(sp), std::cmp::Reverse(sp.id)))
+        });
+        best.is_none_or(|b| b.id == *id)
     }
 
     pub fn card(&self, id: &Id) -> bool {
@@ -3945,13 +3977,13 @@ impl Node {
             .map(String::as_str)
             .filter_map(relay)
             .collect();
-        let on = self.ep.home_relay_status().get();
-        let up = on.iter().any(|s| s.is_connected());
-        let at =
-            on.first().and_then(|h| order.iter().position(|o| o.0 == *h.url()));
-        let to = match (up, at) {
-            (false, _) if beat > 0 => at.map_or(0, |a| (a + 1) % order.len()),
-            (true, Some(a)) if a > 0 && beat.is_multiple_of(30) => {
+        let up = self.ep.home_relay_status().get();
+        let up = up.iter().any(|s| s.is_connected());
+        // A dead relay is no home at all: where we are is ours to know.
+        let at = self.roamed.load(Relaxed) % order.len();
+        let to = match up {
+            false if beat > 0 => (at + 1) % order.len(),
+            true if at > 0 && beat.is_multiple_of(30) => {
                 let Ok(u) = order[0].0.join("ping") else { return };
                 let r = http().get(u).send().await;
                 if !r.is_ok_and(|r| r.status().is_success()) {
@@ -3959,9 +3991,9 @@ impl Node {
                 }
                 0
             }
-            (_, None) if beat > 0 => 0,
             _ => return,
         };
+        self.roamed.store(to, Relaxed);
         let (url, c) = order[to].clone();
         self.ep.insert_relay(url.clone(), Arc::new(c)).await;
         for (u, _) in order.iter().filter(|o| o.0 != url) {
