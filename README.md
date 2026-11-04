@@ -97,6 +97,10 @@ there then; the node itself is an always-on device of yours (`--link`).
   space and DM, most messaged first, searchable. *My contact code* (or
   `:contact`) is a code or QR: whoever adds it can DM you, no space shared.
 - A deleted message can be undone for a few seconds (*Undo*, or `u`).
+- *Check connections* (Network use, `irch --doctor [who]`, and on its own
+  in a call not getting through): our relay, and each of someone's
+  devices and push servers reached and timed, direct or relayed. Nothing
+  rings.
 - *Network use* (My Account, or `:usage`): when iroh ran, what it sent and
   received, and the pushes that woke it, from a log written only as that
   changes; on Android, the app's own packets (irpush's too) and battery.

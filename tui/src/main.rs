@@ -59,9 +59,27 @@ struct Cli {
     /// Replace this irch with the latest release, if newer
     #[arg(long)]
     update: bool,
+    /// How reaching someone (a name or id; else your devices) goes now,
+    /// as JSON: their devices and push servers, each timed. Rings nothing
+    #[arg(long, value_name = "WHO", num_args = 0..=1, default_missing_value = "")]
+    doctor: Option<String>,
 }
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Someone in a space of ours, by name (any case) or the start of their id.
+fn find(n: &Node, who: &str) -> Result<irch_core::Id> {
+    let low = who.to_lowercase();
+    let is = |s: &irch_core::State, u: &irch_core::Id| {
+        s.display_name(u).to_lowercase() == low
+            || u.to_string().starts_with(&low)
+    };
+    let all = n.spaces().into_iter().filter_map(|id| {
+        n.view(&id, |s| s.members().into_iter().find(|m| is(s, &m.id)))
+            .flatten()
+    });
+    all.map(|m| m.id).next().ok_or_else(|| anyhow::anyhow!("no {who} here"))
+}
 
 /// Only release builds (IRCH_RELEASE, from release.yml) update themselves.
 async fn updated(exe: &std::path::Path) {
@@ -146,7 +164,8 @@ async fn main() -> Result<()> {
         .dir
         .unwrap_or_else(|| dirs::data_dir().unwrap_or_default().join(home));
     let (api, web) = (c.api, c.web);
-    let ui = !(c.serve || c.headless || c.api || web.is_some());
+    let ui = !(c.serve || c.headless || c.api || web.is_some())
+        && c.doctor.is_none();
     // The web link rides irp's relays, or the first of ours; none on a LAN.
     let relays = match &net {
         Net::Default => Some(vec![]),
@@ -189,6 +208,12 @@ async fn main() -> Result<()> {
                 println!("{code}");
             }
         }
+    }
+    if let Some(who) = c.doctor {
+        let user = (!who.is_empty()).then(|| find(&n, &who)).transpose()?;
+        println!("{:#}", n.doctor(user).await);
+        n.shutdown().await;
+        return Ok(());
     }
     let mut fresh = false;
     if ui {

@@ -2438,8 +2438,17 @@ impl Node {
         let sp = self.get(&id)?;
         ensure!(!self.locked(&id), LOCKED);
         let run = u64::from_le_bytes(rand());
-        #[allow(unused_mut)]
-        let mut call = Call::new(id, ch, run);
+        let dev = self.ep.id();
+        let on = self.callers(&sp, Some(ch)).iter().any(|c| c.0 != dev);
+        *lock(&self.call) = Some(Call::new(id, ch, run));
+        let raw = self.signal(&sp, Op::Call { channel: Some(ch) }).await;
+        self.emit(Event::Call { space: id });
+        // Sleeping phones: someone is calling; one answering rings no one.
+        if !on {
+            self.wake(&id, raw);
+        }
+        tokio::spawn(self.clone().ring(run));
+        // Rung first: opening the sound devices can take a while.
         #[cfg(feature = "voice")]
         {
             let n = Arc::downgrade(self);
@@ -2450,18 +2459,12 @@ impl Node {
             let start = move || crate::voice::Voice::start(send, media);
             let v = tokio::task::spawn_blocking(start).await?;
             // No devices here: the page's audio, as before.
-            call.voice = v.inspect_err(|e| warn!("voice: {e:#}")).ok();
+            let v = v.inspect_err(|e| warn!("voice: {e:#}")).ok();
+            if let Some(c) = lock(&self.call).as_mut().filter(|c| c.run == run)
+            {
+                c.voice = v;
+            }
         }
-        let dev = self.ep.id();
-        let on = self.callers(&sp, Some(ch)).iter().any(|c| c.0 != dev);
-        *lock(&self.call) = Some(call);
-        let raw = self.signal(&sp, Op::Call { channel: Some(ch) }).await;
-        self.emit(Event::Call { space: id });
-        // Sleeping phones: someone is calling; one answering rings no one.
-        if !on {
-            self.wake(&id, raw);
-        }
-        tokio::spawn(self.clone().ring(run));
         Ok(())
     }
 
@@ -3809,9 +3812,101 @@ impl Node {
 
     /// Whether our link to `d` is direct (peer to peer), not relayed.
     async fn direct(&self, d: EndpointId) -> bool {
+        self.path(d).await == "direct"
+    }
+
+    /// How we reach `d` now: "direct", the relay's address, or "none".
+    async fn path(&self, d: EndpointId) -> String {
         use iroh::endpoint::TransportAddrUsage::Active;
-        let Some(i) = self.ep.remote_info(d).await else { return false };
-        i.addrs().any(|a| matches!(a.usage(), Active) && a.addr().is_ip())
+        let Some(i) = self.ep.remote_info(d).await else {
+            return "none".into();
+        };
+        let on: Vec<_> =
+            i.addrs().filter(|a| matches!(a.usage(), Active)).collect();
+        match on.iter().find(|a| a.addr().is_ip()) {
+            Some(_) => "direct".into(),
+            None => on.first().map_or("none".into(), |a| match a.addr() {
+                iroh::TransportAddr::Relay(u) => u.to_string(),
+                _ => "none".into(),
+            }),
+        }
+    }
+
+    /// A link to `to` made and closed: how long it took (none: not in
+    /// 10 s), and how it went.
+    async fn probe(&self, to: EndpointAddr, alpn: &[u8]) -> serde_json::Value {
+        let (d, t) = (to.id, Instant::now());
+        let ten = Duration::from_secs(10);
+        let c = tokio::time::timeout(ten, self.ep.connect(to, alpn)).await;
+        let Ok(Ok(c)) = c else {
+            return serde_json::json!({ "ms": null, "path": "none" });
+        };
+        let ms = t.elapsed().as_millis() as u64;
+        let path = self.path(d).await;
+        c.close(0u32.into(), b"doctor");
+        serde_json::json!({ "ms": ms, "path": path })
+    }
+
+    /// What reaching `user` (else our own devices) takes now: our relay,
+    /// and a link timed to each of their devices and push servers. A push
+    /// server is reached, not asked: nothing rings.
+    pub async fn doctor(
+        self: &Arc<Self>,
+        user: Option<Id>,
+    ) -> serde_json::Value {
+        use iroh::Watcher as _;
+        // Started just now (irch --doctor): our relay first.
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.ep.online())
+            .await;
+        let who = user.unwrap_or_else(|| self.id());
+        let (mut devs, mut push) = (BTreeMap::new(), BTreeSet::new());
+        for id in self.spaces() {
+            self.view(&id, |s| {
+                for (d, t) in s.devices_of(&who) {
+                    let at = devs.entry(d).or_insert(t);
+                    *at = (*at).max(t);
+                }
+                for (d, url) in s.pushes_of(Some(&who)) {
+                    push.extend(
+                        url.split_whitespace().map(|r| (d, r.to_string())),
+                    );
+                }
+            });
+        }
+        devs.remove(&self.ep.id());
+        let devices = devs.into_iter().map(|(d, wrote)| async move {
+            let mut v = self.probe(d.into(), sync::ALPN).await;
+            v["device"] = d.fmt_short().to_string().into();
+            v["name"] = self.label(&d).into();
+            v["wrote"] = wrote.into();
+            v
+        });
+        type Ring = (EndpointAddr, [u8; 8], [u8; 16]);
+        let rings = push
+            .into_iter()
+            .filter_map(|(d, r)| Some((d, uncode::<Ring>("ring", &r).ok()?.0)));
+        let pushes = rings.map(|(d, to)| async move {
+            let server = to.id;
+            let mut v = self.probe(to, crate::wake::ALPN).await;
+            v["for"] = d.fmt_short().to_string().into();
+            v["server"] = server.fmt_short().to_string().into();
+            v["name"] = self.label(&server).into();
+            v
+        });
+        let relay = self.ep.home_relay_status().get();
+        let relay = relay.iter().map(
+            |s| serde_json::json!({ "url": s.url(), "up": s.is_connected() }),
+        );
+        let order = order(&self.dir).into_iter();
+        let order: Vec<_> = order
+            .map(|l| l.split('#').next().unwrap_or_default().to_string())
+            .collect();
+        serde_json::json!({
+            "relay": relay.collect::<Vec<_>>(),
+            "order": order,
+            "devices": n0_future::join_all(devices).await,
+            "push": n0_future::join_all(pushes).await,
+        })
     }
 
     /// Our key for a relay (`url#key`, from whoever runs it), or none

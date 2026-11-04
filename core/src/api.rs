@@ -96,6 +96,9 @@ pub enum Call {
         on: bool,
     },
     StoreLocal,
+    Doctor {
+        user: Option<Id>,
+    },
     ForgetStorage {
         node: iroh::EndpointId,
     },
@@ -283,6 +286,7 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
         Call::LinkCode => json!(n.link_code().await),
         Call::Contact => json!(n.contact().await?),
         Call::AddStorage { code } => json!(n.add_storage(&code).await?),
+        Call::Doctor { user } => n.doctor(user).await,
         Call::ForgetStorage { node } => json!(n.forget_storage(&node).await?),
         Call::Store { space, node, on } => {
             json!(n.store(&space, &node, on).await?)

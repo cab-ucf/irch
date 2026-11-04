@@ -1209,3 +1209,80 @@ async fn a_reply_to_you_is_a_mention_while_asleep() {
     let n = rung(post("me!", Some(mine))).await.expect("to b: told");
     assert_eq!(n.body, "me!");
 }
+
+/// Which way a call's ring reaches the callee, and how fast: the call
+/// said in the space (gossip), a push through its storage node (irpush),
+/// and what dialing its device takes (the doctor). On loopback the times
+/// are each path's own cost; `--nocapture` prints them.
+#[tokio::test(flavor = "multi_thread")]
+async fn ring_paths() {
+    use iroh_relay::server::{RelayConfig, Server, ServerConfig};
+    use std::time::Instant;
+    let mut cfg = ServerConfig::default();
+    cfg.relay = Some(RelayConfig::new(([127, 0, 0, 1], 0)));
+    let relay = Server::spawn(cfg).await.unwrap();
+    let at = format!("http://{}", relay.http_addr().unwrap());
+    let creds = dir("creds");
+    std::fs::create_dir_all(&creds).unwrap();
+    std::fs::write(creds.join("push-relay"), format!("{at}\n")).unwrap();
+    // SAFETY: storage nodes read it as they start; no test wants another.
+    unsafe { std::env::set_var("CREDENTIALS_DIRECTORY", &creds) };
+    let s = start(&dir("s"), "s", None, true).await;
+    let db = dir("b");
+    let (a, b) = (node("a").await, start(&db, "b", None, false).await);
+    let id = a.create("duo").await.unwrap();
+    let ch = general(&a, &id);
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    pair(&b, &s, &[]).await;
+    let url = b.irpush().await.expect("paired with its storage node");
+    b.set_push(Some(url)).await;
+    let ring = |p: &(iroh::EndpointId, String)| p.1.starts_with("irch:ring:");
+    let told = || a.view(&id, |s| s.pushes_of(None).iter().any(ring));
+    until("a knows b's push server", || told() == Some(true)).await;
+    let on = |x: &Node, u: &Node| x.online(&id).contains(&u.id());
+    until("each sees the other", || on(&a, &b) && on(&b, &a)).await;
+    let phone = irch_core::push::device(&db, None).unwrap().unwrap();
+
+    let doc = a.doctor(Some(b.id())).await;
+    let dial = doc["devices"][0]["ms"].as_u64().expect("b's device reached");
+    let server = doc["push"][0]["ms"].as_u64().expect("its push server");
+    // Awake: both ways at once; which lands first?
+    let mut heard = b.subscribe();
+    let t = Instant::now();
+    a.call(Some((id, ch))).await.unwrap();
+    let said = t.elapsed();
+    let pushed = tokio::spawn(async move {
+        let p = phone.next().await;
+        (t.elapsed(), p, phone)
+    });
+    while b.calls(&id).is_empty() {
+        let e = tokio::time::timeout(Duration::from_secs(10), heard.recv());
+        let _: Event = e.await.expect("b hears the call").unwrap();
+    }
+    let gossip = t.elapsed();
+    let (push, news, phone) = pushed.await.unwrap();
+    assert!(news.is_some(), "pushed too");
+    a.call(None).await.unwrap();
+    until("b hears it end", || b.calls(&id).is_empty()).await;
+    while tokio::time::timeout(Duration::from_millis(500), phone.next())
+        .await
+        .is_ok()
+    {} // the hang-up's push
+
+    // Asleep: the push alone.
+    b.shutdown().await;
+    drop(b);
+    let t = Instant::now();
+    a.call(Some((id, ch))).await.unwrap();
+    let news = tokio::time::timeout(Duration::from_secs(10), phone.next());
+    let news = news.await.expect("pushed within seconds").unwrap();
+    let asleep = t.elapsed();
+    let n = Node::woken(&db, &news).0.expect("shown from the phonebook");
+    assert!(n.ring, "it rings");
+    println!(
+        "ring paths (loopback): awake: said {said:?}, gossip {gossip:?}, \
+         push {push:?}; \
+         asleep: push {asleep:?}; a dial to b's device {dial} ms, \
+         to its push server {server} ms"
+    );
+}

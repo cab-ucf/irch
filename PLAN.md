@@ -66,18 +66,28 @@ opened; the node starts only to answer.
 
 ## Waking and ringing
 
-Two ways, by whether the callee's process runs:
-1. **Dial** its device by endpoint id: the relay carries the first packets
-   at once, then QUIC moves to a direct path.
-2. **Push** through its irpush host when it sleeps (phone in background,
-   iPhone): the ring carries the sealed call op and the caller's address;
-   the phone shows the call from its phonebook and dials straight back.
+Measured (`ring_paths` in core/tests/net.rs, loopback, so each path's own
+cost; four runs):
 
-Which one is needed is measured, not guessed: a test matrix (callee
-foreground, background, killed; desktop; relays mixed) records which path
-arrives first and how fast. Expectation: dial wins whenever the process
-runs, push is needed only when it does not, and gossip is never needed for
-a ring. Whatever never wins is deleted.
+| callee | first to arrive | the other |
+|---|---|---|
+| awake | the call said in the space (gossip, a link already open), ~12 ms | push, ~50 ms |
+| asleep | push through its storage node, ~32 ms | none |
+
+A new link costs ~7 ms to a device and ~16 ms to a push server, so a
+third way, dialing the callee to ring it, never beats a link already
+open, and fails just when that link could not form. Two ways stay, both
+sent at once (the caller cannot know which the callee is in): the call
+said in the space, and a push. A dial is not added.
+
+On a real network each costs round trips: the open link ~half of one; a
+push ~2 (a new link to the push server, then the push server's already
+open socket to the phone): ~100–300 ms at common latencies. The doctor
+(`irch --doctor WHO`, or in a call that is not getting through) times
+these on the real network, device by device.
+
+Found on the way: `call()` opened the sound devices before ringing; it
+rings first now.
 
 ## Delivery: users and their devices
 

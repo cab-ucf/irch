@@ -957,10 +957,19 @@ const chime = () => tone([[880, 0, 0.12], [1320, 0.13, 0.25]], 0.15);
 const ringing = () => tone([[440, 0, 2], [480, 0, 2]], 0.07);
 const ringback = () => tone([[440, 0, 2], [480, 0, 2]], 0.04);
 
+/** The doctor's answer in a line: each device and push server, timed. */
+const reach = (d) => [
+  ...d.devices.map((x) => `${x.name ?? x.device}: ` + (x.ms == null
+    ? "unreachable" : `${x.ms} ms, ${x.path === "direct" ? "direct" : "relayed"}`)),
+  ...d.push.map((x) => `push via ${x.name ?? x.server}: ` +
+    (x.ms == null ? "unreachable" : `${x.ms} ms`)),
+].join(" · ") || "no device or push server of theirs known";
+
 /** A DM call of ours, alone in it: is it reaching them, ringing there,
- * or not getting through? Ringback only once it rings; a minute, then
- * no answer. */
+ * or not getting through (and why, from the doctor)? Ringback only once
+ * it rings; a minute, then no answer. */
 let back = 0;
+let probed = {};
 function dial() {
   const on = av.call.on;
   const s = on && S.spaces.find((x) => x.id === on.space);
@@ -981,7 +990,14 @@ function dial() {
     toast(`No answer from ${s.name}`);
     return av.leave(rpc);
   }
-  S.dial = rings ? "Ringing…" : t > 20e3
+  if (!rings && t > 5e3 && probed.since !== av.call.since) {
+    probed = { since: av.call.since };
+    const p = probed;
+    rpc("doctor", { user: s.with }).then((d) => { p.why = reach(d); dial(); },
+      () => {});
+  }
+  S.dial = rings ? "Ringing…" : probed.why && probed.since === av.call.since
+    ? `Not getting through: ${probed.why}` : t > 20e3
     ? `Not getting through: ${s.name}'s devices can't be reached now`
     : "Calling…";
   back = rings ? back + 1 : 0;
@@ -2490,6 +2506,13 @@ async function usageFlow() {
           "has an irpush relay (irch --install --push-relay).")),
       h("button", { class: "choice", onclick: relayKey }, icon("pencil"),
         "Relay key: no speed limit through a relay"),
+      h("button", { class: "choice", onclick: (e) => {
+        e.target.textContent = "Checking…";
+        rpc("doctor", { user: null }).then((d) => {
+          e.target.textContent = `Relay ${d.relay.map((r) => r.url +
+            (r.up ? "" : " (down)")).join(", ") || "none"}. ` + reach(d);
+        }, (err) => { e.target.textContent = String(err); });
+      } }, icon("eye"), "Check connections to your devices"),
       phone && h("p", { class: "sub" }, `Since the phone started, irch ` +
         `sent ${phone.tx_packets} packets (${amount(phone.tx_bytes)}) and ` +
         `received ${phone.rx_packets} (${amount(phone.rx_bytes)}), ` +

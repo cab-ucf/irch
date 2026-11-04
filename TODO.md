@@ -9,16 +9,18 @@ See [PLAN.md](PLAN.md). irpush's own list: irpush's TODO.md.
 - [x] Relay keys (`url#key`, from whoever runs the relay): no speed limit
       through it; a big download not direct says so
 - [ ] Probe only on a network change, not every 20–26 s
-- [ ] `irch --doctor [user]`: each device's home relay, reachable or not,
-      direct or relayed, push routes, ring time
+- [x] Doctor (`irch --doctor [who]`, Network use, a call not getting
+      through): our relay, each device and push server timed, direct or
+      relayed; nothing rung
 - [ ] Measure the direct-path rate (address discovery is back on)
 - [ ] Close idle QUIC connections after ~30 s; Network use warns when an
       idle device holds one
 
 ## 2. Rings under a second
-- [ ] Test matrix: which of dial, push, gossip arrives first, and how fast
-      (callee foreground, background, killed; desktop; mixed relays)
-- [ ] Keep what wins, delete what never does
+- [x] Measured (`ring_paths`): awake, the call said in the space wins
+      (~12 ms vs push ~50 ms); asleep, push alone (~32 ms). No dial path
+- [x] Ring before opening the sound devices
+- [ ] On real networks: the doctor's numbers from real devices
 - [ ] The ring carries the caller's address; a woken phone dials back
 - [ ] DM calls: no "lower id dials"; the callee dials the caller
 
