@@ -47,6 +47,6 @@ See [PLAN.md](PLAN.md). irpush's own list: irpush's TODO.md.
 
 ## 7. UI
 - [x] Storage Nodes: the switch toggles (not Rename)
-- [ ] Storage Nodes: Remove, optionally shut down our own
+- [x] Storage Nodes: Remove, optionally shut down our own
 - [x] Settings icon: a cog
-- [ ] Name the device at first start; storage nodes `hostname-storage`
+- [x] Name the device at first start; storage nodes `hostname-storage`

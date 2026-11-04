@@ -18,7 +18,9 @@ pub mod usage;
 pub mod voice;
 pub mod wake;
 
-pub use node::{Config, Event, Level, Net, Node, Notice, host_name, http};
+pub use node::{
+    Config, Event, Level, Net, Node, Notice, host_name, http, storage_name,
+};
 pub use op::{File, Invite, Op, Role};
 pub use state::{Member, Message, State, Thread};
 

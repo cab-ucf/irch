@@ -112,8 +112,10 @@ there then; the node itself is an always-on device of yours (`--link`).
 - A camera button takes a photo and sends it: never in the gallery, no
   location in it. Link previews are made by the sender's device as it
   sends (the site sees only the sender; off in My Account).
-- Devices and storage nodes have names (a computer's hostname, at first;
-  renamed in My Account or Storage Nodes); My Account shows the version.
+- Devices and storage nodes have names: asked at first start (the
+  computer's hostname; a storage node's, `hostname-storage`), renamed in
+  My Account or Storage Nodes, where a storage node can also be removed
+  (and stopped, if it runs here). My Account shows the version.
 - On phones, a call of two fills the screen, upright, like FaceTime.
 - *Add to notes*: a message or thread lands in a
   [loroh](https://github.com/cab-ucf/siroh) note as a task, event or quote,

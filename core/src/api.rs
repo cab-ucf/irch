@@ -96,6 +96,9 @@ pub enum Call {
         on: bool,
     },
     StoreLocal,
+    ForgetStorage {
+        node: iroh::EndpointId,
+    },
     /// Served from this device, left where it is.
     Seal {
         space: Id,
@@ -189,6 +192,8 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
                 "push": n.pushed(),
                 "version": env!("CARGO_PKG_VERSION"),
                 "device": n.device().fmt_short().to_string(),
+                "endpoint": n.device(),
+                "device_name": n.label(&n.device()),
                 "local_storage": crate::local_storage()
                     .and_then(|c| uncode::<(EndpointAddr, [u8; 16])>("host", &c).ok())
                     .map(|(a, _)| a.id),
@@ -278,6 +283,7 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
         Call::LinkCode => json!(n.link_code().await),
         Call::Contact => json!(n.contact().await?),
         Call::AddStorage { code } => json!(n.add_storage(&code).await?),
+        Call::ForgetStorage { node } => json!(n.forget_storage(&node).await?),
         Call::Store { space, node, on } => {
             json!(n.store(&space, &node, on).await?)
         }

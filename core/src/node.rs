@@ -2637,7 +2637,7 @@ impl Node {
     pub async fn storage_code(&self) -> Option<String> {
         let token = self.serve?;
         // Its name rides along: older irch reads the first two only.
-        Some(code("host", &(self.addr().await, token, host_name())))
+        Some(code("host", &(self.addr().await, token, storage_name())))
     }
 
     pub async fn add_storage(self: &Arc<Self>, code: &str) -> Result<()> {
@@ -2724,6 +2724,22 @@ impl Node {
             }
             false => {}
         }
+        Ok(())
+    }
+
+    /// Off our list, on every device of ours. The node runs on: it is
+    /// stopped where it runs (`irch --uninstall`).
+    pub async fn forget_storage(
+        self: &Arc<Self>,
+        node: &EndpointId,
+    ) -> Result<()> {
+        let all = self.view(&self.own, |s| s.storage()).unwrap_or_default();
+        let (addr, token) = all
+            .into_iter()
+            .find(|s| s.0.id == *node)
+            .context("not one of your storage nodes")?;
+        let own = self.get(&self.own)?;
+        self.post(&own, Op::Storage { addr, token, on: false }).await?;
         Ok(())
     }
 
@@ -4105,6 +4121,11 @@ async fn heartbeat(n: Weak<Node>) {
             let _ = store::save(&n.dir.join("budget"), &*b);
         }
     }
+}
+
+/// A storage node's name at first: its computer's, marked as one.
+pub fn storage_name() -> String {
+    format!("{}-storage", host_name())
 }
 
 /// This computer's name, or what kind of device it is.

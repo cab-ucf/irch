@@ -1952,6 +1952,10 @@ function storageFlow(s) {
         finish(null);
         rename(x.node, x.name, () => storageFlow(s));
       } }, icon("pencil")),
+      h("button", { class: "gear", title: "Remove", onclick: () => {
+        finish(null);
+        forget(x, x.node === local).then(() => storageFlow(s));
+      } }, icon("trash")),
       h("label", { class: "switch" },
         h("span", {}, x.name ?? (x.node === local ? "This computer" : x.short),
           h("small", {}, `device ${x.short}` +
@@ -2182,6 +2186,20 @@ async function named() {
   S.me = await rpc("me");
   renderUserPanel();
   return true;
+}
+
+/** Once per device: what to call it (its hostname at first), so a
+ * user's devices and storage nodes are told apart. */
+async function nameDevice() {
+  if (store.get("named")) return;
+  const name = await ask({ title: "What is this device called?",
+    sub: "Your other devices list it by this name. You can change it in " +
+      "My Account › Your devices.", label: "Device name",
+    value: S.me.device_name ?? "", ok: "Save" });
+  store.set("named", "1");
+  if (name && name !== S.me.device_name) {
+    await quiet(call("name_device", { device: S.me.endpoint, name }));
+  }
 }
 
 async function createFlow() {
@@ -2512,6 +2530,21 @@ async function relayKey() {
       "sees it. Used from irch's next start; the relay alone, to remove.",
     placeholder: "https://irpush.example#key", maxLength: 300 });
   if (line) await quiet(call("relay_key", { line }));
+}
+
+/** A storage node off our list (every device of ours); ours, here, it
+ * can be stopped too. One elsewhere runs on until stopped there. */
+async function forget(x, here) {
+  const ok = await confirmBox({ title: `Remove ${x.name ?? x.short}?`,
+    sub: "It leaves this list on all your devices and keeps nothing more " +
+      "for you. " + (here ? "It runs on this computer: you can stop it next."
+        : "It keeps running where it is: stop it there (irch --uninstall)."),
+    ok: "Remove" });
+  if (!ok) return;
+  await quiet(call("forget_storage", { node: x.node }));
+  if (here && await confirmBox({ title: "Stop it on this computer too?",
+    sub: "It stops now and does not start again with the computer.",
+    ok: "Stop" })) await quiet(invoke("stop_here"));
 }
 
 /** Name a device or storage node of ours, on every device of ours. */
@@ -3480,6 +3513,7 @@ async function start() {
   });
   await loadSidebar();
   health();
+  nameDevice();
   if (!S.spaces.length) renderHeader();
   const url = await invoke("opened").catch(() => null);
   if (url) openUrl(url);
