@@ -187,12 +187,15 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   so it connects as it is answered.
   Open links are pinged every 5 s (iroh's fixed rate), so irch holds them
   only while in sight or in a call; asleep, a device holds irpush's socket
-  alone. iroh does no address, https latency, captive-portal or DHT
-  probing.
+  alone. While running, iroh times its relays over https and asks stock
+  ones our public address every 20–26 s: without that it has no home
+  relay, and no one reaches it but over a LAN. No captive-portal or DHT
+  probing. A device homes only where anyone can reach it: never behind a
+  relay's token.
 
 | network | terminal (app env) | who else is involved |
 |---|---|---|
-| default | | relays iroh.cxn.center (paired: irpush's, e.g. irpush.cxn.center) and n0; n0 DNS |
+| default | | relays iroh.cxn.center (or a storage node's open relays) and n0; n0 DNS |
 | own relays | `--relay URL` (`IRCH_RELAY`) | your relays |
 | LAN only | `--lan` (`IRCH_LAN=1`) | nobody (mDNS) |
 
