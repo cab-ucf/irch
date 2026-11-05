@@ -593,6 +593,8 @@ pub struct Node {
     served: crate::push::Served,
     /// Asked a storage node for its relay this run.
     relayed: AtomicBool,
+    // Our device joined to each of our push servers, this run.
+    widened: AtomicBool,
     // Which of `order`'s relays we hold (`roam`).
     roamed: AtomicUsize,
     me: Me,
@@ -995,6 +997,7 @@ impl Node {
             served: Default::default(),
             relayed: AtomicBool::new(false),
             roamed: AtomicUsize::new(0),
+            widened: AtomicBool::new(false),
             own: own_inv.id(),
             me,
             dir: cfg.dir,
@@ -1474,12 +1477,39 @@ impl Node {
             let t = tag(&lock(&sp.book).key(inv).0);
             rings.extend(crate::wake::push_token(&self.dir, &sp.id, &t));
         }
-        let tries = self.keepers().into_iter().map(|a| {
-            let go = crate::push::register(&self.ep, a.clone(), &push, &rings);
-            async move { go.await.map(|_| a) }
-        });
-        let took = n0_future::join_all(tries).await.into_iter().flatten();
-        *lock(&self.via) = (took.collect(), rings);
+        let mut took = vec![];
+        // Twice at most: our storage nodes that did not take us are joined
+        // (once a run), so each is a push server of ours; not others':
+        // theirs could then wake every irpush app on this phone.
+        for _ in 0..2 {
+            let tries = self.keepers().into_iter().map(|a| {
+                let go =
+                    crate::push::register(&self.ep, a.clone(), &push, &rings);
+                async move { go.await.map(|_| a) }
+            });
+            took = n0_future::join_all(tries)
+                .await
+                .into_iter()
+                .flatten()
+                .collect();
+            let ours = self.stores(&self.own).into_iter().map(|s| s.0);
+            let more: Vec<_> = ours
+                .filter(|a| !took.iter().any(|t: &EndpointAddr| t.id == a.id))
+                .collect();
+            if more.is_empty() || self.widened.swap(true, Relaxed) {
+                break;
+            }
+            let mut grew = false;
+            for a in more {
+                if let Ok(t) = crate::push::ticket(&self.ep, a).await {
+                    grew |= crate::push::also(&self.dir, &t).await;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        *lock(&self.via) = (took, rings);
     }
 
     /// Our push, as this space's members should have it: a doorbell's
@@ -3776,11 +3806,16 @@ impl Node {
             // New here, or back from sleep: answered once with our call
             // (none, mostly), which says we are here without asking back.
             Op::Here => {
-                let ch = self.in_call().filter(|c| c.0 == sp.id).map(|c| c.1);
-                if (changed && !self.invisible()) || ch.is_some() {
+                let id = sp.id;
+                let ch = move |n: &Node| n.in_call().filter(|c| c.0 == id);
+                if (changed && !self.invisible()) || ch(self).is_some() {
                     let (n, sp) = (self.clone(), sp.clone());
-                    let call = Op::Call { channel: ch };
-                    tokio::spawn(async move { n.signal(&sp, call).await });
+                    // Our call as it is when said: a call begun meanwhile
+                    // is never undone by a "none" stamped after it.
+                    tokio::spawn(async move {
+                        let call = Op::Call { channel: ch(&n).map(|c| c.1) };
+                        n.signal(&sp, call).await
+                    });
                 }
             }
             // Their device has our DM's news up to `ts`: proof of it.

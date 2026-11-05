@@ -177,7 +177,9 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   own doorbell. iPhones catch up when opened, and a call keeps irch up.
 - **Push servers** are storage nodes, any of them, through irpush. Phones
   ask the storage nodes they know (theirs, their spaces') for a ticket,
-  join the phone's one irpush device into that mesh once, and give it their device and a ring token per space and
+  join the phone's one irpush device into that mesh once (each of its
+  owner's storage nodes: rung all at once, a ring gets through while any
+  is up), and give it their device and a ring token per space and
   epoch. Members ring with those as with a doorbell, every route of a
   phone at once; irpush carries the ring sealed end to end, one size, so
   its relay learns when and nothing else, and the phone shows it as it
