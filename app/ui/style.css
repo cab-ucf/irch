@@ -295,6 +295,8 @@ svg.icon {
 .channel .gear svg.icon { width: 16px; height: 16px; }
 .channel.thread { height: 30px; margin-left: 14px; font-size: 14px; }
 .channel.thread svg.icon { width: 16px; height: 16px; color: var(--muted); }
+.older { margin-left: 30px; padding: 4px 8px; font-size: 12px; color: var(--muted); opacity: .7; cursor: pointer; }
+.older:hover { opacity: 1; }
 
 /* User panel */
 #user-panel {

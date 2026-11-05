@@ -657,8 +657,10 @@ function dmList(list) {
     } }, icon("x"))));
 }
 
-// A channel's threads, folded unless opened (remembered per channel).
+// A channel's threads, folded unless opened (remembered per channel); the
+// week's, then, greyed, the older ones, unfolded apart.
 const threadsOpen = (ch) => store.get("threads." + ch.id) === "1";
+const oldOpen = (ch) => store.get("old." + ch.id) === "1";
 
 function channelList(s) {
   return [
@@ -711,9 +713,21 @@ function channelList(s) {
     }).flatMap((row, i) => {
       const ch = s.channels[i];
       // Folded, only the thread being read stays in view.
-      const shown = threadsOpen(ch) ? ch.threads
-        : ch.threads.filter((t) => t.id === S.ch);
-      return [row, callers(ch.call), ...shown.map((t) => threadRow(s, t))];
+      const open = threadsOpen(ch);
+      const old = ch.threads.filter((t) => t.old);
+      const shown = !open ? ch.threads.filter((t) => t.id === S.ch)
+        : ch.threads.filter((t) => !t.old || oldOpen(ch) || t.id === S.ch);
+      const more = open && old.length > 0 && h("div", {
+        class: "older", role: "button", tabindex: 0,
+        onclick: () => {
+          store.set("old." + ch.id, oldOpen(ch) ? "0" : "1");
+          renderSidebar();
+        },
+      }, oldOpen(ch) ? "Hide older threads"
+        : `${old.length} older thread${old.length > 1 ? "s" : ""} ` +
+          "(quiet over a week)");
+      return [row, callers(ch.call), ...shown.map((t) => threadRow(s, t)),
+        more];
     }),
   ];
 }
@@ -2599,6 +2613,14 @@ async function devicesFlow() {
         h("span", {}, h("b", {}, d.name ?? "Unnamed"),
           h("small", {}, ` · ${d.device} · ` +
             (d.this ? "this device" : `wrote ${ago(d.seen)}`))),
+        !d.this && h("button", { class: "btn grey", onclick: async () => {
+          const text = await ask({ title: `Send to ${d.name ?? d.device}`,
+            sub: "Straight to that device alone, nothing kept anywhere else. " +
+              "It must be awake.", label: "Text or link", ok: "Send",
+            maxLength: 4000 });
+          if (text) quiet(call("hand", { device: d.id, text })
+            .then(() => toast("Sent")));
+        } }, "Send"),
         h("button", { class: "btn grey", onclick: () => rename(d.id, d.name,
           () => devicesFlow()) }, "Rename")))),
     foot(h("button", { class: "btn grey", onclick: () => finish(null) },
@@ -3594,6 +3616,10 @@ async function start() {
       members();
     } else if (e.t === "call") {
       schedule("side");
+    } else if (e.t === "handed") {
+      showCode({ title: `From ${e.name ?? short(e.from)}`, label: "Sent to " +
+        "this device alone", code: e.text, note: "Nothing of it is kept " +
+        "anywhere else." });
     } else if (e.t === "declined") {
       if (isMe(e.user)) {
         if (calling) $("ring").close(); // declined on another of ours

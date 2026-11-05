@@ -1399,3 +1399,29 @@ async fn a_declined_call_tells_the_caller() {
     let mine = tokio::time::timeout(Duration::from_secs(20), mine).await;
     assert_eq!(mine.expect("b2 hears it").2, b.id());
 }
+
+/// Text handed to one of our own devices goes straight to it, from it
+/// only; nobody else can hand ours anything.
+#[tokio::test(flavor = "multi_thread")]
+async fn text_is_handed_to_one_of_our_devices() {
+    let a = node("a").await;
+    let a2 = start(&dir("a2"), "phone", Some(a.link_code().await), false).await;
+    let b = node("b").await;
+    let both = || {
+        a.devices().iter().any(|d| d.0 == a2.device())
+            && a2.devices().iter().any(|d| d.0 == a.device())
+    };
+    until("each knows the other device", both).await;
+    let mut rx = a2.subscribe();
+    a.hand(a2.device(), "https://example.org/x").await.unwrap();
+    let got = async {
+        loop {
+            if let Ok(Event::Handed { from, text, .. }) = rx.recv().await {
+                return (from, text);
+            }
+        }
+    };
+    let got = tokio::time::timeout(Duration::from_secs(10), got).await;
+    assert_eq!(got.unwrap(), (a.device(), "https://example.org/x".into()));
+    assert!(b.hand(a2.device(), "hi").await.is_err(), "not b's device");
+}

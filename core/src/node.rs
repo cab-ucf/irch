@@ -74,6 +74,8 @@ fn limit() -> u64 {
 /// What opens in memory, to preview; larger files are saved.
 const PREVIEW: usize = 25 << 20;
 const BLOB: &[u8] = b"irch/blob/1";
+/// Text handed to one of our own devices: one link, nothing kept elsewhere.
+const HAND: &[u8] = b"irch/hand/1";
 const PARKED: usize = 32 << 20;
 /// Refused ops a space remembers, so sync brings none again.
 const REJECTED: usize = 4096;
@@ -126,6 +128,12 @@ pub enum Event {
     },
     Call {
         space: Id,
+    },
+    /// Text one of our devices handed this one.
+    Handed {
+        from: EndpointId,
+        name: Option<String>,
+        text: String,
     },
     /// `user` declined the call in `channel` (ours: on another device).
     Declined {
@@ -868,6 +876,7 @@ impl ProtocolHandler for Proto {
                 n.answer(c).await;
                 Ok(())
             }
+            HAND => n.handed(&c).await,
             _ => n.give(&c).await,
         };
         r.map_err(|e| {
@@ -1070,6 +1079,7 @@ impl Node {
             .accept(iroh_gossip::ALPN, n.gossip.clone())
             .accept(sync::ALPN, Proto(Arc::downgrade(&n)))
             .accept(BLOB, Proto(Arc::downgrade(&n)))
+            .accept(HAND, Proto(Arc::downgrade(&n)))
             .accept(call::ALPN, Proto(Arc::downgrade(&n)));
         // A storage node rings phones through irpush.
         if serve.is_some()
@@ -2722,6 +2732,43 @@ impl Node {
         {
             c.add(user, conn, self.media.clone());
         }
+    }
+
+    /// Hand `text` to one of our own devices: one link straight to it (no
+    /// space, no sync, no other device), so fewer packets; it must be up.
+    pub async fn hand(&self, device: EndpointId, text: &str) -> Result<()> {
+        ensure!(self.devices().iter().any(|d| d.0 == device), "not ours");
+        ensure!(text.len() <= MAX_TEXT, "too long");
+        let go = async {
+            let c = self.ep.connect(device, HAND).await?;
+            let (mut tx, mut rx) = c.open_bi().await?;
+            tx.write_all(text.as_bytes()).await?;
+            tx.finish()?;
+            let ok = rx.read_to_end(1).await? == [1];
+            c.close(0u32.into(), b"");
+            ensure!(ok, "it did not take it");
+            anyhow::Ok(())
+        };
+        let ten = Duration::from_secs(10);
+        tokio::time::timeout(ten, go).await.map_err(|_| {
+            anyhow!("that device is not reachable now (asleep?)")
+        })?
+    }
+
+    /// From one of our own devices only (QUIC proves which device).
+    async fn handed(&self, c: &Connection) -> Result<()> {
+        let from = c.remote_id();
+        let (mut tx, mut rx) = c.accept_bi().await?;
+        let ours = self.devices().iter().any(|d| d.0 == from);
+        let text = sync::rest(&mut rx, MAX_TEXT).await?;
+        tx.write_all(&[ours as u8]).await?;
+        tx.finish()?;
+        if ours {
+            let (name, text) = (self.label(&from), String::from_utf8(text)?);
+            self.emit(Event::Handed { from, name, text });
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(5), c.closed()).await;
+        Ok(())
     }
 
     /// A short code (one minute, one try) for an invite to `space`, or,

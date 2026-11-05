@@ -109,6 +109,10 @@ pub enum Call {
     Doctor {
         user: Option<Id>,
     },
+    Hand {
+        device: iroh::EndpointId,
+        text: String,
+    },
     ForgetStorage {
         node: iroh::EndpointId,
     },
@@ -308,6 +312,7 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
         Call::Contact => json!(n.contact().await?),
         Call::AddStorage { code } => json!(n.add_storage(&code).await?),
         Call::Doctor { user } => n.doctor(user).await,
+        Call::Hand { device, text } => json!(n.hand(device, &text).await?),
         Call::ForgetStorage { node } => json!(n.forget_storage(&node).await?),
         Call::Store { space, node, on } => {
             json!(n.store(&space, &node, on).await?)
@@ -429,22 +434,21 @@ fn space(n: &Node, id: &Id) -> Option<Value> {
     })?;
     let (name, dm, owner, admin, chans, with, threads, count) = v;
     let mut calls = n.calls(id);
+    // Every thread, newest first; `old`: quiet a week, none of it for us.
     let thread = |t: &crate::Thread| {
         let (unread, mentions) = n.unread(id, &t.id);
-        let fresh = t.last + 7 * 86_400_000 > crate::now();
-        (fresh || mentions > 0).then(|| {
-            json!({
-                "id": t.id, "name": t.name, "root": t.root, "count": t.count,
-                "by": t.by, "alone": t.alone,
-                "unread": unread, "mentions": mentions,
-            })
+        let old = t.last + 7 * 86_400_000 < crate::now() && mentions == 0;
+        json!({
+            "id": t.id, "name": t.name, "root": t.root, "count": t.count,
+            "by": t.by, "alone": t.alone, "old": old,
+            "unread": unread, "mentions": mentions,
         })
     };
     let chan = |(c, name): (Ch, String)| {
         let (unread, mentions) = n.unread(id, &c);
         let call = calls.remove(&c).unwrap_or_default();
         let t = threads.iter().filter(|t| t.parent == c);
-        let threads: Vec<_> = t.filter_map(thread).collect();
+        let threads: Vec<_> = t.take(200).map(thread).collect();
         json!({
             "id": c, "name": name, "unread": unread, "mentions": mentions,
             "call": call, "threads": threads,
