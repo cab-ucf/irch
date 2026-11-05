@@ -434,12 +434,13 @@ fn space(n: &Node, id: &Id) -> Option<Value> {
     })?;
     let (name, dm, owner, admin, chans, with, threads, count) = v;
     let mut calls = n.calls(id);
-    // Every thread, newest first (folded under its channel unless opened).
+    // Every thread, newest first; `old`: quiet a week, none of it for us.
     let thread = |t: &crate::Thread| {
         let (unread, mentions) = n.unread(id, &t.id);
+        let old = t.last + 7 * 86_400_000 < crate::now() && mentions == 0;
         json!({
             "id": t.id, "name": t.name, "root": t.root, "count": t.count,
-            "by": t.by, "alone": t.alone,
+            "by": t.by, "alone": t.alone, "old": old,
             "unread": unread, "mentions": mentions,
         })
     };
@@ -447,7 +448,7 @@ fn space(n: &Node, id: &Id) -> Option<Value> {
         let (unread, mentions) = n.unread(id, &c);
         let call = calls.remove(&c).unwrap_or_default();
         let t = threads.iter().filter(|t| t.parent == c);
-        let threads: Vec<_> = t.take(50).map(thread).collect();
+        let threads: Vec<_> = t.take(200).map(thread).collect();
         json!({
             "id": c, "name": name, "unread": unread, "mentions": mentions,
             "call": call, "threads": threads,
