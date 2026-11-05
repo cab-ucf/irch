@@ -27,6 +27,9 @@ object Wake {
 
   @JvmStatic external fun moved()
 
+  /** A call declined from its notification: its caller hears so. */
+  @JvmStatic external fun decline(space: String, room: String)
+
   /** Waits for the doorbell: `{show: notices, catch: whether to catch up}`. */
   @JvmStatic external fun rung(ctx: Context, dir: String): String
 

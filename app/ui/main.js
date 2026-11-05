@@ -1034,7 +1034,7 @@ function incoming(sid, ch, who) {
     h("div", { class: "m-body" }, h("h2", {}, who),
       h("p", { class: "sub" }, S.spaces.find((x) => x.id === sid)?.dm
         ? "is calling you" : `is calling #${callOf(sid, ch)?.name ?? "a channel"}`)),
-    foot(h("button", { class: "btn link", onclick: () => finish(false) },
+    foot(h("button", { class: "btn link", onclick: () => finish("no") },
       "Decline"),
     h("button", { class: "btn green", onclick: () => finish(true) },
       "Answer"))), $("ring"));
@@ -1044,7 +1044,9 @@ function incoming(sid, ch, who) {
     clearTimeout(late);
     calling = null;
     quiet(invoke("hush"));
-    if (yes) answer(sid, ch);
+    // Declined: its caller hears so, our other devices stop ringing.
+    if (yes === "no") quiet(rpc("decline", { space: sid, channel: ch }));
+    if (yes === true) answer(sid, ch);
     // Not answered: off the lock screen again.
     else if (!av.call.on) quiet(invoke("in_call", { on: false }));
   });
@@ -2506,6 +2508,7 @@ async function usageFlow() {
           "has an irpush relay (irch --install --push-relay).")),
       h("button", { class: "choice", onclick: relayKey }, icon("pencil"),
         "Relay key: no speed limit through a relay"),
+      relayKeys(),
       h("button", { class: "choice", onclick: (e) => {
         e.target.textContent = "Checking…";
         rpc("doctor", { user: null }).then((d) => {
@@ -2550,9 +2553,33 @@ async function devicesFlow() {
 async function relayKey() {
   const line = await ask({ title: "Relay key", label: "Relay and key",
     sub: "From whoever runs the relay (irpush: make key). Only that relay " +
-      "sees it. Used from irch's next start; the relay alone, to remove.",
+      "sees it, and says here whether it takes it. In use from irch's " +
+      "next start.",
     placeholder: "https://irpush.example#key", maxLength: 300 });
-  if (line) await quiet(call("relay_key", { line }));
+  if (!line) return;
+  const ok = await call("relay_key", { line }).catch(() => undefined);
+  if (ok !== undefined) toast(keyWord(line.split("#")[0], ok), ok === false,
+    8e3);
+}
+
+/** What a relay says of our key for it. */
+const keyWord = (url, ok) => ok === true
+  ? `${url} takes the key: no speed limit there, from irch's next start`
+  : ok === false ? `${url} does not know this key (kept; check it)`
+  : `${url} did not say (down, or not irpush's relay); kept`;
+
+/** Our relay keys, each as its relay answers now, with Remove. */
+function relayKeys() {
+  const box = h("div", {}, h("small", {}, "Checking relay keys…"));
+  rpc("relay_keys").then((ks) => put(box, ks.map(([url, ok]) =>
+    h("div", { class: "row shared" },
+      h("span", {}, (ok ? "✓ " : ok === false ? "✗ " : "? ") +
+        keyWord(url, ok).replace(", from irch's next start", "")),
+      h("button", { class: "btn grey", onclick: async (e) => {
+        await quiet(call("relay_key", { line: url }));
+        e.target.closest(".row").remove();
+      } }, "Remove")))), () => box.remove());
+  return box;
 }
 
 /** A storage node off our list (every device of ours); ours, here, it
@@ -3510,6 +3537,15 @@ async function start() {
       members();
     } else if (e.t === "call") {
       schedule("side");
+    } else if (e.t === "declined") {
+      if (isMe(e.user)) {
+        if (calling) $("ring").close(); // declined on another of ours
+      } else if (av.call.on?.space === e.space &&
+        av.call.on.channel === e.channel &&
+        S.spaces.find((x) => x.id === e.space)?.dm) {
+        toast(`${nameOf(e.user)} declined`);
+        av.leave(rpc);
+      }
     } else if (e.t === "relayed") {
       toast(`Not direct: ${amount(e.size)} comes through a relay, at its ` +
         "speed limit. A key from whoever runs it lifts that (Network use).",

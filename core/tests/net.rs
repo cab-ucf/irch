@@ -1338,3 +1338,50 @@ async fn a_ring_gets_through_while_any_push_server_is_up() {
     assert_eq!(n.body, "still here?");
     drop(s2);
 }
+
+/// Declined, a DM call says so: its caller hears who declined, and the
+/// callee's other devices (here, a linked one) hear it too.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_declined_call_tells_the_caller() {
+    use irch_core::state::DM;
+    let (a, b) = (node("a").await, node("b").await);
+    let b2 = start(&dir("b2"), "b", Some(b.link_code().await), false).await;
+    let id = a.create("hub").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let keyed = || a.view(&id, |s| s.kem(&b.id()).is_some()) == Some(true);
+    until("b's key", keyed).await;
+    let dm = a.dm(&id, &b.id()).await.unwrap();
+    say(&a, &dm, DM, "psst").await;
+    until("b in the DM", || b.spaces().contains(&dm) && b.peers(&dm) > 0).await;
+    until("b2 in the DM", || b2.spaces().contains(&dm)).await;
+    let (mut ha, mut hb2) = (a.subscribe(), b2.subscribe());
+    a.call(Some((dm, DM))).await.unwrap();
+    until("b sees the call", || !b.calls(&dm).is_empty()).await;
+    let declined = async |rx: &mut tokio::sync::broadcast::Receiver<Event>| {
+        loop {
+            let e = tokio::time::timeout(Duration::from_millis(250), rx.recv());
+            if let Ok(Ok(Event::Declined { space, channel, user })) = e.await {
+                return (space, channel, user);
+            }
+        }
+    };
+    // Said until the DM's gossip carries it, as calls are.
+    let heard = async {
+        loop {
+            b.decline(&dm, DM).await;
+            if let Ok(d) = tokio::time::timeout(
+                Duration::from_millis(500),
+                declined(&mut ha),
+            )
+            .await
+            {
+                return d;
+            }
+        }
+    };
+    let got = tokio::time::timeout(Duration::from_secs(20), heard).await;
+    assert_eq!(got.expect("a hears it"), (dm, DM, b.id()));
+    let mine =
+        tokio::time::timeout(Duration::from_secs(20), declined(&mut hb2));
+    assert_eq!(mine.await.expect("b2 hears it").2, b.id());
+}

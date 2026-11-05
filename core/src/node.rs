@@ -123,6 +123,12 @@ pub enum Event {
     Call {
         space: Id,
     },
+    /// `user` declined the call in `channel` (ours: on another device).
+    Declined {
+        space: Id,
+        channel: Ch,
+        user: Id,
+    },
     /// A big file comes through a relay, not direct: at its rate limit.
     Relayed {
         size: u64,
@@ -720,6 +726,18 @@ fn order(dir: &Path) -> Vec<String> {
             Some(k.map_or(url.to_string(), |k| format!("{url}#{k}")))
         })
         .collect()
+}
+
+/// Whether `relay` takes `key` as lifting its rate limit (irpush's relay,
+/// `/key`): `None` when it does not say (down, or not irpush's).
+async fn key_works(relay: &RelayUrl, key: &str) -> Option<bool> {
+    let u = relay.join("key").ok()?;
+    let r = http().get(u).bearer_auth(key).send().await.ok()?;
+    match r.status().as_u16() {
+        204 => Some(true),
+        403 => Some(false),
+        _ => None,
+    }
 }
 
 /// Where we may home, best first: a storage node's relays (irpush's, with
@@ -2462,8 +2480,13 @@ impl Node {
     async fn signal(&self, sp: &Space, op: Op) -> Option<Vec<u8>> {
         let inv = sp.inv.as_ref()?;
         let (key, locked) = lock(&sp.book).key(inv);
-        let quiet =
-            !matches!(op, Op::Call { .. } | Op::Gone | Op::Ringing { .. });
+        let quiet = !matches!(
+            op,
+            Op::Call { .. }
+                | Op::Gone
+                | Op::Ringing { .. }
+                | Op::Declined { .. }
+        );
         if locked || quiet && self.invisible() {
             return None;
         }
@@ -3615,6 +3638,14 @@ impl Node {
         r.get(&(*user, *ch)).is_some_and(|t| t.elapsed() < RANG)
     }
 
+    /// A call to us declined: said once, so its caller hangs up and our
+    /// other devices stop ringing.
+    pub async fn decline(&self, id: &Id, channel: Ch) {
+        if let Ok(sp) = self.get(id) {
+            self.signal(&sp, Op::Declined { channel }).await;
+        }
+    }
+
     /// A call to us rings here: its caller hears so, and hears ringback.
     pub async fn ringing(&self, id: &Id, channel: Ch) {
         if let Ok(sp) = self.get(id) {
@@ -3835,6 +3866,10 @@ impl Node {
                     self.emit(Event::Call { space: sp.id });
                 }
             }
+            Op::Declined { channel } => {
+                let (space, user) = (sp.id, s.author);
+                self.emit(Event::Declined { space, channel, user });
+            }
             Op::Call { channel } => {
                 self.said(sp, (s.author, s.device, s.ts), channel, false);
             }
@@ -3978,7 +4013,7 @@ impl Node {
 
     /// Our key for a relay (`url#key`, from whoever runs it), or none
     /// (`url`): kept in `relay-keys`, used from the next start.
-    pub fn relay_key(&self, line: &str) -> Result<()> {
+    pub async fn relay_key(&self, line: &str) -> Result<Option<bool>> {
         let (u, k) = line.trim().split_once('#').unwrap_or((line.trim(), ""));
         let (url, _) = relay(u).context("not a relay's address")?;
         ensure!(
@@ -3997,7 +4032,26 @@ impl Node {
         if !k.is_empty() {
             v.push(&new);
         }
-        store::write(&f, v.join("\n").as_bytes())
+        store::write(&f, v.join("\n").as_bytes())?;
+        Ok(match k.is_empty() {
+            true => None,
+            false => key_works(&url, k).await,
+        })
+    }
+
+    /// Our relay keys, each as its relay answers now (`key_works`).
+    pub async fn relay_keys(&self) -> Vec<(String, Option<bool>)> {
+        let f = std::fs::read_to_string(self.dir.join("relay-keys"));
+        let f = f.unwrap_or_default();
+        let keys = f.lines().filter_map(|l| {
+            let (u, k) = l.split_once('#')?;
+            Some((relay(u)?.0, k))
+        });
+        let checks = keys.map(|(u, k)| async move {
+            let ok = key_works(&u, k).await;
+            (u.to_string(), ok)
+        });
+        n0_future::join_all(checks).await
     }
 
     /// Our relay, best first (`home`): a beat without it, the next; every

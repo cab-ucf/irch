@@ -6,6 +6,9 @@ See [PLAN.md](PLAN.md). irpush's own list: irpush's TODO.md.
 - [x] Time relays again, so a device has a home relay at all
 - [x] No relay tokens; one relay at a time, best first (storage node's
       irpush, iroh.cxn.center, n0), the next after a minute without it
+- [x] Declining a call tells its caller (it hangs up) and stops our other
+      devices ringing; from the app and Android's call screen
+- [x] Each relay key shows whether its relay takes it (irpush's `/key`)
 - [x] Relay keys (`url#key`, from whoever runs the relay): no speed limit
       through it; a big download not direct says so
 - [ ] Probe only on a network change, not every 20–26 s

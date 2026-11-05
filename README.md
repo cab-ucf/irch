@@ -105,7 +105,13 @@ there then; the node itself is an always-on device of yours (`--link`).
   received, and the pushes that woke it, from a log written only as that
   changes; on Android, the app's own packets (irpush's too) and battery.
 - A call rings all of someone's devices; answered on one, the others
-  stop, and none of the caller's own ring.
+  stop, and none of the caller's own ring. Declined (in the app or on a
+  phone's call screen), its caller hears so and hangs up, and the
+  others stop too.
+- *Relay key* (Network use): a key from whoever runs a relay lifts its
+  speed limit for big transfers that cannot go direct. Each saved key
+  shows what its relay says of it now (takes it, does not know it, or no
+  answer), with Remove.
 - Several profiles per device, linked devices (listed, with when each
   last wrote), invisible mode, private notifications, themes (Neon,
   Midnight, Nord, UCF, Light).
