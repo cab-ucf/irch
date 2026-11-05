@@ -74,6 +74,15 @@ fn limit() -> u64 {
 /// What opens in memory, to preview; larger files are saved.
 const PREVIEW: usize = 25 << 20;
 const BLOB: &[u8] = b"irch/blob/1";
+/// Ops dialed straight to a space's devices: `space ‖ sealed op` a stream.
+const DIRECT: &[u8] = b"irch/op/1";
+/// A direct link quiet this long is closed: open links are pinged every 5 s.
+const QUIET_LINK: Duration = Duration::from_secs(30);
+/// Spaces up to this many devices are told directly; bigger, by gossip.
+const FANOUT: usize = 64;
+
+type Links = Arc<Mutex<HashMap<EndpointId, (Connection, Instant)>>>;
+
 /// Text handed to one of our own devices: one link, nothing kept elsewhere.
 const HAND: &[u8] = b"irch/hand/1";
 const PARKED: usize = 32 << 20;
@@ -611,6 +620,8 @@ pub struct Node {
     served: crate::push::Served,
     /// Asked a storage node for its relay this run.
     relayed: AtomicBool,
+    // Direct links to devices, closed once quiet (`QUIET_LINK`).
+    links: Links,
     // Our device joined to each of our push servers, this run.
     widened: AtomicBool,
     // Which of `order`'s relays we hold (`roam`).
@@ -877,6 +888,7 @@ impl ProtocolHandler for Proto {
                 Ok(())
             }
             HAND => n.handed(&c).await,
+            DIRECT => n.told(&c).await,
             _ => n.give(&c).await,
         };
         r.map_err(|e| {
@@ -1034,6 +1046,7 @@ impl Node {
             relayed: AtomicBool::new(false),
             roamed: AtomicUsize::new(0),
             widened: AtomicBool::new(false),
+            links: Links::default(),
             own: own_inv.id(),
             me,
             dir: cfg.dir,
@@ -1080,6 +1093,7 @@ impl Node {
             .accept(sync::ALPN, Proto(Arc::downgrade(&n)))
             .accept(BLOB, Proto(Arc::downgrade(&n)))
             .accept(HAND, Proto(Arc::downgrade(&n)))
+            .accept(DIRECT, Proto(Arc::downgrade(&n)))
             .accept(call::ALPN, Proto(Arc::downgrade(&n)));
         // A storage node rings phones through irpush.
         if serve.is_some()
@@ -2116,6 +2130,7 @@ impl Node {
         };
         let (s, raw) = self.seal(sp, &key, ts, op);
         self.ingest(sp, vec![raw.clone()], true);
+        self.tell(sp, &raw);
         if sp.nbrs().is_empty() {
             lock(&sp.undelivered).insert(s.id);
         }
@@ -2511,6 +2526,7 @@ impl Node {
         }
         let ts = self.tick();
         let raw = self.seal(sp, &key, ts, op).1;
+        self.tell(sp, &raw);
         if let Some(tx) = sp.tx() {
             let _ = tx.broadcast(raw.clone().into()).await;
         }
@@ -2732,6 +2748,84 @@ impl Node {
         {
             c.add(user, conn, self.media.clone());
         }
+    }
+
+    /// Dial `raw` straight to each device of a small space (its members'
+    /// and storage nodes): one stream each, over links kept while in use.
+    fn tell(&self, sp: &Space, raw: &[u8]) {
+        if raw.len() > GOSSIP_MAX {
+            return; // a sync carries it
+        }
+        let me = self.ep.id();
+        let to: Vec<EndpointId> = {
+            let b = lock(&sp.book);
+            let hosts = b.st.hosts().into_iter().map(|a| a.id);
+            let mut v: Vec<_> =
+                b.st.devices(FANOUT + 1).into_iter().chain(hosts).collect();
+            let mut seen = HashSet::from([me]);
+            v.retain(|d| seen.insert(*d));
+            v
+        };
+        if to.len() > FANOUT {
+            return; // big: gossip's
+        }
+        let frame: Arc<[u8]> = [&sp.id.0[..], raw].concat().into();
+        for d in to {
+            let (ep, links, f) =
+                (self.ep.clone(), self.links.clone(), frame.clone());
+            tokio::spawn(async move {
+                let held = lock(&links).get(&d).map(|l| l.0.clone());
+                let c = match held.filter(|c| c.close_reason().is_none()) {
+                    Some(c) => c,
+                    None => {
+                        let five = Duration::from_secs(5);
+                        let Ok(Ok(c)) =
+                            tokio::time::timeout(five, ep.connect(d, DIRECT))
+                                .await
+                        else {
+                            return;
+                        };
+                        c
+                    }
+                };
+                lock(&links).insert(d, (c.clone(), Instant::now()));
+                if let Ok(mut s) = c.open_uni().await {
+                    let _ = s.write_all(&f).await;
+                    let _ = s.finish();
+                }
+            });
+        }
+    }
+
+    /// Links quiet past `QUIET_LINK`: closed (each costs a ping every 5 s).
+    fn quiet_links(&self) {
+        lock(&self.links).retain(|_, (c, at)| {
+            let keep = at.elapsed() < QUIET_LINK && c.close_reason().is_none();
+            if !keep {
+                c.close(0u32.into(), b"quiet");
+            }
+            keep
+        });
+    }
+
+    /// Ops a space's device dialed straight to us: taken as if gossiped,
+    /// from devices that space knows only.
+    async fn told(self: &Arc<Self>, c: &Connection) -> Result<()> {
+        let from = c.remote_id();
+        while let Ok(mut s) = c.accept_uni().await {
+            let b = sync::rest(&mut s, 32 + GOSSIP_MAX).await?;
+            let Some((id, raw)) = b.split_first_chunk::<32>() else { continue };
+            let Ok(sp) = self.get(&Id(*id)) else { continue };
+            let known = {
+                let b = lock(&sp.book);
+                b.st.owner_of(&from).is_some()
+                    || b.st.hosts().iter().any(|a| a.id == from)
+            };
+            if known || self.takes(&sp, &from) {
+                self.signaled(&sp, raw, from);
+            }
+        }
+        Ok(())
     }
 
     /// Hand `text` to one of our own devices: one link straight to it (no
@@ -4218,6 +4312,10 @@ impl Node {
 /// One gossip subscription per space, renewed if it ever closes.
 /// The topic is the room: a rekey moves it, leaving whoever it cut off.
 async fn pump(n: Arc<Node>, sp: Weak<Space>, boot: Vec<EndpointId>) {
+    // An experiment: `direct` in our folder, no gossip (ops go by `tell`).
+    if n.dir.join("direct").exists() {
+        return;
+    }
     loop {
         let Some(s) = sp.upgrade() else { return };
         let (room, moved) = (n.room(&s), s.moved.clone());
@@ -4376,6 +4474,7 @@ async fn heartbeat(n: Weak<Node>) {
         }
         last = now();
         n.roam(i).await;
+        n.quiet_links();
         // In a call is in use.
         if n.in_call().is_some() {
             n.active().await;

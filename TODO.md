@@ -32,8 +32,11 @@ See [PLAN.md](PLAN.md). irpush's own list: irpush's TODO.md.
 - [ ] `dm` and calls use the DM both are in; empty duplicates left quietly
 
 ## 4. Delivery by device list
-- [ ] Measure gossip's chatter in an idle open app
-- [ ] Direct fan-out to member devices for DMs and small spaces
+- [x] Direct fan-out to each device of spaces up to 64 (links closed
+      ~30 s quiet); `direct` in a profile's folder turns gossip off
+- [ ] Measure with `direct` on real devices (Network use): idle and busy
+- [ ] Then: no gossip for small spaces; presence and peers from direct
+      links; gossip's code gone if big spaces do not need it
 - [x] Hand text to one of our own devices (Your devices › Send): one
       direct link, nothing stored or synced elsewhere; it must be awake
 - [ ] Message one device of someone else's
