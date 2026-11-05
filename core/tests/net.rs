@@ -1425,3 +1425,30 @@ async fn text_is_handed_to_one_of_our_devices() {
     assert_eq!(got.unwrap(), (a.device(), "https://example.org/x".into()));
     assert!(b.hand(a2.device(), "hi").await.is_err(), "not b's device");
 }
+
+/// Without gossip (`direct` in each folder), ops go straight to each of
+/// the space's devices: posts, presence and a call's ring all arrive.
+#[tokio::test(flavor = "multi_thread")]
+async fn ops_go_straight_to_each_device() {
+    let direct = |name: &str| {
+        let d = dir(name);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("direct"), "").unwrap();
+        d
+    };
+    let a = start(&direct("a"), "a", None, false).await;
+    let b = start(&direct("b"), "b", None, false).await;
+    let id = a.create("duo").await.unwrap();
+    let ch = general(&a, &id);
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let knows =
+        || a.view(&id, |s| s.owner_of(&b.device()).is_some()) == Some(true);
+    until("a knows b's device", knows).await;
+    assert_eq!(a.peers(&id), 0, "no gossip");
+    say(&a, &id, ch, "straight to you").await;
+    until("b has it", || texts(&b, &id, &ch) == ["straight to you"]).await;
+    say(&b, &id, ch, "and back").await;
+    until("a has it", || texts(&a, &id, &ch).len() == 2).await;
+    a.call(Some((id, ch))).await.unwrap();
+    until("b hears the call", || !b.calls(&id).is_empty()).await;
+}

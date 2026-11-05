@@ -90,6 +90,20 @@ these on the real network, device by device.
 Found on the way: `call()` opened the sound devices before ringing; it
 rings first now.
 
+## The design (agreed)
+
+- Asleep, a phone holds one TCP socket to a relay, a keepalive every ~30
+  min or longer, nothing else: irpush's, shared by every iroh app on the
+  phone. irch's node is stopped; irpush wakes it. On iOS, irpush the same
+  way, through APNs where a socket cannot stay.
+- Awake, a device dials each member device of a space directly and
+  closes a link ~30 s after it goes quiet (an open one is pinged every
+  5 s). No mesh held open.
+- A device asleep is woken by an irpush push through its storage node's
+  relay; storage nodes keep what it missed. Every device gets pushes.
+- So the iroh client needs no change: its own endpoint runs only while
+  irch is in use. The relay needs only to not ping (irpush's patch).
+
 ## Delivery: users and their devices
 
 Today each space is an iroh-gossip mesh (HyParView, Plumtree) plus range
@@ -101,6 +115,16 @@ small groups the simple thing is direct fan-out: dial each member device
 (sleeping ones: push), send, close when idle; storage nodes are devices
 too and catch everyone up. Gossip stays only if measurement shows big
 spaces need it. A message to one device is fan-out to a list of one.
+
+Phase 1 (done): every op is also dialed straight to each device of a
+space up to 64 (members' and storage nodes'), one stream each, over links
+closed after ~30 s quiet; the receiver takes it from devices that space
+knows, as if gossiped (duplicates drop). An empty file `direct` in a
+profile's folder turns gossip off there: the experiment, and the test
+(`ops_go_straight_to_each_device`: posts, presence and a ring arrive).
+Phase 2: measure idle and busy with `direct` on real devices (Network
+use); then no gossip for spaces up to 64 devices, presence and "peers"
+from direct links, and gossip's code gone if big spaces do not need it.
 
 ## Push servers that form themselves
 
