@@ -1151,7 +1151,8 @@ async fn two_dms_at_once_become_one() {
         let dms = dms.filter(|s| n.view(s, |s| s.dm.is_some()) == Some(true));
         dms.filter(|s| n.listed(s)).collect::<Vec<_>>()
     };
-    assert_eq!((listed(&a), listed(&b)), (vec![dm], vec![dm]));
+    let once = || listed(&a) == vec![dm] && listed(&b) == vec![dm];
+    until("each lists it, once", once).await;
     say(&a, &dm, DM, "found you").await;
     until("b reads it", || texts(&b, &dm, &DM) == ["found you"]).await;
 }

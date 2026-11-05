@@ -117,6 +117,10 @@ there then; the node itself is an always-on device of yours (`--link`).
   Midnight, Nord, UCF, Light).
 - Owners hand a space on (*Make Owner*); a lost or stolen device's
   identity is retired everywhere (*A device was lost or stolen*).
+- *Short code* (under an invite, or Link a device): `k7m-x9q-p3a`, good
+  for a minute and one try, typed into Join or Link this device. It hands
+  the full code over sealed to that device (post-quantum), found by a
+  throwaway identity the code stretches to (Argon2id).
 - Invites show what they are to before you join; links show where they
   go before they open; a message only on this device says so.
 - A camera button takes a photo and sends it: never in the gallery, no

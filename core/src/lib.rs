@@ -3,6 +3,7 @@
 
 pub mod api;
 mod call;
+pub mod code;
 pub mod crypto;
 pub mod link;
 mod node;

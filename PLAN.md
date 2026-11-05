@@ -113,29 +113,36 @@ whose link to it is down.
 
 ## Short invite and link codes, and everything ephemeral
 
-An invite today is a bearer code holding the space key, good until the
-next rekey; a link code holds the seed itself. Instead, both become:
-- `nameplate-word-word-word`, as sendmew: the nameplate finds the inviter
-  (a short-lived pkarr record, as irch's addresses already are; no DHT),
-  the full code is the password of a PAKE (SPAKE2, RFC 9382, or CPace).
-- One online guess per code, then it dies; expires after 60 s (said on
-  screen). The rendezvous learns a nameplate and an endpoint id for a
-  minute, and cannot MITM the PAKE.
-- Through the PAKE channel the inviter hands the invite sealed to the
-  joiner's own X-Wing key (ML-KEM-768 + X25519).
-- Optionally a password both sides type: its Argon2id hash keys a second,
-  symmetric layer around that. A recorded PAKE is open to a future quantum
-  computer (SPAKE2 is elliptic-curve); X-Wing covers that; the password
-  covers X-Wing failing too.
-- Linking a device is the same: a new device makes its own device key and
-  a one-off X-Wing key at first start and shows a code; the old device
-  hands over the seed (who you are, the same on every device) sealed to
-  it. Each device keeps its own device key (its endpoint id). Per-device
-  identity keys, so one lost phone can be cut off alone, stay in README's
-  "Later".
-- To check before shipping: code entropy against one online guess,
-  denial by burning codes, what the rendezvous sees, the crate's audit
-  status.
+Long codes are bearer secrets: an invite holds the space key until the
+next rekey, a link code the seed itself.
+
+Built (`core/src/code.rs`), simpler than a PAKE and with nothing new to
+trust but Argon2id:
+- A code is 9 characters of Crockford base32 (`k7m-x9q-p3a`, ~45 bits;
+  any case, dashes or spaces; i/l read as 1, o as 0).
+- Stretched with Argon2id (RustCrypto, OWASP's defaults), it gives a
+  throwaway iroh identity and a proof. The giver answers as that identity
+  for 60 s, found like any device: by id through n0's DNS, or tried on the
+  relays both use.
+- The taker proves the code and sends a fresh X-Wing key (ML-KEM-768 +
+  X25519); the giver hands the long code (invite or link) sealed to it.
+  One try: a wrong proof gets nothing and spends the code. Tested: hand
+  over, spent after use, burnt by one wrong proof.
+- What sees what: n0's DNS (or a relay) sees the throwaway id for a
+  minute. To learn the code from it, one must stretch up to 2^45 guesses
+  in that minute; at ~50 ms each that is ~55 000 years of one core. To
+  impersonate the giver, one needs the code. A taker who guesses gets one
+  try at 2^-45. Denial (burning a code by guessing at its id) is possible
+  for whoever sees the id: the giver then makes another.
+- The transport is iroh's QUIC (TLS 1.3, X25519); the payload inside is
+  also sealed to X-Wing, so a recording is safe from a future quantum
+  computer.
+- Linking works the same way: the old device's short code carries the
+  link code (the seed, who you are, the same on every device), to the new
+  device's fresh key. Each device keeps its own device key.
+- Later, if wanted: a password both type, Argon2id-keying a second layer
+  around the payload. The long codes themselves stay bearer codes; the
+  short code only stops them being pasted around.
 
 Ephemeral elsewhere: contact codes rotate, scheduled rekeys (README's
 "Later"), push queues stay in memory for a day, idle connections close.

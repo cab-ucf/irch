@@ -44,10 +44,12 @@ See [PLAN.md](PLAN.md). irpush's own list: irpush's TODO.md.
       reaches the phone through another)
 
 ## 6. Short invite and link codes
-- [ ] Security review: entropy, one guess, TTL, rendezvous, crate audit
-- [ ] PAKE over iroh, pkarr rendezvous, 60 s, single use
-- [ ] The invite (or seed, to link) sealed to the joiner's X-Wing key
-- [ ] Optional password: an Argon2id-keyed layer around that
+- [x] Short codes (`k7m-x9q-p3a`): Argon2id → a throwaway iroh identity,
+      60 s, one try; the invite or link code sealed to the taker's fresh
+      X-Wing key (analysis in PLAN.md; three tests)
+- [x] In the app: Short code under an invite and a link code; Join and
+      Link this device take one
+- [ ] Optional password: an Argon2id-keyed layer around the payload
 
 ## 8. Relays without the cloud
 - [ ] A storage node with a public address serves a relay
