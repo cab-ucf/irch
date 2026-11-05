@@ -117,6 +117,9 @@ there then; the node itself is an always-on device of yours (`--link`).
   Midnight, Nord, UCF, Light).
 - Owners hand a space on (*Make Owner*); a lost or stolen device's
   identity is retired everywhere (*A device was lost or stolen*).
+- *Note to self*, first among DMs: notes, secrets and files of any size,
+  on every device of yours and kept by your storage nodes, nobody else's
+  (your own space, sealed with a key only your devices hold).
 - *Short code* (under an invite, or Link a device): `k7m-x9q-p3a`, good
   for a minute and one try, typed into Join or Link this device. It hands
   the full code over sealed to that device (post-quantum), found by a

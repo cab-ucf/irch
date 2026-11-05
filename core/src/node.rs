@@ -1700,6 +1700,12 @@ impl Node {
     }
 
     /// Spaces you are in, by name; DMs last.
+    /// Our own space: every device of ours and our storage nodes, nobody
+    /// else. Its posts are notes to self.
+    pub fn own(&self) -> Id {
+        self.own
+    }
+
     pub fn spaces(&self) -> Vec<Id> {
         let mut v: Vec<_> = (self.all().into_iter())
             .filter(|s| s.id != self.own && s.inv.is_some())
@@ -2198,9 +2204,18 @@ impl Node {
         };
         let ok = ok && op::fits(&op);
         ensure!(ok, "that cannot be sent (empty, too long, or not allowed)");
-        ensure!(*id != self.own, "not a space");
+        // Our own space takes notes to self, nothing that runs a space.
+        let note = matches!(
+            op,
+            Op::Post { .. }
+                | Op::Edit { .. }
+                | Op::React { .. }
+                | Op::Pin { .. }
+                | Op::Topic { .. }
+        );
+        ensure!(*id != self.own || note, "not a space");
         let role = matches!(op, Op::Role { .. });
-        let msg = matches!(op, Op::Post { .. });
+        let msg = matches!(op, Op::Post { .. }) && *id != self.own;
         let (r, raw) = self.send(&self.get(id)?, op).await?;
         if msg {
             self.wake(id, Some(raw));

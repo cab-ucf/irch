@@ -45,6 +45,8 @@ See [PLAN.md](PLAN.md). irpush's own list: irpush's TODO.md.
 - [x] Hand text to one of our own devices (Your devices › Send): one
       direct link, nothing stored or synced elsewhere; it must be awake
 - [ ] Message one device of someone else's
+- [x] Note to self: our own space as a DM, on all our devices and kept
+      by our storage nodes (posts, edits, reactions, pins, files)
 
 ## 5. Push servers that form themselves
 - [x] A phone's device joins each of its owner's storage nodes' meshes
