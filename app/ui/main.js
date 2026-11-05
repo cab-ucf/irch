@@ -2155,7 +2155,38 @@ function confirmBox({ title, sub, ok }) {
 }
 
 // A secret code: never to other apps, and off the clipboard after a minute.
-async function showCode({ title, label, code, note, secret }) {
+/** A short code (one minute, one try) for an invite, or with no space our
+ * link code: shown large, with what is left of its minute. */
+async function shortCode(space) {
+  const code = await call("short_code", { space }).catch(() => null);
+  if (!code) return;
+  const left = h("p", { class: "sub" });
+  const end = Date.now() + 60e3;
+  const tick = setInterval(() => {
+    const s = Math.round((end - Date.now()) / 1e3);
+    left.textContent = s > 0 ? `Good for ${s} s, and for one try.`
+      : "Spent: past its minute.";
+  }, 250);
+  await modal((finish) => h("div", {},
+    h("div", { class: "m-body" }, h("h2", {}, "Short code"),
+      h("p", { class: "code-big mono" }, code), left,
+      h("p", { class: "note" }, "Typed into the other device's Join (or " +
+        "Link this device), it hands over the full code, sealed to that " +
+        "device. A wrong try spends it.")),
+    foot(h("button", { class: "btn grey", onclick: () => finish(null) },
+      "Done"))));
+  clearInterval(tick);
+}
+
+/** A typed short code (`k7m-x9q-p3a`): the full code it stands for. */
+const SHORT = /^\s*[0-9a-z]{3}[-\s]?[0-9a-z]{3}[-\s]?[0-9a-z]{3}\s*$/i;
+async function long(code) {
+  if (!SHORT.test(code)) return code;
+  toast("Asking for that code's invite…", false, 30e3);
+  return call("take_code", { code }).catch(() => null);
+}
+
+async function showCode({ title, label, code, note, secret, space }) {
   const qr = await invoke("qr", { text: code }).catch(() => null);
   modal((finish) => {
     const b = h("button", { class: "btn", onclick: async () => {
@@ -2176,7 +2207,10 @@ async function showCode({ title, label, code, note, secret }) {
       h("div", { class: "m-body" }, h("h2", {}, title), h("label", {}, label),
         h("div", { class: "row" }, field, b, share), img,
         h("p", { class: "note" }, note)),
-      foot(h("button", { class: "btn grey", onclick: () => finish(null) },
+      foot(space !== undefined && h("button", { class: "btn grey",
+        onclick: () => { finish(null); shortCode(space); } },
+        "Short code (1 min)"),
+        h("button", { class: "btn grey", onclick: () => finish(null) },
         "Done")));
   });
 }
@@ -2235,9 +2269,11 @@ async function joinFlow(card) {
   let code = await ask(card ? { title: "Add a contact",
     sub: "Paste their contact code (Contacts › My contact code).",
     label: "Contact code" } : { title: "Join a space",
-    sub: "Paste an invite someone shared with you.", label: "Invite",
-    placeholder: "irch:join:…", ok: "Join", maxLength: 8192, scan: true });
+    sub: "Paste an invite someone shared with you, or type its short code.",
+    label: "Invite", placeholder: "irch:join:… or k7m-x9q-p3a", ok: "Join",
+    maxLength: 8192, scan: true });
   if (code === SCAN) code = await scanQR();
+  if (code && !card) code = await long(code);
   if (code) await joinCode(code);
 }
 
@@ -2277,10 +2313,12 @@ async function addCard(code, p) {
 async function linkFlow() {
   let code = await ask({ title: "Link this device",
     sub: "On your other device, open My Account › Link a device and paste " +
-      "its code here. This device becomes you, with all your spaces.",
-    label: "Link code", placeholder: "irch:link:…", ok: "Link",
+      "its code here, or type its short code. This device becomes you, " +
+      "with all your spaces.",
+    label: "Link code", placeholder: "irch:link:… or k7m-x9q-p3a", ok: "Link",
     maxLength: 8192, scan: true });
   if (code === SCAN) code = await scanQR();
+  if (code) code = await long(code);
   if (!code) return;
   try {
     await invoke("link", { code });
@@ -2307,7 +2345,7 @@ async function invitePeople() {
   const s = cur();
   const code = await call("invite", { space: s.id }).catch(() => null);
   if (code) showCode({ title: `Invite friends to ${s.name}`,
-    label: "Send a space invite", code,
+    label: "Send a space invite", code, space: s.id,
     note: "Anyone holding this invite can read and post until an admin " +
       "resets invite links. Share it privately, e.g. in person or over " +
       "Signal. It carries the space's key and a way to reach members' " +
@@ -2730,7 +2768,7 @@ function notifyCheck() {
 async function linkDevice() {
   const code = await call("link_code").catch(() => null);
   if (code) showCode({ title: "Link a device", label: "Your link code", code,
-    secret: true,
+    secret: true, space: null,
     note: "Open irch on the new device, choose Link this device, and paste " +
       "or scan this. It becomes you: keep this code secret, and never " +
       "post it anywhere." });
