@@ -140,8 +140,10 @@ trust but Argon2id:
 - Linking works the same way: the old device's short code carries the
   link code (the seed, who you are, the same on every device), to the new
   device's fresh key. Each device keeps its own device key.
-- Later, if wanted: a password both type, Argon2id-keying a second layer
-  around the payload. The long codes themselves stay bearer codes; the
+- An optional password both type Argon2id-keys a second layer around the
+  payload (salted by the code's proof), so a recording stays shut even if
+  X-Wing fell. The taker may give it after the one try: the sealed payload
+  waits in memory, opened there. The long codes themselves stay bearer codes; the
   short code only stops them being pasted around.
 
 Ephemeral elsewhere: contact codes rotate, scheduled rekeys (README's

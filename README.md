@@ -120,7 +120,8 @@ there then; the node itself is an always-on device of yours (`--link`).
 - *Short code* (under an invite, or Link a device): `k7m-x9q-p3a`, good
   for a minute and one try, typed into Join or Link this device. It hands
   the full code over sealed to that device (post-quantum), found by a
-  throwaway identity the code stretches to (Argon2id).
+  throwaway identity the code stretches to (Argon2id). An optional
+  password, told apart from the code, locks it once more.
 - Invites show what they are to before you join; links show where they
   go before they open; a message only on this device says so.
 - A camera button takes a photo and sends it: never in the gallery, no

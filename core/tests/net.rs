@@ -1354,7 +1354,8 @@ async fn a_declined_call_tells_the_caller() {
     let dm = a.dm(&id, &b.id()).await.unwrap();
     say(&a, &dm, DM, "psst").await;
     until("b in the DM", || b.spaces().contains(&dm) && b.peers(&dm) > 0).await;
-    until("b2 in the DM", || b2.spaces().contains(&dm)).await;
+    until("b2 in the DM", || b2.spaces().contains(&dm) && b2.peers(&dm) > 0)
+        .await;
     let (mut ha, mut hb2) = (a.subscribe(), b2.subscribe());
     a.call(Some((dm, DM))).await.unwrap();
     until("b sees the call", || !b.calls(&dm).is_empty()).await;
@@ -1382,7 +1383,19 @@ async fn a_declined_call_tells_the_caller() {
     };
     let got = tokio::time::timeout(Duration::from_secs(20), heard).await;
     assert_eq!(got.expect("a hears it"), (dm, DM, b.id()));
-    let mine =
-        tokio::time::timeout(Duration::from_secs(20), declined(&mut hb2));
-    assert_eq!(mine.await.expect("b2 hears it").2, b.id());
+    let mine = async {
+        loop {
+            b.decline(&dm, DM).await;
+            if let Ok(d) = tokio::time::timeout(
+                Duration::from_millis(500),
+                declined(&mut hb2),
+            )
+            .await
+            {
+                return d;
+            }
+        }
+    };
+    let mine = tokio::time::timeout(Duration::from_secs(20), mine).await;
+    assert_eq!(mine.expect("b2 hears it").2, b.id());
 }

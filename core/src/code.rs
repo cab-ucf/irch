@@ -5,7 +5,7 @@
 //! Whoever sees that identity must brute-force 2^45 stretched codes within
 //! the minute to learn it; one wrong proof burns it.
 
-use crate::crypto::{kem_open, kem_seal, rand, same};
+use crate::crypto::{kem_open, kem_seal, open, rand, same, seal};
 use crate::{Net, node::endpoint, sync::rest};
 use anyhow::{Context, Result, bail, ensure};
 use iroh::SecretKey;
@@ -45,18 +45,41 @@ fn keys(code: &str) -> Result<(SecretKey, [u8; 32])> {
     Ok((SecretKey::from_bytes(sk.try_into()?), proof.try_into()?))
 }
 
+/// A password's key, salted by the code's proof: one more layer, should
+/// X-Wing ever fall to a recording.
+fn locked(password: &str, proof: &[u8; 32]) -> Result<crate::crypto::Key> {
+    let mut k = [0u8; 32];
+    argon2::Argon2::default()
+        .hash_password_into(password.as_bytes(), proof, &mut k)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(k)
+}
+
 async fn stretched(code: String) -> Result<(SecretKey, [u8; 32])> {
     tokio::task::spawn_blocking(move || keys(&code)).await?
 }
 
-/// A short code for `long` (an invite or link code), answered for `TTL`.
-pub async fn give(net: &Net, long: String) -> Result<String> {
+/// A short code for `long` (an invite or link code), answered for `TTL`;
+/// with a password, the taker needs it too.
+pub async fn give(
+    net: &Net,
+    long: String,
+    password: Option<String>,
+) -> Result<String> {
     let r: [u8; LEN] = rand();
     let c: Vec<u8> = r.iter().map(|b| ABC[*b as usize % 32]).collect();
     let code = [&c[..3], &c[3..6], &c[6..]]
         .map(|p| String::from_utf8_lossy(p).into_owned())
         .join("-");
     let (sk, proof) = stretched(code.clone()).await?;
+    // Plain, it is `irch:…`; locked, sealed bytes (never `irch:`).
+    let body = match password {
+        None => long.into_bytes(),
+        Some(p) => {
+            let k = tokio::task::spawn_blocking(move || locked(&p, &proof));
+            seal(&k.await??, ALPN, long.as_bytes())
+        }
+    };
     let ep = endpoint(net, None)
         .secret_key(sk)
         .alpns(vec![ALPN.to_vec()])
@@ -71,8 +94,8 @@ pub async fn give(net: &Net, long: String) -> Result<String> {
             let b = rest(&mut rx, 32 + 2048).await.ok()?;
             let (got, pk) = b.split_at_checked(32)?;
             // One try: right or wrong, the code is spent.
-            let sealed = same(got, &proof)
-                .then(|| kem_seal(pk, ALPN, long.as_bytes()))??;
+            let sealed =
+                same(got, &proof).then(|| kem_seal(pk, ALPN, &body))??;
             tx.write_all(&sealed).await.ok()?;
             tx.finish().ok()?;
             let _ = timeout(Duration::from_secs(5), c.closed()).await;
@@ -84,9 +107,22 @@ pub async fn give(net: &Net, long: String) -> Result<String> {
     Ok(code)
 }
 
+/// The last locked code taken, by its proof: its one try is spent, so the
+/// password, asked for after, opens it here.
+static HELD: std::sync::Mutex<Option<([u8; 32], Vec<u8>)>> =
+    std::sync::Mutex::new(None);
+
 /// The long code a short one stands for, while its giver answers.
-pub async fn take(net: &Net, code: &str) -> Result<String> {
+pub async fn take(
+    net: &Net,
+    code: &str,
+    password: Option<&str>,
+) -> Result<String> {
     let (sk, proof) = stretched(code.into()).await?;
+    let held = crate::node::lock(&HELD).take().filter(|h| h.0 == proof);
+    if let Some((_, body)) = held {
+        return unlock(body, proof, password).await;
+    }
     let dk: DecapsulationKey = rand::<32>().into();
     let hello = [&proof[..], &dk.encapsulation_key().to_bytes()].concat();
     let ep = endpoint(net, None).bind().await?;
@@ -115,9 +151,12 @@ pub async fn take(net: &Net, code: &str) -> Result<String> {
         tx.write_all(&hello).await?;
         tx.finish()?;
         let b = rest(&mut rx, 1 << 16).await?;
-        let long = kem_open(&dk, ALPN, &b)
+        let body = kem_open(&dk, ALPN, &b)
             .context("that code was used or is wrong")?;
-        anyhow::Ok(String::from_utf8(long)?)
+        if body.starts_with(b"irch:") {
+            return anyhow::Ok(String::from_utf8(body)?);
+        }
+        unlock(body, proof, password).await
     };
     let r = timeout(Duration::from_secs(30), go).await;
     ep.close().await;
@@ -138,10 +177,19 @@ async fn a_short_code_hands_over_its_long_one() {
     let url = format!("http://{}/", relay.http_addr().unwrap());
     let net = Net::Relay(vec![url.parse().unwrap()]);
     let long = "irch:invite:abc".to_string();
-    let code = give(&net, long.clone()).await.unwrap();
+    let code = give(&net, long.clone(), None).await.unwrap();
     assert_eq!(code.len(), 11, "xxx-xxx-xxx");
-    assert_eq!(take(&net, &code.to_uppercase()).await.unwrap(), long);
-    assert!(take(&net, &code).await.is_err(), "spent");
+    assert_eq!(take(&net, &code.to_uppercase(), None).await.unwrap(), long);
+    assert!(take(&net, &code, None).await.is_err(), "spent");
+    // With a password: the taker needs it too.
+    let pw = Some("horse battery".to_string());
+    let code = give(&net, long.clone(), pw).await.unwrap();
+    let got = take(&net, &code, None).await;
+    assert!(got.unwrap_err().to_string().contains("has a password"));
+    let got = take(&net, &code, Some("wrong")).await;
+    assert!(got.unwrap_err().to_string().contains("wrong password"));
+    let got = take(&net, &code, Some("horse battery")).await.unwrap();
+    assert_eq!(got, long, "asked for after its one try, opened here");
 }
 
 /// A wrong guess, even with the right id (seen published), gets nothing
@@ -155,7 +203,7 @@ async fn one_wrong_proof_burns_a_code() {
     let url: iroh::RelayUrl =
         format!("http://{}/", relay.http_addr().unwrap()).parse().unwrap();
     let net = Net::Relay(vec![url.clone()]);
-    let code = give(&net, "irch:invite:abc".into()).await.unwrap();
+    let code = give(&net, "irch:invite:abc".into(), None).await.unwrap();
     let (sk, _) = keys(&code).unwrap();
     let ep = endpoint(&net, None).bind().await.unwrap();
     let at = iroh::EndpointAddr::from_parts(
@@ -169,7 +217,29 @@ async fn one_wrong_proof_burns_a_code() {
     tx.write_all(&[&[0u8; 32][..], &pk].concat()).await.unwrap();
     tx.finish().unwrap();
     assert!(rest(&mut rx, 1 << 16).await.unwrap_or_default().is_empty());
-    assert!(take(&net, &code).await.is_err(), "burnt");
+    assert!(take(&net, &code, None).await.is_err(), "burnt");
+}
+
+/// A locked code's long one; without its password (or a wrong one), kept
+/// to try again.
+async fn unlock(
+    body: Vec<u8>,
+    proof: [u8; 32],
+    password: Option<&str>,
+) -> Result<String> {
+    let keep = |body| *crate::node::lock(&HELD) = Some((proof, body));
+    let Some(p) = password.map(str::to_string) else {
+        keep(body);
+        bail!("that code has a password");
+    };
+    let k = tokio::task::spawn_blocking(move || locked(&p, &proof)).await??;
+    match open(&k, ALPN, &body) {
+        Some(long) => Ok(String::from_utf8(long)?),
+        None => {
+            keep(body);
+            bail!("wrong password")
+        }
+    }
 }
 
 #[test]

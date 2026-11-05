@@ -49,7 +49,8 @@ See [PLAN.md](PLAN.md). irpush's own list: irpush's TODO.md.
       X-Wing key (analysis in PLAN.md; three tests)
 - [x] In the app: Short code under an invite and a link code; Join and
       Link this device take one
-- [ ] Optional password: an Argon2id-keyed layer around the payload
+- [x] Optional password: an Argon2id-keyed layer around the payload
+      (salted by the code's proof); asked for after the one try, if need be
 
 ## 8. Relays without the cloud
 - [ ] A storage node with a public address serves a relay
