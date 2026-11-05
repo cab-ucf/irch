@@ -38,7 +38,7 @@ in {
     };
     # A file holding irpush's relay for this node's devices, from irpush's
     # deploy/: "https://irpush.you.example". Given to the node as a systemd
-    # credential. Unset, irch's relays (15 s pings).
+    # credential. Unset, irpush.cxn.center.
     services.irch.pushRelayFile = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
