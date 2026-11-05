@@ -34,7 +34,9 @@ See [PLAN.md](PLAN.md). irpush's own list: irpush's TODO.md.
 ## 4. Delivery by device list
 - [ ] Measure gossip's chatter in an idle open app
 - [ ] Direct fan-out to member devices for DMs and small spaces
-- [ ] Message one device (fan-out to one)
+- [x] Hand text to one of our own devices (Your devices › Send): one
+      direct link, nothing stored or synced elsewhere; it must be awake
+- [ ] Message one device of someone else's
 
 ## 5. Push servers that form themselves
 - [x] A phone's device joins each of its owner's storage nodes' meshes

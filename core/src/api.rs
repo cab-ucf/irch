@@ -109,6 +109,10 @@ pub enum Call {
     Doctor {
         user: Option<Id>,
     },
+    Hand {
+        device: iroh::EndpointId,
+        text: String,
+    },
     ForgetStorage {
         node: iroh::EndpointId,
     },
@@ -308,6 +312,7 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
         Call::Contact => json!(n.contact().await?),
         Call::AddStorage { code } => json!(n.add_storage(&code).await?),
         Call::Doctor { user } => n.doctor(user).await,
+        Call::Hand { device, text } => json!(n.hand(device, &text).await?),
         Call::ForgetStorage { node } => json!(n.forget_storage(&node).await?),
         Call::Store { space, node, on } => {
             json!(n.store(&space, &node, on).await?)

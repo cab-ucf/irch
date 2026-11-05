@@ -2599,6 +2599,14 @@ async function devicesFlow() {
         h("span", {}, h("b", {}, d.name ?? "Unnamed"),
           h("small", {}, ` · ${d.device} · ` +
             (d.this ? "this device" : `wrote ${ago(d.seen)}`))),
+        !d.this && h("button", { class: "btn grey", onclick: async () => {
+          const text = await ask({ title: `Send to ${d.name ?? d.device}`,
+            sub: "Straight to that device alone, nothing kept anywhere else. " +
+              "It must be awake.", label: "Text or link", ok: "Send",
+            maxLength: 4000 });
+          if (text) quiet(call("hand", { device: d.id, text })
+            .then(() => toast("Sent")));
+        } }, "Send"),
         h("button", { class: "btn grey", onclick: () => rename(d.id, d.name,
           () => devicesFlow()) }, "Rename")))),
     foot(h("button", { class: "btn grey", onclick: () => finish(null) },
@@ -3594,6 +3602,10 @@ async function start() {
       members();
     } else if (e.t === "call") {
       schedule("side");
+    } else if (e.t === "handed") {
+      showCode({ title: `From ${e.name ?? short(e.from)}`, label: "Sent to " +
+        "this device alone", code: e.text, note: "Nothing of it is kept " +
+        "anywhere else." });
     } else if (e.t === "declined") {
       if (isMe(e.user)) {
         if (calling) $("ring").close(); // declined on another of ours
