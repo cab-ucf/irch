@@ -646,11 +646,12 @@ function dmList(list) {
   }, avatar(d.with ?? d.id, d.name, "xs"), h("span", { class: "name" }, d.name),
   d.channels.some((c) => c.call.length) && icon("speaker"),
   badge(d.id !== S.sid && mentions(d)),
-  h("button", { class: "gear", title: `Call ${d.name}`, onclick: (e) => {
-    e.stopPropagation();
-    callIn(d.id);
-  } }, icon("ring")),
-  !d.closed && h("button", { class: "gear",
+  !d.self && h("button", { class: "gear", title: `Call ${d.name}`,
+    onclick: (e) => {
+      e.stopPropagation();
+      callIn(d.id);
+    } }, icon("ring")),
+  !d.closed && !d.self && h("button", { class: "gear",
     title: "Close (kept; back with a new message)", onclick: (e) => {
       e.stopPropagation();
       closeDm(d);
@@ -1952,6 +1953,8 @@ const levels = (s) => [["All", "All messages"], ["Mentions", "Only @mentions"],
 
 function dmMenu(anchor) {
   const s = cur();
+  // Notes to self: on every device of ours, nothing to call or leave.
+  if (s.self) return menu(anchor, [["Your devices", "link", devicesFlow]]);
   menu(anchor, [
     ["Call", "ring", () => callIn(s.id)],
     ["Close", "x", () => closeDm(s)],

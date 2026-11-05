@@ -1449,3 +1449,17 @@ async fn ops_go_straight_to_each_device() {
     a.call(Some((id, ch))).await.unwrap();
     until("b hears the call", || !b.calls(&id).is_empty()).await;
 }
+
+/// Notes to self: our own space, on every device of ours, nobody else's.
+#[tokio::test(flavor = "multi_thread")]
+async fn notes_to_self_reach_our_devices_only() {
+    let a = node("a").await;
+    let a2 = start(&dir("a2"), "phone", Some(a.link_code().await), false).await;
+    let b = node("b").await;
+    let own = a.own();
+    assert_eq!(a2.own(), own, "the same space on each device");
+    let ch = irch_core::state::DM;
+    say(&a, &own, ch, "the wifi password").await;
+    until("a2 has it", || texts(&a2, &own, &ch) == ["the wifi password"]).await;
+    assert!(b.view(&own, |_| ()).is_none(), "not b's");
+}

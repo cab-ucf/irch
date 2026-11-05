@@ -223,8 +223,12 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
         }
         Call::SetName { name } => json!(n.set_name(&name).await?),
         Call::SetInvisible { on } => json!(n.set_invisible(on).await),
+        // Notes to self first: our own space, as a DM with nobody else.
         Call::Spaces => json!(
-            n.spaces().iter().filter_map(|s| space(n, s)).collect::<Vec<_>>()
+            std::iter::once(n.own())
+                .chain(n.spaces())
+                .filter_map(|s| space(n, &s))
+                .collect::<Vec<_>>()
         ),
         Call::Members { space } => {
             let on = n.online(&space);
@@ -432,7 +436,11 @@ fn space(n: &Node, id: &Id) -> Option<Value> {
             s.count(&crate::state::DM),
         )
     })?;
-    let (name, dm, owner, admin, chans, with, threads, count) = v;
+    let (name, dm, owner, admin, mut chans, with, threads, count) = v;
+    // Notes to self: our own space has no channels; its DM's is theirs.
+    if *id == n.own() && chans.is_empty() {
+        chans.push((crate::state::DM, "notes".into()));
+    }
     let mut calls = n.calls(id);
     // Every thread, newest first; `old`: quiet a week, none of it for us.
     let thread = |t: &crate::Thread| {
@@ -460,8 +468,12 @@ fn space(n: &Node, id: &Id) -> Option<Value> {
     let call = n.in_call().filter(|c| c.0 == *id).map(|c| c.1);
     let rings = with.zip(call).is_some_and(|(w, c)| n.rings(id, &w, &c));
     let reach = with.and_then(|w| n.reach(id, &w));
+    let mine = *id == n.own();
+    let (name, dm) =
+        if mine { ("Note to self".into(), true) } else { (name, dm) };
     Some(json!({
         "id": id, "name": name, "dm": dm, "with": with, "owner": owner,
+        "self": mine,
         "count": count,
         "admin": admin, "peers": peers, "locked": locked, "channels": channels,
         "near": n.neighbors(id).into_iter()
