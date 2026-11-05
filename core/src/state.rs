@@ -640,6 +640,12 @@ impl State {
         v
     }
 
+    /// The devices of members out (banned, cut off, retired).
+    pub fn cut_devices(&self) -> Vec<EndpointId> {
+        let out = |((_, a), _): &(&(EndpointId, Id), _)| self.out(a);
+        self.devices.iter().filter(out).map(|((d, _), _)| *d).collect()
+    }
+
     pub fn devices(&self, n: usize) -> Vec<EndpointId> {
         let ok = |((_, a), _): &(&(EndpointId, Id), _)| !self.out(a);
         let v = self.devices.iter().filter(ok).map(|((d, _), t)| (*t, *d));

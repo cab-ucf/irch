@@ -1001,7 +1001,13 @@ impl Node {
         }
         let _ = std::fs::remove_file(shown);
         let closed = store::load(&cfg.dir.join("closed"));
-        let lookup = MemoryLookup::new();
+        // Direct (tests): one address book for the process, as DNS is for
+        // the rest, so any device is found by its id.
+        static BOOK: OnceLock<MemoryLookup> = OnceLock::new();
+        let lookup = match cfg.net {
+            Net::Direct => BOOK.get_or_init(MemoryLookup::new).clone(),
+            _ => MemoryLookup::new(),
+        };
         local.peers.values().for_each(|a| lookup.add_endpoint_info(a.clone()));
         let bind = async |port: u16| {
             let best = order(&cfg.dir).into_iter().next();
@@ -1028,6 +1034,12 @@ impl Node {
             .iter()
             .find(|a| a.is_ipv4())
             .map_or(0, |a| a.port());
+        if matches!(cfg.net, Net::Direct) {
+            let at =
+                std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, local.port));
+            let addrs = [iroh::TransportAddr::Ip(at)];
+            lookup.add_endpoint_info(EndpointAddr::from_parts(ep.id(), addrs));
+        }
         let serve = cfg.serve.then(|| *local.token.get_or_insert_with(rand));
         let files = FsStore::load(cfg.dir.join("files")).await?;
         let gossip =
@@ -2128,9 +2140,16 @@ impl Node {
             let after = if fix { b.st.horizon() + 1 } else { 0 };
             (key, self.tick().max(after))
         };
+        let rekey = matches!(op, Op::Rekey { .. });
         let (s, raw) = self.seal(sp, &key, ts, op);
         self.ingest(sp, vec![raw.clone()], true);
         self.tell(sp, &raw);
+        // A rekey to those it cut off too: no key for them, only the news
+        // that theirs moved on (they show the space locked).
+        if rekey {
+            let cut = lock(&sp.book).st.cut_devices();
+            self.dial(sp.id, &raw, cut);
+        }
         if sp.nbrs().is_empty() {
             lock(&sp.undelivered).insert(s.id);
         }
@@ -2138,7 +2157,11 @@ impl Node {
             Some(tx) => {
                 drop(tx.broadcast(raw.clone().into()).await);
             }
-            None => sp.nbrs().into_iter().for_each(|p| self.sync(sp, p)),
+            // Too big to tell (`tell`): a sync carries it.
+            None if raw.len() > GOSSIP_MAX => {
+                sp.nbrs().into_iter().for_each(|p| self.sync(sp, p))
+            }
+            None => {}
         }
         // Gossip with nobody in it holds it until the next sync, minutes
         // away: hand it to the space's devices directly, now.
@@ -2757,19 +2780,31 @@ impl Node {
             return; // a sync carries it
         }
         let me = self.ep.id();
+        // Whoever wrote here, its storage nodes, devices met here (a
+        // newcomer that has only said `Here`) and our own other devices.
         let to: Vec<EndpointId> = {
+            let ours = self.devices().into_iter().map(|d| d.0);
+            let met = sp.nbrs();
             let b = lock(&sp.book);
             let hosts = b.st.hosts().into_iter().map(|a| a.id);
+            let wrote = b.st.devices(FANOUT + 1);
             let mut v: Vec<_> =
-                b.st.devices(FANOUT + 1).into_iter().chain(hosts).collect();
+                wrote.into_iter().chain(hosts).chain(met).chain(ours).collect();
             let mut seen = HashSet::from([me]);
             v.retain(|d| seen.insert(*d));
             v
         };
-        if to.len() > FANOUT {
-            return; // big: gossip's
+        // Big, gossip's; a small space has no gossip (`pump`).
+        if to.len() > FANOUT && sp.tx().is_some() {
+            return;
         }
-        let frame: Arc<[u8]> = [&sp.id.0[..], raw].concat().into();
+        self.dial(sp.id, raw, to);
+    }
+
+    /// `raw`, for space `id`, to each of `to`: one stream each, over links
+    /// kept while in use.
+    fn dial(&self, id: Id, raw: &[u8], to: Vec<EndpointId>) {
+        let frame: Arc<[u8]> = [&id.0[..], raw].concat().into();
         for d in to {
             let (ep, links, f) =
                 (self.ep.clone(), self.links.clone(), frame.clone());
@@ -2822,6 +2857,8 @@ impl Node {
                     || b.st.hosts().iter().any(|a| a.id == from)
             };
             if known || self.takes(&sp, &from) {
+                // Reached, directly: a neighbor (caught up with once).
+                self.neighbor(&sp, from);
                 self.signaled(&sp, raw, from);
             }
         }
@@ -3771,8 +3808,12 @@ impl Node {
     }
 
     /// A sync with `peer` went through: what we wrote reached someone.
-    pub(crate) fn reached(&self, sp: &Space, peer: EndpointId) {
+    pub(crate) fn reached(self: &Arc<Self>, sp: &Arc<Space>, peer: EndpointId) {
         lock(&self.synced).insert(peer, now());
+        // No gossip (a small space): a sync is how a device is first met.
+        if sp.tx().is_none() {
+            self.neighbor(sp, peer);
+        }
         // Reachable, proven: gossip with nobody joins it at once.
         if let Some(tx) = sp.tx().filter(|_| sp.nbrs().is_empty()) {
             tokio::spawn(async move { drop(tx.join_peers(vec![peer]).await) });
@@ -4001,6 +4042,10 @@ impl Node {
         // says so again, after).
         if matches!(s.op, Op::Gone | Op::Here) {
             self.said(sp, (s.author, s.device, s.ts), None, true);
+        }
+        if s.op == Op::Gone && sp.tx().is_none() && lock(&sp.nbrs).remove(&from)
+        {
+            self.emit(Event::Changed { space: sp.id });
         }
         match s.op {
             Op::Typing { channel } | Op::Typed { channel } => {
@@ -4312,11 +4357,14 @@ impl Node {
 /// One gossip subscription per space, renewed if it ever closes.
 /// The topic is the room: a rekey moves it, leaving whoever it cut off.
 async fn pump(n: Arc<Node>, sp: Weak<Space>, boot: Vec<EndpointId>) {
-    // An experiment: `direct` in our folder, no gossip (ops go by `tell`).
-    if n.dir.join("direct").exists() {
-        return;
-    }
     loop {
+        // Up to `FANOUT` devices, a space is told directly (`tell`): no
+        // mesh held open, each link pinged every 5 s. Bigger, gossip.
+        let small =
+            sp.upgrade().map(|s| lock(&s.book).st.devices(FANOUT + 1).len());
+        if small.is_none_or(|n| n <= FANOUT) {
+            return;
+        }
         let Some(s) = sp.upgrade() else { return };
         let (room, moved) = (n.room(&s), s.moved.clone());
         *lock(&s.room) = room;
@@ -4493,6 +4541,15 @@ async fn heartbeat(n: Weak<Node>) {
                     (*u, *d, s.1 + 1)
                 })
                 .collect();
+            // Gone quiet long, no longer a neighbor (a small space's).
+            if sp.tx().is_none() {
+                let mut nb = lock(&sp.nbrs);
+                let before = nb.len();
+                nb.retain(|d| !dead.iter().any(|w| w.1 == *d));
+                if nb.len() != before {
+                    n.emit(Event::Changed { space: sp.id });
+                }
+            }
             for &w in &dead {
                 n.said(&sp, w, None, true);
             }

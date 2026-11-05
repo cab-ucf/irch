@@ -33,10 +33,15 @@ See [PLAN.md](PLAN.md). irpush's own list: irpush's TODO.md.
 
 ## 4. Delivery by device list
 - [x] Direct fan-out to each device of spaces up to 64 (links closed
-      ~30 s quiet); `direct` in a profile's folder turns gossip off
-- [ ] Measure with `direct` on real devices (Network use): idle and busy
-- [ ] Then: no gossip for small spaces; presence and peers from direct
-      links; gossip's code gone if big spaces do not need it
+      ~30 s quiet)
+- [x] No gossip for spaces up to 64 devices: ops dialed to each device
+      (who wrote, storage nodes, devices met, our own); a sync is how a
+      device is first met; presence and peers from direct links
+- [ ] Measure on real devices (Network use), 0.1.13 against 0.1.12
+- [ ] Custom relays (`--relay`) have no DNS to find a device by id: give
+      them an address book (or keep gossip there)
+- [ ] Gossip's code gone if no space ever needs it (over 64 devices)
+- [ ] Two DMs begun at once, both talked in before they meet: two rows
 - [x] Hand text to one of our own devices (Your devices › Send): one
       direct link, nothing stored or synced elsewhere; it must be awake
 - [ ] Message one device of someone else's
