@@ -1144,15 +1144,18 @@ async fn two_dms_at_once_become_one() {
         }
         None
     };
-    let dm = same().await.expect("one DM for both");
+    same().await.expect("one DM for both");
     // Listed once each side: the other, empty, is not.
     let listed = |n: &Node| {
         let dms = n.spaces().into_iter();
         let dms = dms.filter(|s| n.view(s, |s| s.dm.is_some()) == Some(true));
         dms.filter(|s| n.listed(s)).collect::<Vec<_>>()
     };
-    let once = || listed(&a) == vec![dm] && listed(&b) == vec![dm];
-    until("each lists it, once", once).await;
+    // Both settle on one, the same (the lowest both are in, which may be
+    // another than first named, as the other lands).
+    let once = || listed(&a).len() == 1 && listed(&a) == listed(&b);
+    until("each lists one, the same", once).await;
+    let dm = listed(&a)[0];
     say(&a, &dm, DM, "found you").await;
     until("b reads it", || texts(&b, &dm, &DM) == ["found you"]).await;
 }
@@ -1426,25 +1429,19 @@ async fn text_is_handed_to_one_of_our_devices() {
     assert!(b.hand(a2.device(), "hi").await.is_err(), "not b's device");
 }
 
-/// Without gossip (`direct` in each folder), ops go straight to each of
-/// the space's devices: posts, presence and a call's ring all arrive.
+/// A small space holds no gossip mesh: ops go straight to each of its
+/// devices, and posts, presence and a call's ring all arrive.
 #[tokio::test(flavor = "multi_thread")]
 async fn ops_go_straight_to_each_device() {
-    let direct = |name: &str| {
-        let d = dir(name);
-        std::fs::create_dir_all(&d).unwrap();
-        std::fs::write(d.join("direct"), "").unwrap();
-        d
-    };
-    let a = start(&direct("a"), "a", None, false).await;
-    let b = start(&direct("b"), "b", None, false).await;
+    let (a, b) = (node("a").await, node("b").await);
     let id = a.create("duo").await.unwrap();
     let ch = general(&a, &id);
     b.join(&a.invite(&id).await.unwrap()).await.unwrap();
     let knows =
         || a.view(&id, |s| s.owner_of(&b.device()).is_some()) == Some(true);
     until("a knows b's device", knows).await;
-    assert_eq!(a.peers(&id), 0, "no gossip");
+    until("each reached the other", || a.peers(&id) > 0 && b.peers(&id) > 0)
+        .await;
     say(&a, &id, ch, "straight to you").await;
     until("b has it", || texts(&b, &id, &ch) == ["straight to you"]).await;
     say(&b, &id, ch, "and back").await;

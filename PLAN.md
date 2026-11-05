@@ -119,12 +119,13 @@ spaces need it. A message to one device is fan-out to a list of one.
 Phase 1 (done): every op is also dialed straight to each device of a
 space up to 64 (members' and storage nodes'), one stream each, over links
 closed after ~30 s quiet; the receiver takes it from devices that space
-knows, as if gossiped (duplicates drop). An empty file `direct` in a
-profile's folder turns gossip off there: the experiment, and the test
-(`ops_go_straight_to_each_device`: posts, presence and a ring arrive).
-Phase 2: measure idle and busy with `direct` on real devices (Network
-use); then no gossip for spaces up to 64 devices, presence and "peers"
-from direct links, and gossip's code gone if big spaces do not need it.
+knows, as if gossiped (duplicates drop). Phase 2 (done): spaces up to 64 devices hold no gossip at all. Ops go
+to who wrote there, its storage nodes, devices met there and our own
+devices; a sync (either way) is how a device is first met, and presence
+and "peers" come from direct links. Finding a device by id is DNS's
+(n0's) on the default network, mDNS's on a LAN; custom relays have none
+yet. Tests use one address book per process, as DNS. Next: measure, and
+remove gossip's code if no space needs it.
 
 ## Push servers that form themselves
 
