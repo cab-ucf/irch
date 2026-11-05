@@ -3776,11 +3776,16 @@ impl Node {
             // New here, or back from sleep: answered once with our call
             // (none, mostly), which says we are here without asking back.
             Op::Here => {
-                let ch = self.in_call().filter(|c| c.0 == sp.id).map(|c| c.1);
-                if (changed && !self.invisible()) || ch.is_some() {
+                let id = sp.id;
+                let ch = move |n: &Node| n.in_call().filter(|c| c.0 == id);
+                if (changed && !self.invisible()) || ch(self).is_some() {
                     let (n, sp) = (self.clone(), sp.clone());
-                    let call = Op::Call { channel: ch };
-                    tokio::spawn(async move { n.signal(&sp, call).await });
+                    // Our call as it is when said: a call begun meanwhile
+                    // is never undone by a "none" stamped after it.
+                    tokio::spawn(async move {
+                        let call = Op::Call { channel: ch(&n).map(|c| c.1) };
+                        n.signal(&sp, call).await
+                    });
                 }
             }
             // Their device has our DM's news up to `ts`: proof of it.
