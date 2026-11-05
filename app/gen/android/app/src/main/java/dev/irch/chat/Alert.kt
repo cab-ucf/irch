@@ -94,7 +94,8 @@ fun postCall(ctx: Context, space: String, room: String, who: String) {
     PendingIntent.getActivity(ctx, tag.hashCode() + code, i, flags)
   }
   val decline = PendingIntent.getBroadcast(ctx, tag.hashCode(),
-    Intent(ctx, Decline::class.java).putExtra("tag", tag), flags)
+    Intent(ctx, Decline::class.java).putExtra("tag", tag)
+      .putExtra("space", space).putExtra("room", room), flags)
   val caller = Person.Builder().setName(who).setImportant(true).build()
   val n = NotificationCompat.Builder(ctx, CALLS)
     .setSmallIcon(R.drawable.ic_stat)
@@ -118,6 +119,12 @@ fun hush(ctx: Context, space: String = "") {
 }
 
 class Decline : BroadcastReceiver() {
-  override fun onReceive(ctx: Context, i: Intent) =
+  override fun onReceive(ctx: Context, i: Intent) {
     NotificationManagerCompat.from(ctx).cancel(i.getStringExtra("tag"), CALL)
+    val (space, room) = i.getStringExtra("space") to i.getStringExtra("room")
+    if (space != null && room != null) {
+      val done = goAsync()
+      Thread { Wake.decline(space, room); done.finish() }.start()
+    }
+  }
 }

@@ -183,6 +183,27 @@ pub extern "system" fn Java_dev_irch_chat_Wake_run<'l>(
     reply(env, ctx, wake)
 }
 
+/// A call declined from its notification: said by the node the ring
+/// started, so its caller hangs up and our other devices stop ringing.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_irch_chat_Wake_decline(
+    mut env: JNIEnv,
+    _: JClass,
+    space: JString,
+    room: JString,
+) {
+    let (Some(s), Some(r)) = (text(&mut env, &space), text(&mut env, &room))
+    else {
+        return;
+    };
+    let (Ok(s), Ok(r)) = (s.parse(), r.parse()) else { return };
+    tauri::async_runtime::block_on(async {
+        if let Some(n) = crate::running() {
+            n.decline(&s, r).await;
+        }
+    });
+}
+
 /// Another network: find relays now, not when a ping fails.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_irch_chat_Wake_moved(_: JNIEnv, _: JClass) {

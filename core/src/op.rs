@@ -65,6 +65,9 @@ pub enum Op {
     Typed { channel: Ch },
     // A DM's news landed on this device, up to `ts` (live): ✓✓ there.
     Got { ts: u64 },
+    // A call to us in `channel`, declined (live): its caller hangs up,
+    // our other devices stop ringing.
+    Declined { channel: Ch },
 }
 
 /// A link's preview, made by its sender.
@@ -135,6 +138,7 @@ impl Op {
                 | Op::Gone
                 | Op::Ringing { .. }
                 | Op::Got { .. }
+                | Op::Declined { .. }
         )
     }
 }
