@@ -1293,3 +1293,48 @@ async fn ring_paths() {
          to its push server {server} ms"
     );
 }
+
+/// A phone joins each of its owner's storage nodes as a push server, so a
+/// ring gets through while any one of them is up.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ring_gets_through_while_any_push_server_is_up() {
+    use iroh_relay::server::{RelayConfig, Server, ServerConfig};
+    let mut cfg = ServerConfig::default();
+    cfg.relay = Some(RelayConfig::new(([127, 0, 0, 1], 0)));
+    let relay = Server::spawn(cfg).await.unwrap();
+    let at = format!("http://{}", relay.http_addr().unwrap());
+    let creds = dir("creds");
+    std::fs::create_dir_all(&creds).unwrap();
+    std::fs::write(creds.join("push-relay"), format!("{at}\n")).unwrap();
+    // SAFETY: storage nodes read it as they start; no test wants another.
+    unsafe { std::env::set_var("CREDENTIALS_DIRECTORY", &creds) };
+    let (s1, s2) = (
+        start(&dir("s1"), "s1", None, true).await,
+        start(&dir("s2"), "s2", None, true).await,
+    );
+    let db = dir("b");
+    let (a, b) = (node("a").await, start(&db, "b", None, false).await);
+    let id = a.create("duo").await.unwrap();
+    let ch = general(&a, &id);
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    pair(&b, &s1, &[]).await;
+    pair(&b, &s2, &[]).await;
+    let url = b.irpush().await.expect("paired with a storage node");
+    b.set_push(Some(url)).await;
+    let codes = || {
+        let p = a.view(&id, |s| s.pushes_of(Some(&b.id()))).unwrap_or_default();
+        p.iter().map(|x| x.1.split_whitespace().count()).max().unwrap_or(0)
+    };
+    until("a rings b through both", || codes() == 2).await;
+    b.shutdown().await;
+    drop(b);
+    s1.shutdown().await;
+    drop(s1);
+    let phone = irch_core::push::device(&db, None).unwrap().unwrap();
+    say(&a, &id, ch, "still here?").await;
+    let news = tokio::time::timeout(Duration::from_secs(20), phone.next());
+    let news = news.await.expect("pushed through s2").unwrap();
+    let n = Node::woken(&db, &news).0.expect("shown");
+    assert_eq!(n.body, "still here?");
+    drop(s2);
+}

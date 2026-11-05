@@ -336,6 +336,26 @@ pub fn device(dir: &Path, ticket: Option<&str>) -> Result<Option<Arc<Device>>> {
     Ok(Some(d))
 }
 
+/// Our device into one more push server's mesh: rings get through while
+/// any one of them is up. Whether it joined.
+pub async fn also(dir: &Path, ticket: &str) -> bool {
+    if shared() {
+        return join_shared(dir, ticket).await.is_some();
+    }
+    let Ok(Some(d)) = device(dir, None) else { return false };
+    let had = d.node.peers().len();
+    if d.node.add(ticket).is_err() {
+        return false;
+    }
+    for _ in 0..80 {
+        if d.node.peers().len() > had {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    false
+}
+
 /// Ours, never paired (its ticket ran out): gone, for a new one.
 pub fn forget(dir: &Path) {
     lock(&DEVICES).remove(dir);

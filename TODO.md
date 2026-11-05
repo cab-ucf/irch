@@ -34,8 +34,11 @@ See [PLAN.md](PLAN.md). irpush's own list: irpush's TODO.md.
 - [ ] Message one device (fan-out to one)
 
 ## 5. Push servers that form themselves
-- [ ] A user's storage nodes share one irpush mesh
-- [ ] Phones pair once, register with every host
+- [x] A phone's device joins each of its owner's storage nodes' meshes
+      (not others': they could wake every irpush app on it) and registers
+      with all; members ring every one at once (`a_ring_gets_through_…`)
+- [ ] The storage nodes themselves share one mesh (a ring queued on one
+      reaches the phone through another)
 
 ## 6. Short invite and link codes
 - [ ] Security review: entropy, one guess, TTL, rendezvous, crate audit

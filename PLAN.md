@@ -103,9 +103,13 @@ spaces need it. A message to one device is fan-out to a list of one.
 
 ## Push servers that form themselves
 
-Every storage node is an irpush host. A user's storage nodes join one
-irpush mesh as the owner adds them; a phone pairs once and registers with
-all of them, so rings get through while any one is up.
+Every storage node is an irpush host. A phone's one irpush device joins
+the mesh of each of its owner's storage nodes (irpush: one device, several
+meshes) and registers with all of them; members ring every one at once,
+so a ring gets through while any one is up. Only the owner's: another
+person's host could wake every irpush app on the phone. Next: the storage
+nodes share one mesh, so a ring queued on one that is up reaches a phone
+whose link to it is down.
 
 ## Short invite and link codes, and everything ephemeral
 
