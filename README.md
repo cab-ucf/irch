@@ -50,9 +50,9 @@ device, shared by every irpush app on it (irpush's Android library: the
 first installed holds it); irch joins it into its storage node's mesh
 beside theirs. Each ring is sealed end to end
 (post-quantum) and always the same size. Stock iroh relays ping every 15 s,
-which keeps a phone's radio awake, so for the battery saving give the
-storage node irpush's patched relay:
-`IRCH_PUSH_RELAY=https://irpush.you.example` (default: irch's relays).
+which keeps a phone's radio awake; irpush's patched relay pings after
+130 min, and is the default (irpush.cxn.center). Your own:
+`IRCH_PUSH_RELAY=https://irpush.you.example` (default: irpush.cxn.center).
 
 ## On the web
 
@@ -206,7 +206,8 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   Open links are pinged every 5 s (iroh's fixed rate), so irch holds them
   only while in sight or in a call; asleep, a device holds irpush's socket
   alone. A device holds one relay at a time, best first: its storage
-  node's (irpush's, pinged hours apart), then iroh.cxn.center, then n0's;
+  node's, then irpush.cxn.center (both irpush's, pinged hours apart),
+  then iroh.cxn.center, then n0's;
   a minute without it, the next; every half hour, the best again if it
   answers. Relays are open, so anyone reaches anyone homed on any of them.
   While running, iroh times its relay over https every 20–26 s: without
@@ -215,7 +216,7 @@ space = a grow-only set of envs;   state = a deterministic fold of it
 
 | network | terminal (app env) | who else is involved |
 |---|---|---|
-| default | | relays iroh.cxn.center (or a storage node's open relays) and n0; n0 DNS |
+| default | | relays irpush.cxn.center, then iroh.cxn.center (or a storage node's open relays first), then n0; n0 DNS |
 | own relays | `--relay URL` (`IRCH_RELAY`) | your relays |
 | LAN only | `--lan` (`IRCH_LAN=1`) | nobody (mDNS) |
 

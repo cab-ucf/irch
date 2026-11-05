@@ -31,7 +31,8 @@ terabytes through their own relay when a direct path cannot form. A key
 goes only to its relay. A big download that is not direct says so.
 
 A device holds one relay at a time, best first: its storage node's irpush
-relay (pings hours apart), then iroh.cxn.center, then n0's. A minute
+relay, then irpush.cxn.center (both pinged hours apart; the default for a
+storage node's phones too), then iroh.cxn.center, then n0's. A minute
 without it, the next; every half hour, the best again if it answers.
 iroh reaches a peer on whichever relay its address names, so devices on
 different relays reach each other.

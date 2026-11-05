@@ -54,8 +54,12 @@ pub const AWAY: Duration = Duration::from_secs(600);
 const TYPING: Duration = Duration::from_secs(50);
 // A callee says once that it rings; its caller hears ringback this long.
 const RANG: Duration = Duration::from_secs(45);
-pub(crate) const RELAYS: [&str; 2] =
-    ["https://iroh.cxn.center./", "https://use1-1.relay.n0.iroh.link./"];
+/// Best first: irpush's relay (pings hours apart), a stock one, n0's last.
+pub(crate) const RELAYS: [&str; 3] = [
+    "https://irpush.cxn.center./",
+    "https://iroh.cxn.center./",
+    "https://use1-1.relay.n0.iroh.link./",
+];
 pub use crate::op::{MAX_NAME, MAX_TEXT};
 /// What storage nodes keep without their password.
 pub const MAX_FILE: u64 = 5 << 30;
@@ -717,7 +721,7 @@ fn order(dir: &Path) -> Vec<String> {
             Some((u.parse().ok()?, k))
         })
         .collect();
-    home(paired.as_deref(), RELAYS)
+    home(paired.as_deref(), &RELAYS)
         .into_iter()
         .filter_map(|u| {
             let url = relay(u)?.0;
@@ -741,19 +745,21 @@ async fn key_works(relay: &RelayUrl, key: &str) -> Option<bool> {
 }
 
 /// Where we may home, best first: a storage node's relays (irpush's, with
-/// pings hours apart), then irch's, then n0's (never, given `!n0`). A key
+/// pings hours apart), then irch's (`ours`, n0's last; never n0's, given
+/// `!n0`). A key
 /// the storage node gave (`url#key`) goes along: a relay from before open
 /// relays asks for it, an open one lets it lift the rate limit.
-fn home<'a>(paired: Option<&'a str>, ours: [&'a str; 2]) -> Vec<&'a str> {
+fn home<'a>(paired: Option<&'a str>, ours: &[&'a str]) -> Vec<&'a str> {
     let l = paired.unwrap_or_default();
     let mut v: Vec<&str> =
         l.split(',').filter(|r| r.starts_with("http")).collect();
     let own = l.contains("!n0");
+    let (irch, n0) = ours.split_at(ours.len().saturating_sub(1));
     if !own || v.is_empty() {
-        v.push(ours[0]);
+        v.extend(irch);
     }
     if !own {
-        v.push(ours[1]);
+        v.extend(n0);
     }
     let mut seen = HashSet::new();
     v.retain(|u| seen.insert(u.split('#').next().unwrap_or(u)));
@@ -785,15 +791,18 @@ fn relays_are_open_and_tried_best_first() {
     assert_eq!(m.len(), 2, "!n0 is no relay");
     let c = m.get(&"https://a.example./".parse().unwrap()).unwrap();
     assert_eq!(c.auth_token.as_deref(), Some("old"), "a key goes along");
-    let d = ["https://d.example./", "https://n0.example./"];
-    assert_eq!(home(None, d), d);
+    let d =
+        ["https://p.example./", "https://s.example./", "https://n0.example./"];
+    assert_eq!(home(None, &d), d);
     let p = "https://a.example./#old";
-    assert_eq!(home(Some(p), d), [p, d[0], d[1]]);
+    assert_eq!(home(Some(p), &d), [p, d[0], d[1], d[2]]);
     let mine = "https://a.example./,https://b.example./,!n0";
     assert_eq!(
-        home(Some(mine), d),
+        home(Some(mine), &d),
         ["https://a.example./", "https://b.example./"]
     );
+    assert_eq!(home(Some("!n0"), &d), [d[0], d[1]], "ours, never n0's");
+    assert!(RELAYS[0].contains("irpush"), "irpush's relay first");
 }
 
 /// One relay at a time, best first (`order`; `Node::roam` moves on). iroh
