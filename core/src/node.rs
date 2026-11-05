@@ -2717,17 +2717,25 @@ impl Node {
 
     /// A short code (one minute, one try) for an invite to `space`, or,
     /// with none, for our link code (`code.rs`).
-    pub async fn short_code(&self, space: Option<Id>) -> Result<String> {
+    pub async fn short_code(
+        &self,
+        space: Option<Id>,
+        password: Option<String>,
+    ) -> Result<String> {
         let long = match space {
             Some(id) => self.invite(&id).await?,
             None => self.link_code().await,
         };
-        crate::code::give(&self.net, long).await
+        crate::code::give(&self.net, long, password).await
     }
 
     /// The invite or link code a short code stands for.
-    pub async fn take_code(&self, code: &str) -> Result<String> {
-        crate::code::take(&self.net, code).await
+    pub async fn take_code(
+        &self,
+        code: &str,
+        password: Option<&str>,
+    ) -> Result<String> {
+        crate::code::take(&self.net, code, password).await
     }
 
     /// Everything another device needs to become you: keep it secret.

@@ -2158,7 +2158,13 @@ function confirmBox({ title, sub, ok }) {
 /** A short code (one minute, one try) for an invite, or with no space our
  * link code: shown large, with what is left of its minute. */
 async function shortCode(space) {
-  const code = await call("short_code", { space }).catch(() => null);
+  const password = await ask({ title: "Short code",
+    sub: "A password is optional: one more lock, for codes said aloud or " +
+      "written where others look. Tell it to them apart from the code.",
+    label: "Password (optional)", ok: "Make code", maxLength: 128 });
+  if (password === null || password === undefined) return;
+  const code = await call("short_code", { space, password: password || null })
+    .catch(() => null);
   if (!code) return;
   const left = h("p", { class: "sub" });
   const end = Date.now() + 60e3;
@@ -2183,7 +2189,20 @@ const SHORT = /^\s*[0-9a-z]{3}[-\s]?[0-9a-z]{3}[-\s]?[0-9a-z]{3}\s*$/i;
 async function long(code) {
   if (!SHORT.test(code)) return code;
   toast("Asking for that code's invite…", false, 30e3);
-  return call("take_code", { code }).catch(() => null);
+  // Locked: its password asked for, tried here as often as needed.
+  for (let password = null; ;) {
+    try {
+      return await rpc("take_code", { code, password });
+    } catch (e) {
+      const why = String(e);
+      if (!/password/.test(why)) return toast(why, true), null;
+      password = await ask({ title: "Its password",
+        sub: why.includes("wrong") ? "Not that one. Try again."
+          : "That code has a password: ask whoever gave it.",
+        label: "Password", ok: "Open", maxLength: 128 });
+      if (!password) return null;
+    }
+  }
 }
 
 async function showCode({ title, label, code, note, secret, space }) {

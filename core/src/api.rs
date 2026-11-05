@@ -87,9 +87,13 @@ pub enum Call {
     LinkCode,
     ShortCode {
         space: Option<Id>,
+        #[serde(default)]
+        password: Option<String>,
     },
     TakeCode {
         code: String,
+        #[serde(default)]
+        password: Option<String>,
     },
     /// Ours to hand out: whoever takes it can DM us.
     Contact,
@@ -295,8 +299,12 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
         Call::Rekey { space } => json!(n.rekey(&space).await?),
         Call::Dm { space, user } => json!(n.dm(&space, &user).await?),
         Call::LinkCode => json!(n.link_code().await),
-        Call::ShortCode { space } => json!(n.short_code(space).await?),
-        Call::TakeCode { code } => json!(n.take_code(&code).await?),
+        Call::ShortCode { space, password } => {
+            json!(n.short_code(space, password).await?)
+        }
+        Call::TakeCode { code, password } => {
+            json!(n.take_code(&code, password.as_deref()).await?)
+        }
         Call::Contact => json!(n.contact().await?),
         Call::AddStorage { code } => json!(n.add_storage(&code).await?),
         Call::Doctor { user } => n.doctor(user).await,
