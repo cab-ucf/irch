@@ -235,10 +235,12 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
         ),
         Call::Members { space } => {
             let on = n.online(&space);
+            let idle = n.idle(&space);
             let ms = n.view(&space, |s| s.members()).unwrap_or_default();
             let row = |m: crate::Member| {
                 let mut v = json!(m);
                 v["online"] = on.contains(&m.id).into();
+                v["idle"] = idle.contains(&m.id).into();
                 v
             };
             json!(ms.into_iter().map(row).collect::<Vec<_>>())
@@ -263,6 +265,10 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
                 .iter()
                 .map(|u| n.reach(&space, u).unwrap_or(0))
                 .collect();
+            let last: Vec<u64> =
+                others.iter().map(|u| n.active_reach(&space, u)).collect();
+            let storage = n.view(&space, |s| s.hosts().len()).unwrap_or(0) > 0
+                || space == n.own();
             let reads: Vec<u64> = others
                 .iter()
                 .map(|u| {
@@ -289,9 +295,18 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
                         _ => "sent",
                     }
                     .into();
+                    // On the device each used last: can they see it now?
+                    let both = last.iter().zip(&reads);
+                    let active = both
+                        .filter(|(a, b)| m.ts <= **a || m.ts <= **b)
+                        .count();
                     v["got"] = got.into();
+                    v["active"] = active.into();
                     v["readers"] = read.into();
                     v["of"] = others.len().into();
+                    v["kept"] = (kept >= m.ts).into();
+                    v["relay"] = up.into();
+                    v["storage"] = storage.into();
                 }
                 v
             };

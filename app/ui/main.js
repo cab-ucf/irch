@@ -97,6 +97,15 @@ const ICONS = {
   screen: "M3 4h18v12H3zM8 20h8M12 16v4",
   speaker: "M4 9h4l5-4v14l-5-4H4zM16 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12",
   headset: "M4 15v-3a8 8 0 0 1 16 0v3M4 15h3v5H4zM17 15h3v5h-3z",
+  offline: "M2 9a15 15 0 0 1 20 0M5.5 12.5a10 10 0 0 1 13 0M9 16a5 5 0 0 1 " +
+    "6 0M12 19.5h.01M3 3l18 18",
+  check: "M4 12l5 5L20 6",
+  checks: "M1 12l5 5L17 6M10 16l1 1L23 6",
+  disk: "M4 5h16v6H4zM4 13h16v6H4zM8 8h.01M8 16h.01",
+  diskOff: "M4 5h16v6H4zM4 13h16v6H4zM8 8h.01M8 16h.01M3 3l18 18",
+  cloud: "M7 19h10a4.5 4.5 0 0 0 .5-9A6 6 0 0 0 6 11a4 4 0 0 0 1 8",
+  cloudOff: "M7 19h10a4.5 4.5 0 0 0 .5-9A6 6 0 0 0 6 11a4 4 0 0 0 1 8M3 3l18 " +
+    "18",
   play: "M8 5v14l11-7z",
   thread: "M5 4v9a4 4 0 0 0 4 4h10M15 13l4 4-4 4",
   note: "M6 3h12v18l-6-4-6 4zM9 8h6M9 11h4",
@@ -1216,7 +1225,7 @@ function renderMessages(keepScroll) {
     const authorAdmin = memberOf(m.author)?.role === "Admin";
     const sig = JSON.stringify([m.text, m.edited, m.name,
       m.reactions, m.quote, m.thread, m.pinned, cont, mentioned, editing,
-      admin, authorAdmin, m.pending, m.status, m.got, m.readers,
+      admin, authorAdmin, m.pending, m.status, m.got, m.readers, m.active, m.kept, m.relay,
       m.preview]);
     items.push({ k: m.id, sig, make: () =>
       msgRow(m, { cont, mentioned, editing, authorAdmin }) });
@@ -1283,25 +1292,11 @@ function msgRow(m, { cont, mentioned, editing, authorAdmin }) {
   if (editing) row.append(editBox(m));
   const body = !editing && (m.text || m.edited) && content(m.text, m.edited);
   if (body) row.append(body);
-  if (m.status === "offline" || m.status === "waiting") {
-    row.append(h("div", { class: "pending-note" }, m.status === "offline"
-      ? "Only on this device: no connection now"
-      : "Only on this device: no storage node or member has taken it yet"));
-  } else if (isMe(m.author)) {
-    // How far it went: left here ✓, kept by a storage node ✓☁, on their
-    // device ✓✓, read (lit). Counts in a group.
-    const of = m.of > 1 ? ` (${m.status === "read" ? m.readers : m.got} of ` +
-      `${m.of})` : "";
-    const [t, title] = {
-      read: ["✓✓", "Read" + of],
-      delivered: ["✓✓", "On their device" + of],
-      kept: ["✓☁", "Kept by a storage node, not on theirs yet"],
-    }[m.status] ?? ["✓", "Left this device"];
+  if (isMe(m.author) && m.status) {
     // At the end of the text's last line, as in Signal.
     const end = body?.lastElementChild?.tagName === "P"
       ? body.lastElementChild : body || row;
-    end.append(h("span", { class: "ticks" + (m.status === "read" ? " read" : ""),
-      title, "aria-label": title }, t));
+    end.append(ticks(m));
   }
   if (m.files.length) row.append(attachments(m.files));
   if (m.preview) row.append(previewCard(m.preview));
@@ -1890,11 +1885,13 @@ function renderMembers() {
   put($("members"), shown.flatMap(([title, list]) => [
     h("h3", {}, `${title} — ${list.length}`),
     ...list.map((m) => h("div", {
-      class: `member ${m.online ? "on" : "off"} ${m.role.toLowerCase()}`,
+      class: `member ${m.online ? "on" : "off"}${m.idle ? " idle" : ""} ` +
+        m.role.toLowerCase(),
       onclick: (e) => memberCard(m.id, e.currentTarget, "left"),
       role: "button", tabindex: 0,
     }, avatar(m.id, m.name, "sm", m.online),
-    h("span", { class: "name" }, m.name))),
+    h("span", { class: "name" }, m.name),
+    m.idle && h("small", { title: "Open, untouched 10 minutes" }, "inactive"))),
   ]));
   // Names and admin colours in messages depend on members.
   if (S.msgs.length) renderMessages(true);
@@ -2697,6 +2694,41 @@ function relayKeys() {
         e.target.closest(".row").remove();
       } }, "Remove")))), () => box.remove());
   return box;
+}
+
+/** How far one of ours went, in icons: no connection; ✓ left here, the
+ * storage disk and the relay's cloud struck through until each has it;
+ * ✓✓ on their device (* not yet on the one they used last); ✓✓ lit, read.
+ * Hover for the whole of it; tap on a phone. */
+function ticks(m) {
+  const n = (k) => m.of > 1 ? ` ${k} of ${m.of}` : "";
+  const why = [
+    m.status === "offline" ? "Only on this device: no connection now."
+      : "Left this device.",
+    m.relay ? "A relay holds us (relays pass it on and keep nothing, so " +
+      "they cannot say they had it)." : "No relay holds us now.",
+    !m.storage ? "No storage node keeps this space."
+      : m.kept ? "A storage node keeps it, for whoever is away."
+      : "No storage node has it yet.",
+    m.got ? `On their device:${n(m.got)}` + (m.active < m.got
+      ? `; on the one they used last:${n(m.active) || " not yet"}.` : ".")
+      : "Not on any device of theirs yet.",
+    m.readers ? `Read:${n(m.readers)}.` : "",
+  ].filter(Boolean).join(" ");
+  const ic = {
+    offline: ["offline"],
+    waiting: ["check", ...(m.storage ? ["diskOff"] : []),
+      m.relay ? "cloud" : "cloudOff"],
+    sent: ["check", ...(m.storage ? [m.kept ? "disk" : "diskOff"] : [])],
+    kept: ["check", "disk"],
+    delivered: ["checks"],
+    read: ["checks"],
+  }[m.status] ?? ["check"];
+  const star = m.status === "delivered" && m.active < m.got;
+  return h("span", {
+    class: `ticks ${m.status}`, title: why, "aria-label": why, role: "button",
+    tabindex: 0, onclick: (e) => { e.stopPropagation(); toast(why, false, 9e3); },
+  }, ic.map(icon), star && h("b", {}, "*"));
 }
 
 /** A storage node off our list (every device of ours); ours, here, it
