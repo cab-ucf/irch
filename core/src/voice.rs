@@ -16,6 +16,46 @@ use std::time::Instant;
 use tokio::sync::broadcast;
 
 pub const RATE: u32 = 48_000;
+
+/// Where a call is heard: the phone's earpiece (else the system's own
+/// output), its loudspeaker, or a Bluetooth headset (its microphone too).
+#[derive(
+    Clone, Copy, PartialEq, Debug, Default, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum Route {
+    #[default]
+    Standard,
+    Speaker,
+    Bluetooth,
+}
+
+impl Route {
+    fn fits(self, d: &cpal::Device) -> bool {
+        use cpal::{DeviceType as T, InterfaceType as I};
+        let Ok(x) = d.description() else { return false };
+        match self {
+            Route::Standard => {
+                matches!(x.device_type(), T::Earpiece | T::Handset)
+            }
+            Route::Speaker => x.device_type() == T::Speaker,
+            Route::Bluetooth => x.interface_type() == I::Bluetooth,
+        }
+    }
+}
+
+/// The routes this device has now (Standard always).
+pub fn routes() -> Vec<Route> {
+    let host = cpal::default_host();
+    let outs: Vec<_> =
+        host.output_devices().map(|d| d.collect()).unwrap_or_default();
+    let has = |r: Route| outs.iter().any(|d| r.fits(d));
+    let mut v = vec![Route::Standard];
+    v.extend(
+        [Route::Speaker, Route::Bluetooth].into_iter().filter(|r| has(*r)),
+    );
+    v
+}
 const TEN: usize = 480;
 const PACKET: usize = 960;
 /// Queued before a voice plays: two packets of jitter.
@@ -302,6 +342,7 @@ impl Voice {
     pub fn start(
         send: impl Fn(Vec<u8>) + Send + 'static,
         mut media: broadcast::Receiver<(Id, Vec<u8>)>,
+        route: Route,
     ) -> Result<Self> {
         let mix = Arc::new(Mutex::new(Mix::default()));
         let muted = Arc::new(AtomicBool::new(false));
@@ -309,7 +350,7 @@ impl Voice {
         let (stop, wait) = mpsc::channel::<()>();
         let (ready, started) = mpsc::channel();
         let (m, mu, l) = (mix.clone(), muted.clone(), level.clone());
-        std::thread::spawn(move || match open(m, mu, l, send) {
+        std::thread::spawn(move || match open(m, mu, l, send, route) {
             Ok(streams) => {
                 let _ = ready.send(Ok(()));
                 let _ = wait.recv();
@@ -375,10 +416,23 @@ fn open(
     muted: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
     send: impl Fn(Vec<u8>) + Send + 'static,
+    route: Route,
 ) -> Result<(cpal::Stream, cpal::Stream)> {
     let host = cpal::default_host();
-    let speaker = host.default_output_device().context("no speaker")?;
-    let micro = host.default_input_device().context("no microphone")?;
+    let pick = |all: Option<Vec<cpal::Device>>| {
+        all?.into_iter().find(|d| route.fits(d))
+    };
+    let outs = host.output_devices().ok().map(|d| d.collect());
+    let speaker = pick(outs).or_else(|| host.default_output_device());
+    let speaker = speaker.context("no speaker")?;
+    // A headset's microphone with its ear; else the system's.
+    let ins = host.input_devices().ok().map(|d| d.collect());
+    let micro = match route {
+        Route::Bluetooth => pick(ins),
+        _ => None,
+    };
+    let micro = micro.or_else(|| host.default_input_device());
+    let micro = micro.context("no microphone")?;
     let oc = config(speaker.supported_output_configs()?, 2)
         .context("speaker: no 48 kHz")?;
     let ic = config(micro.supported_input_configs()?, 1)
@@ -430,6 +484,18 @@ fn open(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The page names routes so; Standard is always there.
+    #[test]
+    fn routes_are_named_and_standard_is_always_one() {
+        let s = serde_json::to_string(&[
+            Route::Standard,
+            Route::Speaker,
+            Route::Bluetooth,
+        ]);
+        assert_eq!(s.unwrap(), r#"["standard","speaker","bluetooth"]"#);
+        assert_eq!(routes()[0], Route::Standard);
+    }
 
     /// Speech-like: a pitch, its harmonics, and syllables four a second.
     fn voice(f: f32, n: usize, from: usize) -> Vec<f32> {
