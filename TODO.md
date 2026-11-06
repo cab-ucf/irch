@@ -53,7 +53,10 @@ See [PLAN.md](PLAN.md). irpush's own list: irpush's TODO.md.
 - [x] Events on phones through Android's shared irpush node, when irch's
       process runs it (irpush's `shared`, `tap`)
 - [ ] ...and when another irpush app owns it (its Binder broker)
-- [ ] irch's iroh endpoint only while QUIC is needed (calls, files, syncs)
+- [x] Read receipts batched: one per DM channel per 2 s, the latest
+- [ ] irch's iroh endpoint only while QUIC is needed (calls, files, syncs):
+      iroh 1.4.1 keeps its home relay even with the relay map emptied, so
+      this needs an iroh patch (or #4589/#4590)
 - [ ] Message one device of someone else's
 - [x] Status icons, details on hover or tap: offline; ✓ with storage and
       relay struck through until each has it; ✓✓ on their device (* not
