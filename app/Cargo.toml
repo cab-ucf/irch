@@ -56,7 +56,7 @@ jni = "0.21"
 ndk-context = "0.1"
 # The phone's one irpush device, shared by every irpush app (irpush's
 # Android library, android/irpush): its JNI lives in our native library.
-irpush = { git = "https://github.com/cab-ucf/irpush", rev = "8ec00c5", features = ["jni"] }
+irpush = { git = "https://github.com/cab-ucf/irpush", rev = "0fec168", features = ["jni"] }
 
 [features]
 # Built without `cargo tauri` (package.nix): the page from the binary.

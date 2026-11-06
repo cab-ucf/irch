@@ -49,7 +49,8 @@ quiet socket instead of a doorbell. That socket is the phone's one irpush
 device, shared by every irpush app on it (irpush's Android library: the
 first installed holds it); irch joins it into its storage node's mesh
 beside theirs. Each ring is sealed end to end
-(post-quantum) and always the same size. Stock iroh relays ping every 15 s,
+(post-quantum) and always the same size. Stock iroh relays ping a silent
+client every 16–20 s,
 which keeps a phone's radio awake; irpush's patched relay pings after
 130 min, and is the default (irpush.cxn.center). Your own:
 `IRCH_PUSH_RELAY=https://irpush.you.example` (default: irpush.cxn.center).
@@ -216,12 +217,14 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   Open links are pinged every 5 s (iroh's fixed rate), so irch holds them
   only while in sight or in a call; asleep, a device holds irpush's socket
   alone. A device holds one relay at a time, best first: its storage
-  node's, then irpush.cxn.center (both irpush's, pinged hours apart),
+  node's, then irpush.cxn.center (both irpush's: they ping a phone's
+  irpush socket hours apart; irch's own iroh endpoint pings every 15 s),
   then iroh.cxn.center, then n0's;
   a minute without it, the next; every half hour, the best again if it
   answers. Relays are open, so anyone reaches anyone homed on any of them.
-  While running, iroh times its relay over https every 20–26 s: without
-  that it has no home, and no one reaches it but over a LAN. No
+  While running, iroh pings its relay every 15 s and asks it our public
+  address every 20–26 s (a QUIC handshake): without that it has no home,
+  and no one reaches it but over a LAN. No
   captive-portal or DHT probing.
 
 | network | terminal (app env) | who else is involved |
