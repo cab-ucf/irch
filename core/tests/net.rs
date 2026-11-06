@@ -22,6 +22,16 @@ async fn start(
     link: Option<String>,
     serve: bool,
 ) -> Arc<Node> {
+    on(dir, name, link, serve, Net::Direct).await
+}
+
+async fn on(
+    dir: &std::path::Path,
+    name: &str,
+    link: Option<String>,
+    serve: bool,
+    net: Net,
+) -> Arc<Node> {
     let filter = tracing_subscriber::EnvFilter::from_default_env();
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -30,7 +40,7 @@ async fn start(
     let cfg = Config {
         dir: dir.into(),
         name: name.into(),
-        net: Net::Direct,
+        net,
         link,
         serve,
         notes: None,
@@ -1327,7 +1337,8 @@ async fn a_ring_gets_through_while_any_push_server_is_up() {
     b.set_push(Some(url)).await;
     let codes = || {
         let p = a.view(&id, |s| s.pushes_of(Some(&b.id()))).unwrap_or_default();
-        p.iter().map(|x| x.1.split_whitespace().count()).max().unwrap_or(0)
+        let rings = |u: &str| u.matches("irch:ring:").count();
+        p.iter().map(|x| rings(&x.1)).max().unwrap_or(0)
     };
     until("a rings b through both", || codes() == 2).await;
     b.shutdown().await;
@@ -1502,4 +1513,37 @@ async fn an_untouched_device_goes_idle() {
     until("idle", || a.idle(&id).contains(&b.id())).await;
     b.active().await;
     until("back", || !a.idle(&id).contains(&b.id())).await;
+}
+
+/// On one relay, small ops go as irpush events (one datagram each, acked
+/// the same way), with no link dialed for them.
+#[tokio::test(flavor = "multi_thread")]
+async fn small_ops_go_as_events() {
+    use iroh_relay::server::{RelayConfig, Server, ServerConfig};
+    let mut cfg = ServerConfig::default();
+    cfg.relay = Some(RelayConfig::new(([127, 0, 0, 1], 0)));
+    let relay = Server::spawn(cfg).await.unwrap();
+    let url = format!("http://{}/", relay.http_addr().unwrap());
+    let net = || Net::Relay(vec![url.parse().unwrap()]);
+    let a = on(&dir("a"), "a", None, false, net()).await;
+    let b = on(&dir("b"), "b", None, false, net()).await;
+    let id = a.create("hub").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let ch = general(&a, &id);
+    for i in 0.. {
+        say(&a, &id, ch, &format!("{i}")).await;
+        say(&b, &id, ch, &format!("{i}")).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if a.events().0 > 0 && b.events().0 > 0 {
+            break;
+        }
+        assert!(i < 60, "no events");
+    }
+    let n = texts(&a, &id, &ch).len();
+    let m = say(&a, &id, ch, "by event").await;
+    until("b has it", || texts(&b, &id, &ch).len() > n).await;
+    let ts = a.view(&id, |s| s.messages(&ch, None, 99)).unwrap();
+    let ts = ts.iter().find(|x| x.id == m).unwrap().ts;
+    until("acked", || a.reach(&id, &b.id()).is_some_and(|r| r >= ts)).await;
+    assert_eq!(a.events().1, 0, "none dialed after all");
 }

@@ -258,12 +258,6 @@ fn relays(dir: &Path, net: &Net) -> Option<Vec<irpush::Relay>> {
 /// A storage node's irpush host, running.
 fn host(dir: &Path, net: &Net) -> Result<Option<Arc<irpush::Node>>> {
     let Some(relays) = relays(dir, net) else { return Ok(None) };
-    if relays.iter().all(|r| r.token.is_none()) {
-        tracing::warn!(
-            "no irpush relay: phones use a stock one, pinged every 15 s \
-             (irch --install --push-relay https://irpush…#TOKEN)"
-        );
-    }
     let (f, kek) = (dir.join("irpush"), kek(dir)?);
     let n = match f.exists() {
         true => irpush::Node::open(&f, kek, vec![])?,
@@ -274,8 +268,92 @@ fn host(dir: &Path, net: &Net) -> Result<Option<Arc<irpush::Node>>> {
     }
     let n = Arc::new(n);
     let run = n.clone();
-    tokio::spawn(async move { run.run(|_, _, _| {}).await });
+    let on = ear(dir);
+    tokio::spawn(async move { run.run(on).await });
+    lock(&LANES).insert(dir.into(), n.clone());
     Ok(Some(n))
+}
+
+// ── Events: small ops as one datagram each on the socket irpush holds ──
+//
+// Every device's irpush node (a storage node's host, a phone's device, a
+// desktop's own) is reachable by its id on its relay, so an op goes there
+// as one datagram: no QUIC link, no handshake, no 5 s pings. Its ack comes
+// back the same way; unacked, it is dialed (`Node::dial`).
+
+/// irch's events, apart from rings.
+const EV: &str = "dev.irch.chat#ev";
+/// An event that came: the sender's irpush id and what it said.
+pub type Heard = (EndpointId, Vec<u8>);
+type Ear = tokio::sync::mpsc::UnboundedSender<Heard>;
+static EARS: Mutex<BTreeMap<PathBuf, Ear>> = Mutex::new(BTreeMap::new());
+static LANES: Mutex<BTreeMap<PathBuf, Arc<irpush::Node>>> =
+    Mutex::new(BTreeMap::new());
+
+fn ear(dir: &Path) -> impl Fn(EndpointId, irpush::App, &[u8]) + use<> {
+    let (dir, ev) = (dir.to_path_buf(), irpush::app(EV));
+    move |from, app, d| {
+        if let Some(e) = lock(&EARS).get(&dir).filter(|_| app == ev) {
+            let _ = e.send((from, d.to_vec()));
+        }
+    }
+}
+
+/// Events for the node at `dir`, from now on; a desktop with no irpush node
+/// gets its own, a lone host on our relay (pinged half-hourly).
+pub fn hear(
+    dir: &Path,
+    net: &Net,
+) -> tokio::sync::mpsc::UnboundedReceiver<Heard> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    lock(&EARS).insert(dir.into(), tx);
+    let phone = cfg!(any(target_os = "android", target_os = "ios"));
+    if !phone && lane(dir).is_none() {
+        let _ = lone(dir, net).inspect_err(|e| tracing::warn!("lane: {e:#}"));
+    }
+    rx
+}
+
+fn lone(dir: &Path, net: &Net) -> Result<()> {
+    let url = match net {
+        Net::Default => relay(dir).0,
+        Net::Relay(u) => u[0].to_string(),
+        _ => return Ok(()),
+    };
+    let (f, kek) = (dir.join("lane"), kek(dir)?);
+    let n = match f.exists() {
+        true => irpush::Node::open(&f, kek, vec![])?,
+        false => irpush::Node::create(&f, kek, irpush::Relay::list(&url)?)?,
+    };
+    let (n, on) = (Arc::new(n), ear(dir));
+    let run = n.clone();
+    tokio::spawn(async move { run.run(on).await });
+    lock(&LANES).insert(dir.into(), n);
+    Ok(())
+}
+
+/// The irpush node that carries our events, if any.
+pub fn lane(dir: &Path) -> Option<Arc<irpush::Node>> {
+    lock(&LANES).get(dir).cloned()
+}
+
+/// Ours, as members get it (`irch:ev:ID@RELAY`), while on a relay.
+pub fn lane_at(dir: &Path) -> Option<String> {
+    let l = lane(dir)?;
+    Some(format!("irch:ev:{}@{}", l.id(), l.on().first()?))
+}
+
+/// A device's events address, from its push.
+pub fn lane_of(push: &str) -> Option<(EndpointId, String)> {
+    push.split_whitespace().find_map(|t| {
+        let (id, at) = t.strip_prefix("irch:ev:")?.split_once('@')?;
+        Some((id.parse().ok()?, at.into()))
+    })
+}
+
+/// One event to `to` on `relay`; whether it left.
+pub fn event(dir: &Path, to: EndpointId, relay: &str, b: &[u8]) -> bool {
+    lane(dir).is_some_and(|l| l.event(to, relay, &irpush::app(EV), b))
 }
 
 /// A phone's irpush device: one per profile, its pushes as rings.
@@ -324,8 +402,9 @@ pub fn device(dir: &Path, ticket: Option<&str>) -> Result<Option<Arc<Device>>> {
     };
     let (node, (tx, rx)) =
         (Arc::new(node), tokio::sync::mpsc::unbounded_channel());
-    let (run, me) = (node.clone(), irpush::app(APP));
-    let on = move |_, app, b: &[u8]| {
+    let (run, me, ev) = (node.clone(), irpush::app(APP), ear(dir));
+    let on = move |from, app, b: &[u8]| {
+        ev(from, app, b);
         if let Some((sp, raw)) =
             b.split_first_chunk::<32>().filter(|_| app == me)
         {
@@ -333,6 +412,7 @@ pub fn device(dir: &Path, ticket: Option<&str>) -> Result<Option<Arc<Device>>> {
         }
     };
     let run = tokio::spawn(async move { run.run(on).await }).abort_handle();
+    lock(&LANES).insert(dir.into(), node.clone());
     let d = Arc::new(Device { node, rx: rx.into(), run });
     all.insert(dir.into(), d.clone());
     Ok(Some(d))
@@ -361,6 +441,7 @@ pub async fn also(dir: &Path, ticket: &str) -> bool {
 /// Ours, never paired (its ticket ran out): gone, for a new one.
 pub fn forget(dir: &Path) {
     lock(&DEVICES).remove(dir);
+    lock(&LANES).remove(dir);
     let _ = std::fs::remove_file(dir.join("irpush"));
 }
 

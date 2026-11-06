@@ -65,6 +65,22 @@ other iroh app on the phone. A push carries the sealed message or call
 itself, so it is shown at once, with no node started and no connection
 opened; the node starts only to answer.
 
+## Events: one datagram per change (agreed)
+
+Every device holds one long-lived TLS/TCP socket to a relay through irpush
+(a storage node's host, a phone's device, a desktop's own lone host,
+pinged half-hourly), and is reachable on it by its irpush id. A small op
+(message, read, presence change, ring) goes to each device as one
+datagram on that socket, sealed and signed as ever; the receiver takes
+it as if dialed and acks it the same way. Unacked in 3 s, or on another
+relay, it is dialed over iroh (QUIC). Calls and files: iroh, direct
+UDP, at full speed. Each device's address (`irch:ev:ID@RELAY`) rides in
+its push op, beside its ring codes, told again when it moves relays.
+
+Next: phones on Android's shared irpush node send and hear events too
+(the library's JNI); then irch's iroh endpoint starts only when QUIC is
+needed, so an idle device holds the one socket and nothing else.
+
 ## Waking and ringing
 
 Measured (`ring_paths` in core/tests/net.rs, loopback, so each path's own
