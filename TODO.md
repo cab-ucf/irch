@@ -48,6 +48,10 @@ See [PLAN.md](PLAN.md). irpush's own list: irpush's TODO.md.
 - [ ] Two DMs begun at once, both talked in before they meet: two rows
 - [x] Hand text to one of our own devices (Your devices › Send): one
       direct link, nothing stored or synced elsewhere; it must be awake
+- [x] Small ops as irpush events: one datagram on the relay socket, acked
+      back; dialed over QUIC when unacked in 3 s or on another relay
+- [ ] Events on phones through Android's shared irpush node (JNI)
+- [ ] irch's iroh endpoint only while QUIC is needed (calls, files, syncs)
 - [ ] Message one device of someone else's
 - [x] Status icons, details on hover or tap: offline; ✓ with storage and
       relay struck through until each has it; ✓✓ on their device (* not

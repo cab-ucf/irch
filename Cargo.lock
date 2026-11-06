@@ -4298,8 +4298,8 @@ dependencies = [
 
 [[package]]
 name = "irpush"
-version = "0.1.7"
-source = "git+https://github.com/cab-ucf/irpush?rev=0fec168#0fec168f9a13ac254be6c0d3346bb63f7632abac"
+version = "0.1.8"
+source = "git+https://github.com/cab-ucf/irpush?rev=08502e9#08502e963032156fe6621b9dcf05b5687683646b"
 dependencies = [
  "anyhow",
  "chacha20poly1305 0.10.1",

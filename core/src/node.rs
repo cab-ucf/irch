@@ -636,6 +636,12 @@ pub struct Node {
     route: Mutex<crate::voice::Route>,
     // Direct links to devices, closed once quiet (`QUIET_LINK`).
     links: Links,
+    // Ops sent as events (`push::event`), each awaiting its ack (live?),
+    // and how many left that way and how many were dialed after all.
+    waits: Mutex<HashMap<(Id, u64, EndpointId), bool>>,
+    evs: (AtomicUsize, AtomicUsize),
+    // Our events address, as last told (`tell_push`).
+    told_lane: Mutex<Option<String>>,
     // Our device joined to each of our push servers, this run.
     widened: AtomicBool,
     // Which of `order`'s relays we hold (`roam`).
@@ -1075,6 +1081,9 @@ impl Node {
             roamed: AtomicUsize::new(0),
             widened: AtomicBool::new(false),
             links: Links::default(),
+            waits: Mutex::default(),
+            evs: Default::default(),
+            told_lane: Mutex::default(),
             this: OnceLock::new(),
             kept: Mutex::default(),
             #[cfg(feature = "voice")]
@@ -1161,6 +1170,9 @@ impl Node {
             }
             n.reconcile().await;
         }
+        // Spaces open: each told our events address once it is up.
+        let heard = crate::push::hear(&n.dir, &n.net);
+        tokio::spawn(hear(Arc::downgrade(&n), heard));
         tokio::spawn(heartbeat(Arc::downgrade(&n)));
         crate::usage::note(&n.dir, "up", serde_json::json!({}));
         Ok(n)
@@ -1599,7 +1611,9 @@ impl Node {
     /// Our push, as this space's members should have it: a doorbell's
     /// code made for the space and its epoch, retired by the next rekey.
     async fn tell_push(self: &Arc<Self>, id: &Id) -> Result<()> {
-        let Some(url) = lock(&self.prefs).push.clone() else { return Ok(()) };
+        let lane = crate::push::lane_at(&self.dir);
+        let push = lock(&self.prefs).push.clone();
+        let Some(url) = push.clone().or(lane.clone()) else { return Ok(()) };
         let sp = self.get(id)?;
         let Some(inv) = &sp.inv else { return Ok(()) };
         let t = tag(&lock(&sp.book).key(inv).0);
@@ -1619,6 +1633,13 @@ impl Node {
             codes.collect::<Vec<_>>().join(" ")
         } else {
             url
+        };
+        // Our events address too, beside rings (not a UnifiedPush URL's).
+        let url = match (push, lane) {
+            (Some(_), Some(l)) if url.starts_with("irch:ring:") => {
+                format!("{url} {l}")
+            }
+            _ => url,
         };
         let (me, dev) = (self.id(), self.ep.id());
         let has = self.view(id, |s| s.push(&me, &dev).map(str::to_string));
@@ -1652,9 +1673,8 @@ impl Node {
         {
             // Each of a phone's routes at once (its doorbell, push servers):
             // the first through rings it.
-            for url in
-                url.split_whitespace().filter(|_| url.starts_with("irch:ring:"))
-            {
+            let rings = url.split_whitespace();
+            for url in rings.filter(|t| t.starts_with("irch:ring:")) {
                 let (n, news, url) =
                     (Arc::downgrade(self), news.clone(), url.to_string());
                 tokio::spawn(async move {
@@ -1674,7 +1694,7 @@ impl Node {
                     }
                 });
             }
-            if url.starts_with("irch:ring:") {
+            if url.starts_with("irch:ring:") || url.starts_with("irch:ev:") {
                 continue;
             }
             let wait = {
@@ -2885,6 +2905,96 @@ impl Node {
     /// `raw`, for space `id`, to each of `to`: one stream each, over links
     /// kept while in use.
     fn dial(&self, id: Id, raw: &[u8], to: Vec<EndpointId>) {
+        let to = self.event(id, raw, to);
+        self.link(id, raw, to);
+    }
+
+    /// `raw` as one irpush event to each of `to` we can reach so; the rest.
+    /// Unacked in 3 s, dialed after all.
+    fn event(
+        &self,
+        id: Id,
+        raw: &[u8],
+        to: Vec<EndpointId>,
+    ) -> Vec<EndpointId> {
+        let Some(e) = postcard::from_bytes::<Env>(raw).ok() else { return to };
+        let at = self.lanes(&id);
+        let ev = [&[0u8][..], &id.0, raw].concat();
+        let (dir, this) = (&self.dir, self.this.get().cloned());
+        let gone = |d: &EndpointId| {
+            let Some((i, r)) = at.get(d) else { return false };
+            crate::push::event(dir, *i, r, &ev)
+        };
+        let (sent, rest): (Vec<_>, Vec<_>) = to.into_iter().partition(gone);
+        self.evs.0.fetch_add(sent.len(), Relaxed);
+        for d in sent {
+            lock(&self.waits).insert((id, e.ts, d), e.live);
+            let (n, raw) = (this.clone().unwrap_or_default(), raw.to_vec());
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                let Some(n) = n.upgrade() else { return };
+                if lock(&n.waits).remove(&(id, e.ts, d)).is_some() {
+                    n.evs.1.fetch_add(1, Relaxed);
+                    n.link(id, &raw, vec![d]);
+                }
+            });
+        }
+        rest
+    }
+
+    /// On another relay (or first on one): members told where.
+    async fn tell_lane(self: &Arc<Self>) {
+        let lane = crate::push::lane_at(&self.dir);
+        if lane.is_some() && *lock(&self.told_lane) != lane {
+            *lock(&self.told_lane) = lane;
+            for sp in self.all() {
+                let _ = self.tell_push(&sp.id).await;
+            }
+        }
+    }
+
+    /// Ops sent as events, and how many of those were dialed after all.
+    pub fn events(&self) -> (usize, usize) {
+        (self.evs.0.load(Relaxed), self.evs.1.load(Relaxed))
+    }
+
+    /// Each device of space `id` that told its events address.
+    fn lanes(&self, id: &Id) -> HashMap<EndpointId, (EndpointId, String)> {
+        let p = self.view(id, |s| s.pushes_of(None)).unwrap_or_default();
+        let at =
+            |(d, u): (EndpointId, String)| Some((d, crate::push::lane_of(&u)?));
+        p.into_iter().filter_map(at).collect()
+    }
+
+    /// An event: an op (taken as if dialed; acked the same way), or an ack.
+    fn heard(self: &Arc<Self>, from: EndpointId, b: &[u8]) {
+        let Some((k, b)) = b.split_first() else { return };
+        let Some((id, rest)) = b.split_first_chunk::<32>() else { return };
+        let (id, Ok(sp)) = (Id(*id), self.get(&Id(*id))) else { return };
+        let lanes = self.lanes(&id);
+        let Some((d, (_, at))) = lanes.into_iter().find(|l| l.1.0 == from)
+        else {
+            return;
+        };
+        match k {
+            0 => {
+                let Some(e) = self.take(&sp, d, rest) else { return };
+                let ack = [&[1u8][..], &id.0, &e.ts.to_le_bytes()].concat();
+                crate::push::event(&self.dir, from, &at, &ack);
+            }
+            _ => {
+                let Ok(ts) = rest.try_into().map(u64::from_le_bytes) else {
+                    return;
+                };
+                if lock(&self.waits).remove(&(id, ts, d)) == Some(false) {
+                    self.acked(id, d, ts);
+                }
+            }
+        }
+    }
+
+    /// Over a direct link, kept while in use.
+    fn link(&self, id: Id, raw: &[u8], to: Vec<EndpointId>) {
         let frame: Arc<[u8]> = [&id.0[..], raw].concat().into();
         for d in to {
             let (ep, links, f) =
@@ -2958,28 +3068,38 @@ impl Node {
             let b = sync::rest(&mut s, 32 + GOSSIP_MAX).await?;
             let Some((id, raw)) = b.split_first_chunk::<32>() else { continue };
             let Ok(sp) = self.get(&Id(*id)) else { continue };
-            let known = {
-                let b = lock(&sp.book);
-                b.st.owner_of(&from).is_some()
-                    || b.st.hosts().iter().any(|a| a.id == from)
-            };
-            if known || self.takes(&sp, &from) {
-                // Reached, directly: a neighbor (caught up with once).
-                self.neighbor(&sp, from);
-                self.signaled(&sp, raw, from);
-                // A kept op, acked (space, its time): its sender shows it
-                // here. Older irch never reads acks; it takes what it sent.
-                let kept =
-                    postcard::from_bytes::<Env>(raw).ok().filter(|e| !e.live);
-                if let (Some(e), Ok(mut a)) = (kept, c.open_uni().await) {
-                    let _ = a
-                        .write_all(&[&id[..], &e.ts.to_le_bytes()].concat())
-                        .await;
-                    let _ = a.finish();
-                }
+            // A kept op, acked (space, its time): its sender shows it here.
+            // Older irch never reads acks; it takes what it sent.
+            let kept = self.take(&sp, from, raw).filter(|e| !e.live);
+            if let (Some(e), Ok(mut a)) = (kept, c.open_uni().await) {
+                let _ =
+                    a.write_all(&[&id[..], &e.ts.to_le_bytes()].concat()).await;
+                let _ = a.finish();
             }
         }
         Ok(())
+    }
+
+    /// An op `from` a device of the space (or one it takes), as if
+    /// gossiped; its envelope, if taken.
+    fn take(
+        self: &Arc<Self>,
+        sp: &Arc<Space>,
+        from: EndpointId,
+        raw: &[u8],
+    ) -> Option<Env> {
+        let known = {
+            let b = lock(&sp.book);
+            b.st.owner_of(&from).is_some()
+                || b.st.hosts().iter().any(|a| a.id == from)
+        };
+        if !known && !self.takes(sp, &from) {
+            return None;
+        }
+        // Reached, directly: a neighbor (caught up with once).
+        self.neighbor(sp, from);
+        self.signaled(sp, raw, from);
+        postcard::from_bytes::<Env>(raw).ok()
     }
 
     /// Hand `text` to one of our own devices: one link straight to it (no
@@ -4540,6 +4660,26 @@ async fn quiet(links: Links, d: EndpointId, c: Connection) {
 }
 
 /// Acks a device sends back on a direct link we opened: `space ‖ ts`.
+async fn hear(
+    n: Weak<Node>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<crate::push::Heard>,
+) {
+    // Told as soon as it is on a relay; later moves, by the heartbeat.
+    for _ in 0..120 {
+        let Some(n) = n.upgrade() else { return };
+        if crate::push::lane_at(&n.dir).is_some() {
+            n.tell_lane().await;
+            break;
+        }
+        drop(n);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    while let Some((from, b)) = rx.recv().await {
+        let Some(n) = n.upgrade() else { return };
+        n.heard(from, &b);
+    }
+}
+
 async fn acks(c: Connection, n: Weak<Node>) {
     let d = c.remote_id();
     while let Ok(mut s) = c.accept_uni().await {
@@ -4720,6 +4860,7 @@ async fn heartbeat(n: Weak<Node>) {
         }
         last = now();
         n.roam(i).await;
+        n.tell_lane().await;
         // In a call is in use.
         if n.in_call().is_some() {
             n.active().await;
