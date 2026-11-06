@@ -96,6 +96,10 @@ there then; the node itself is an always-on device of yours (`--link`).
 - Contacts (the people icon by *Direct messages*): everyone from every
   space and DM, most messaged first, searchable. *My contact code* (or
   `:contact`) is a code or QR: whoever adds it can DM you, no space shared.
+- How far each of yours went: only here (no connection), only here
+  (nobody took it yet), ✓ left here, ✓☁ kept by a storage node, ✓✓ on
+  their device, ✓✓ lit once read; in a group, how many of how many.
+  Devices ack what is dialed to them; relays keep nothing, so ack nothing.
 - A deleted message can be undone for a few seconds (*Undo*, or `u`).
 - *Check connections* (Network use, `irch --doctor [who]`, and on its own
   in a call not getting through): our relay, and each of someone's

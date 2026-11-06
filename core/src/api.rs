@@ -247,20 +247,51 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
             let page =
                 |s: &crate::State| s.messages(&channel, before, limit.min(500));
             let held = n.undelivered(&space);
-            // A DM's: on the other's device yet?
+            // Ours, how far each went: on a storage node, on members'
+            // devices (acked or synced), read by them.
             let me = n.id();
-            let peer = n.view(&space, |s| s.peer(&me)).flatten();
-            let reach = peer.and_then(|p| n.reach(&space, &p));
-            let read =
-                peer.and_then(|p| n.view(&space, |s| s.read_by(&p, &channel)));
+            let others: Vec<Id> = n
+                .view(&space, |s| {
+                    let ms = s.members().into_iter();
+                    let ms = ms.filter(|m| {
+                        m.id != me && m.role != crate::Role::Banned
+                    });
+                    ms.map(|m| m.id).collect()
+                })
+                .unwrap_or_default();
+            let reach: Vec<u64> = others
+                .iter()
+                .map(|u| n.reach(&space, u).unwrap_or(0))
+                .collect();
+            let reads: Vec<u64> = others
+                .iter()
+                .map(|u| {
+                    n.view(&space, |s| s.read_by(u, &channel)).unwrap_or(0)
+                })
+                .collect();
+            let (kept, up) = (n.kept(&space), n.connected());
             let row = |m: crate::Message| {
                 let mut v = json!(m);
-                v["pending"] = held.contains(&m.id).into();
-                if m.author == me && peer.is_some() {
-                    let seen = read.is_some_and(|r| m.ts <= r);
-                    let got = reach.is_some_and(|r| m.ts <= r);
-                    v["delivered"] = (seen || got).into();
-                    v["read"] = seen.into();
+                let pending = held.contains(&m.id);
+                v["pending"] = pending.into();
+                if m.author == me {
+                    let read = reads.iter().filter(|r| m.ts <= **r).count();
+                    let both = reach.iter().zip(&reads);
+                    let got = both
+                        .filter(|(a, b)| m.ts <= **a || m.ts <= **b)
+                        .count();
+                    v["status"] = match () {
+                        _ if read > 0 => "read",
+                        _ if got > 0 => "delivered",
+                        _ if kept >= m.ts => "kept",
+                        _ if pending && !up => "offline",
+                        _ if pending => "waiting",
+                        _ => "sent",
+                    }
+                    .into();
+                    v["got"] = got.into();
+                    v["readers"] = read.into();
+                    v["of"] = others.len().into();
                 }
                 v
             };
