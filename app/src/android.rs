@@ -462,6 +462,31 @@ pub extern "system" fn Java_dev_irch_chat_Wake_ring<'l>(
     })
 }
 
+/// A UnifiedPush message: a sealed frame (ntfy.rs) its node takes, or
+/// shown with none; anything else (an older irch's ping), a catch-up.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_irch_chat_Wake_frame<'l>(
+    mut env: JNIEnv<'l>,
+    _: JClass<'l>,
+    ctx: JObject<'l>,
+    dir: JString<'l>,
+    data: JByteArray<'l>,
+) -> jstring {
+    let dir = text(&mut env, &dir).unwrap_or_default();
+    let dir = irch_core::profile(std::path::Path::new(&dir));
+    let b = env.convert_byte_array(&data).unwrap_or_default();
+    reply(env, ctx, async move {
+        if let Some(n) = crate::running() {
+            n.frame(&b);
+            return Ok(Shown::default());
+        }
+        Ok(match Node::opened(&dir, &b) {
+            Some(news) => shown(&dir, news),
+            None => Shown { catch: true, ..Shown::default() },
+        })
+    })
+}
+
 /// What a ring brings, to show now, and whether to catch up for it. With
 /// irch in use its node takes it; else no node starts (`Node::woken`).
 #[derive(serde::Serialize, Default)]

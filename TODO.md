@@ -48,11 +48,12 @@ See [PLAN.md](PLAN.md). irpush's own list: irpush's TODO.md.
 - [ ] Two DMs begun at once, both talked in before they meet: two rows
 - [x] Hand text to one of our own devices (Your devices › Send): one
       direct link, nothing stored or synced elsewhere; it must be awake
-- [x] Small ops as irpush events: one datagram on the relay socket, acked
-      back; dialed over QUIC when unacked in 3 s or on another relay
-- [x] Events on phones through Android's shared irpush node, when irch's
-      process runs it (irpush's `shared`, `tap`)
-- [ ] ...and when another irpush app owns it (its Binder broker)
+- [x] Small ops through ntfy: one sealed, constant-size POST to each
+      device's inbox, acked back; dialed over QUIC when unacked in 3 s
+- [x] Phones: a UnifiedPush message is the op itself, shown with no node
+- [ ] Measure idle packets: ntfy (desktop stream, phone's push app) against
+      irpush's relay socket
+- [ ] Rings through ntfy too; then irpush and the doorbell gone
 - [x] Read receipts batched: one per DM channel per 2 s, the latest
 - [ ] irch's iroh endpoint only while QUIC is needed (calls, files, syncs):
       iroh 1.4.1 keeps its home relay even with the relay map emptied, so

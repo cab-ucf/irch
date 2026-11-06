@@ -65,21 +65,25 @@ other iroh app on the phone. A push carries the sealed message or call
 itself, so it is shown at once, with no node started and no connection
 opened; the node starts only to answer.
 
-## Events: one datagram per change (agreed)
+## Events: one POST per change, through ntfy
 
-Every device holds one long-lived TLS/TCP socket to a relay through irpush
-(a storage node's host, a phone's device, a desktop's own lone host,
-pinged half-hourly), and is reachable on it by its irpush id. A small op
-(message, read, presence change, ring) goes to each device as one
-datagram on that socket, sealed and signed as ever; the receiver takes
-it as if dialed and acks it the same way. Unacked in 3 s, or on another
-relay, it is dialed over iroh (QUIC). Calls and files: iroh, direct
-UDP, at full speed. Each device's address (`irch:ev:ID@RELAY`) rides in
-its push op, beside its ring codes, told again when it moves relays.
+iroh keeps every endpoint probing (~69k packets a day idle) to stay
+findable, and irpush grew into a push server of its own to hide it. Both
+are networking irch should not own. Small ops now go through ntfy, a
+UnifiedPush server: one HTTPS POST per op to each device's inbox, sealed
+with the space's key as ops are (XChaCha20-Poly1305: symmetric, so no
+quantum computer opens it) and padded to 3072 B (`ntfy.rs`). A desktop's inbox is a topic it
+streams (marked `#ev`), reopened where it broke, so ntfy's 12 h cache
+fills any gap. A phone's is its UnifiedPush endpoint, sent posts and
+calls only (no keystroke wakes it), each the op itself, which its push
+app shows with no node started. Acks come back the same way; unacked in
+3 s, the op is dialed over iroh. ntfy sees a per-space tag, sizes that
+never vary, times and addresses; never who, which space or what.
 
-Next: phones on Android's shared irpush node send and hear events too
-(the library's JNI); then irch's iroh endpoint starts only when QUIC is
-needed, so an idle device holds the one socket and nothing else.
+The server is ntfy.sh on the default network, else DIR/ntfy-server or
+`IRCH_NTFY` (`services.ntfy-sh` on NixOS, keepalive as long as its
+users' NATs allow). Next: measure an idle desktop and phone; then iroh
+only while QUIC is needed, and irpush's rings gone if ntfy carries them.
 
 ## Waking and ringing
 
