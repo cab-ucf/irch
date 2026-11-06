@@ -194,3 +194,20 @@ user's storage nodes.
   default to `hostname-storage`, `--name` at install.
 - One DM per person in the list; calls and messages use the one both
   are in; empty duplicates the other never joined are left quietly.
+
+## From iroh's code and issues (Nov 2026, iroh 1.4.1 = main)
+
+- Fixed timers: client relay ping 15 s, net_report every 20–26 s, open
+  paths pinged every 5 s (path keepalive clamped at 5 s, idle at 15 s).
+  Open issues to make them configurable or quiet: #4590, #4589, #4651,
+  #4598; none merged. Either side's relay ping resets the other's timer,
+  so irpush's server patch alone does not quiet an iroh client: phones
+  idle on irpush's own client, which learns its keepalive.
+- Nothing in iroh wakes or pushes: irpush fills a real gap.
+- Taken now: direct links close 10 s after their last use (iroh-gossip
+  0.102 does the same); segmentation offload off on Android (#4647);
+  custom relays: a device is looked for on them (no DNS needed).
+- Later: iroh_util ConnectionPool if it replaces our pool; stream
+  affinity (#4654); iroh-blobs 0.104 toward 1.0; a self-hosted
+  iroh-dns-server for custom-relay networks if dialing on our relays is
+  not enough; iroh-live (calls) once past preview.

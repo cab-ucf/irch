@@ -1463,3 +1463,27 @@ async fn notes_to_self_reach_our_devices_only() {
     until("a2 has it", || texts(&a2, &own, &ch) == ["the wifi password"]).await;
     assert!(b.view(&own, |_| ()).is_none(), "not b's");
 }
+
+/// How far ours went: a storage node acks it (kept), a member's device
+/// acks it (delivered), each straight back on the link it came by.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_says_how_far_it_went() {
+    let s = start(&dir("s"), "s", None, true).await;
+    let (a, b) = (node("a").await, node("b").await);
+    let id = a.create("duo").await.unwrap();
+    let ch = general(&a, &id);
+    pair(&a, &s, &[id]).await;
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let knows =
+        || a.view(&id, |s| s.owner_of(&b.device()).is_some()) == Some(true);
+    until("a knows b's device", knows).await;
+    let m = say(&a, &id, ch, "how far?").await;
+    let ts = a.view(&id, |s| s.messages(&ch, None, 10)).unwrap();
+    let ts = ts.iter().find(|x| x.id == m).unwrap().ts;
+    until("b's device has it", || {
+        a.reach(&id, &b.id()).is_some_and(|r| r >= ts)
+    })
+    .await;
+    until("a storage node keeps it", || a.kept(&id) >= ts).await;
+    assert!(a.connected() || a.peers(&id) > 0);
+}

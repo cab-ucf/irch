@@ -1216,7 +1216,7 @@ function renderMessages(keepScroll) {
     const authorAdmin = memberOf(m.author)?.role === "Admin";
     const sig = JSON.stringify([m.text, m.edited, m.name,
       m.reactions, m.quote, m.thread, m.pinned, cont, mentioned, editing,
-      admin, authorAdmin, m.pending, m.delivered, m.read,
+      admin, authorAdmin, m.pending, m.status, m.got, m.readers,
       m.preview]);
     items.push({ k: m.id, sig, make: () =>
       msgRow(m, { cont, mentioned, editing, authorAdmin }) });
@@ -1283,17 +1283,24 @@ function msgRow(m, { cont, mentioned, editing, authorAdmin }) {
   if (editing) row.append(editBox(m));
   const body = !editing && (m.text || m.edited) && content(m.text, m.edited);
   if (body) row.append(body);
-  if (m.pending) {
-    row.append(h("div", { class: "pending-note" },
-      "Only on this device: it goes out once someone is reachable"));
+  if (m.status === "offline" || m.status === "waiting") {
+    row.append(h("div", { class: "pending-note" }, m.status === "offline"
+      ? "Only on this device: no connection now"
+      : "Only on this device: no storage node or member has taken it yet"));
   } else if (isMe(m.author)) {
-    // As Signal: ✓ left this device; in a DM, ✓✓ on theirs, lit once read.
-    const [t, title] = m.read ? ["✓✓", "Read"]
-      : m.delivered ? ["✓✓", "Delivered"] : ["✓", "Sent"];
+    // How far it went: left here ✓, kept by a storage node ✓☁, on their
+    // device ✓✓, read (lit). Counts in a group.
+    const of = m.of > 1 ? ` (${m.status === "read" ? m.readers : m.got} of ` +
+      `${m.of})` : "";
+    const [t, title] = {
+      read: ["✓✓", "Read" + of],
+      delivered: ["✓✓", "On their device" + of],
+      kept: ["✓☁", "Kept by a storage node, not on theirs yet"],
+    }[m.status] ?? ["✓", "Left this device"];
     // At the end of the text's last line, as in Signal.
     const end = body?.lastElementChild?.tagName === "P"
       ? body.lastElementChild : body || row;
-    end.append(h("span", { class: "ticks" + (m.read ? " read" : ""),
+    end.append(h("span", { class: "ticks" + (m.status === "read" ? " read" : ""),
       title, "aria-label": title }, t));
   }
   if (m.files.length) row.append(attachments(m.files));

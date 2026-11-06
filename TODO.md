@@ -38,8 +38,12 @@ See [PLAN.md](PLAN.md). irpush's own list: irpush's TODO.md.
       (who wrote, storage nodes, devices met, our own); a sync is how a
       device is first met; presence and peers from direct links
 - [ ] Measure on real devices (Network use), 0.1.13 against 0.1.12
-- [ ] Custom relays (`--relay`) have no DNS to find a device by id: give
-      them an address book (or keep gossip there)
+- [x] Custom relays (`--relay`): a device is looked for on them (no DNS)
+- [x] Each message says how far it went (acks on direct links, syncs with
+      storage nodes, Read ops); counts in groups
+- [ ] Patch iroh's client relay ping (15 s) and periodic net_report until
+      iroh #4589/#4590/#4651 land (desktops; phones idle on irpush)
+- [ ] Watch iroh #4665: a pooled link pinned to a stale path
 - [ ] Gossip's code gone if no space ever needs it (over 64 devices)
 - [ ] Two DMs begun at once, both talked in before they meet: two rows
 - [x] Hand text to one of our own devices (Your devices › Send): one

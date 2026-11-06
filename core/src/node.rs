@@ -77,7 +77,7 @@ const BLOB: &[u8] = b"irch/blob/1";
 /// Ops dialed straight to a space's devices: `space ‖ sealed op` a stream.
 const DIRECT: &[u8] = b"irch/op/1";
 /// A direct link quiet this long is closed: open links are pinged every 5 s.
-const QUIET_LINK: Duration = Duration::from_secs(30);
+const QUIET_LINK: Duration = Duration::from_secs(10);
 /// Spaces up to this many devices are told directly; bigger, by gossip.
 const FANOUT: usize = 64;
 
@@ -620,6 +620,10 @@ pub struct Node {
     served: crate::push::Served,
     /// Asked a storage node for its relay this run.
     relayed: AtomicBool,
+    // Ourselves, for tasks that outlive a call (acks on direct links).
+    this: OnceLock<Weak<Node>>,
+    // Per space, up to when one of its storage nodes has our ops.
+    kept: Mutex<HashMap<Id, u64>>,
     // Where calls are heard.
     #[cfg(feature = "voice")]
     route: Mutex<crate::voice::Route>,
@@ -856,12 +860,14 @@ pub(crate) fn endpoint(
     // BBRv3, as loss is the norm: at 0.1% and 50 ms Cubic moves 1.1 MB/s a
     // stream, BBRv3 23; a 2 MiB window, 16 MB/s at 130 ms (default: 10).
     let cc = noq_proto::congestion::Bbr3Config::default();
-    let b = b.transport_config(
-        iroh::endpoint::QuicTransportConfig::builder()
-            .stream_receive_window((2u32 << 20).into())
-            .congestion_controller_factory(Arc::new(cc))
-            .build(),
-    );
+    let q = iroh::endpoint::QuicTransportConfig::builder()
+        .stream_receive_window((2u32 << 20).into())
+        .congestion_controller_factory(Arc::new(cc));
+    // Android on a cellular network loses the direct path to a bulk send
+    // with segmentation offload on (iroh #4647).
+    #[cfg(target_os = "android")]
+    let q = q.enable_segmentation_offload(false);
+    let b = b.transport_config(q.build());
     let mut probes = iroh::endpoint::NetReportConfig::default();
     probes.captive_portal_check = false;
     let b = b.net_report_config(probes);
@@ -1062,6 +1068,8 @@ impl Node {
             roamed: AtomicUsize::new(0),
             widened: AtomicBool::new(false),
             links: Links::default(),
+            this: OnceLock::new(),
+            kept: Mutex::default(),
             #[cfg(feature = "voice")]
             route: Mutex::default(),
             own: own_inv.id(),
@@ -1103,6 +1111,7 @@ impl Node {
             call: Mutex::new(None),
             media: broadcast::channel(128).0,
         });
+        let _ = n.this.set(Arc::downgrade(&n));
         let gate = Some(gate(Arc::downgrade(&n)));
         let mut router = Router::builder(n.ep.clone())
             .accept(iroh_blobs::ALPN, BlobsProtocol::new(&n.files, gate))
@@ -1932,6 +1941,16 @@ impl Node {
         self.emit(Event::Changed { space: *id });
     }
 
+    /// Our own relays (`--relay`): no DNS to find a device by id, so each
+    /// is looked for on them, where it homes as we do.
+    fn findable(&self, ids: &[EndpointId]) {
+        let Net::Relay(urls) = &self.net else { return };
+        for id in ids {
+            let at = urls.iter().cloned().map(iroh::TransportAddr::Relay);
+            self.lookup.add_endpoint_info(EndpointAddr::from_parts(*id, at));
+        }
+    }
+
     fn bootstrap(&self, sp: &Space) -> Vec<EndpointId> {
         let b = lock(&sp.book);
         let hosts = b.st.hosts();
@@ -1943,6 +1962,7 @@ impl Node {
         let me = self.ep.id();
         let mut seen = HashSet::new();
         v.retain(|p| *p != me && seen.insert(*p));
+        self.findable(&v);
         v
     }
 
@@ -2840,6 +2860,7 @@ impl Node {
         if to.len() > FANOUT && sp.tx().is_some() {
             return;
         }
+        self.findable(&to);
         self.dial(sp.id, raw, to);
     }
 
@@ -2850,6 +2871,7 @@ impl Node {
         for d in to {
             let (ep, links, f) =
                 (self.ep.clone(), self.links.clone(), frame.clone());
+            let this = self.this.get().cloned().unwrap_or_default();
             tokio::spawn(async move {
                 let held = lock(&links).get(&d).map(|l| l.0.clone());
                 let c = match held.filter(|c| c.close_reason().is_none()) {
@@ -2862,6 +2884,10 @@ impl Node {
                         else {
                             return;
                         };
+                        // Its acks, while the link lasts (`told`); closed
+                        // once quiet.
+                        tokio::spawn(acks(c.clone(), this));
+                        tokio::spawn(quiet(links.clone(), d, c.clone()));
                         c
                     }
                 };
@@ -2874,15 +2900,36 @@ impl Node {
         }
     }
 
-    /// Links quiet past `QUIET_LINK`: closed (each costs a ping every 5 s).
-    fn quiet_links(&self) {
-        lock(&self.links).retain(|_, (c, at)| {
-            let keep = at.elapsed() < QUIET_LINK && c.close_reason().is_none();
-            if !keep {
-                c.close(0u32.into(), b"quiet");
+    /// `d` has our ops in `space` up to `ts`: a storage node keeps them,
+    /// or a member's device has them.
+    fn acked(&self, space: Id, d: EndpointId, ts: u64) {
+        let Ok(sp) = self.get(&space) else { return };
+        let host = lock(&sp.book).st.hosts().iter().any(|a| a.id == d)
+            || self.stores(&space).iter().any(|s| s.0.id == d);
+        match host {
+            true => {
+                let mut k = lock(&self.kept);
+                let at = k.entry(space).or_default();
+                *at = (*at).max(ts);
             }
-            keep
-        });
+            false => self.reach_device(&space, &d, ts),
+        }
+        lock(&sp.undelivered).clear();
+        self.emit(Event::Changed { space });
+    }
+
+    /// Up to when a storage node of `space` has our ops.
+    pub fn kept(&self, space: &Id) -> u64 {
+        lock(&self.kept).get(space).copied().unwrap_or(0)
+    }
+
+    /// Whether anything can leave this device now: a relay holds us, or a
+    /// device of some space is reached.
+    pub fn connected(&self) -> bool {
+        use iroh::Watcher as _;
+        let relay = self.ep.home_relay_status().get();
+        relay.iter().any(|s| s.is_connected())
+            || self.all().iter().any(|s| !s.nbrs().is_empty())
     }
 
     /// Ops a space's device dialed straight to us: taken as if gossiped,
@@ -2902,6 +2949,16 @@ impl Node {
                 // Reached, directly: a neighbor (caught up with once).
                 self.neighbor(&sp, from);
                 self.signaled(&sp, raw, from);
+                // A kept op, acked (space, its time): its sender shows it
+                // here. Older irch never reads acks; it takes what it sent.
+                let kept =
+                    postcard::from_bytes::<Env>(raw).ok().filter(|e| !e.live);
+                if let (Some(e), Ok(mut a)) = (kept, c.open_uni().await) {
+                    let _ = a
+                        .write_all(&[&id[..], &e.ts.to_le_bytes()].concat())
+                        .await;
+                    let _ = a.finish();
+                }
             }
         }
         Ok(())
@@ -3852,6 +3909,12 @@ impl Node {
     /// A sync with `peer` went through: what we wrote reached someone.
     pub(crate) fn reached(self: &Arc<Self>, sp: &Arc<Space>, peer: EndpointId) {
         lock(&self.synced).insert(peer, now());
+        // A storage node synced: it keeps all we have here.
+        let host = lock(&sp.book).st.hosts().iter().any(|a| a.id == peer)
+            || self.stores(&sp.id).iter().any(|s| s.0.id == peer);
+        if host {
+            lock(&self.kept).insert(sp.id, now());
+        }
         // No gossip (a small space): a sync is how a device is first met.
         if sp.tx().is_none() {
             self.neighbor(sp, peer);
@@ -4398,6 +4461,39 @@ impl Node {
 
 /// One gossip subscription per space, renewed if it ever closes.
 /// The topic is the room: a rekey moves it, leaving whoever it cut off.
+/// A direct link, closed `QUIET_LINK` after its last use (an open one is
+/// pinged every 5 s).
+async fn quiet(links: Links, d: EndpointId, c: Connection) {
+    loop {
+        let ours = |l: &(Connection, Instant)| l.0.stable_id() == c.stable_id();
+        let used = lock(&links).get(&d).filter(|l| ours(l)).map(|l| l.1);
+        let Some(used) = used.filter(|_| c.close_reason().is_none()) else {
+            return c.close(0u32.into(), b"replaced");
+        };
+        let left = QUIET_LINK.saturating_sub(used.elapsed());
+        if left.is_zero() {
+            lock(&links).remove(&d);
+            return c.close(0u32.into(), b"quiet");
+        }
+        tokio::time::sleep(left).await;
+    }
+}
+
+/// Acks a device sends back on a direct link we opened: `space ‖ ts`.
+async fn acks(c: Connection, n: Weak<Node>) {
+    let d = c.remote_id();
+    while let Ok(mut s) = c.accept_uni().await {
+        let Ok(b) = sync::rest(&mut s, 40).await else { continue };
+        let (Some((id, ts)), Some(n)) =
+            (b.split_first_chunk::<32>(), n.upgrade())
+        else {
+            continue;
+        };
+        let Ok(ts) = <[u8; 8]>::try_from(ts) else { continue };
+        n.acked(Id(*id), d, u64::from_le_bytes(ts));
+    }
+}
+
 async fn pump(n: Arc<Node>, sp: Weak<Space>, boot: Vec<EndpointId>) {
     loop {
         // Up to `FANOUT` devices, a space is told directly (`tell`): no
@@ -4564,7 +4660,6 @@ async fn heartbeat(n: Weak<Node>) {
         }
         last = now();
         n.roam(i).await;
-        n.quiet_links();
         // In a call is in use.
         if n.in_call().is_some() {
             n.active().await;
@@ -4675,6 +4770,65 @@ mod tests {
         tokio::spawn(async move { a.accept().await?.await.ok() });
         let c = tokio::time::timeout(secs, b.connect(to, b"t")).await;
         assert!(c.expect("in time").is_ok(), "b reached a");
+    }
+
+    /// Our own relays (`--relay`), no DNS, no address given: a member is
+    /// found on them, and a post and a call's ring reach it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn our_own_relays_find_each_device() {
+        let (_r, url) = relay().await;
+        let net = Net::Relay(vec![url.parse().unwrap()]);
+        let start = async |name: &str| {
+            let dir = std::env::temp_dir()
+                .join(format!("irch-own-relay-{name}-{}", now()));
+            let cfg = Config {
+                dir,
+                name: name.into(),
+                net: net.clone(),
+                link: None,
+                serve: false,
+                notes: None,
+                big: None,
+            };
+            Node::start(cfg).await.unwrap()
+        };
+        let (a, b) = (start("a").await, start("b").await);
+        let id = a.create("duo").await.unwrap();
+        let ch = a.view(&id, |s| s.channels()[0].0).unwrap();
+        b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+        let until = async |f: &dyn Fn() -> bool| {
+            for _ in 0..400 {
+                if f() {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            false
+        };
+        let knows =
+            || a.view(&id, |s| s.owner_of(&b.device()).is_some()) == Some(true);
+        assert!(until(&knows).await, "a knows b's device");
+        // c comes through a alone, and has never reached b.
+        let c = start("c").await;
+        c.join(&a.invite(&id).await.unwrap()).await.unwrap();
+        let c_knows =
+            || c.view(&id, |s| s.owner_of(&b.device()).is_some()) == Some(true);
+        assert!(until(&c_knows).await, "c knows b's device");
+        let post = Op::Post {
+            channel: ch,
+            text: "found you".into(),
+            reply: None,
+            files: vec![],
+        };
+        c.publish(&id, post).await.unwrap();
+        let got = || {
+            let m =
+                b.view(&id, |s| s.messages(&ch, None, 10)).unwrap_or_default();
+            m.iter().any(|m| m.text == "found you")
+        };
+        assert!(until(&got).await, "b has it, from c");
+        c.call(Some((id, ch))).await.unwrap();
+        assert!(until(&|| !b.calls(&id).is_empty()).await, "b hears the call");
     }
 
     fn book(name: &str, owner: Id) -> (Book, PathBuf) {
