@@ -307,6 +307,9 @@ pub fn hear(
 ) -> tokio::sync::mpsc::UnboundedReceiver<Heard> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     lock(&EARS).insert(dir.into(), tx);
+    // Android's shared node, when it runs in our process.
+    let on = ear(dir);
+    irpush::tap(irpush::app(EV), move |from, d| on(from, irpush::app(EV), d));
     let phone = cfg!(any(target_os = "android", target_os = "ios"));
     if !phone && lane(dir).is_none() {
         let _ = lone(dir, net).inspect_err(|e| tracing::warn!("lane: {e:#}"));
@@ -332,9 +335,10 @@ fn lone(dir: &Path, net: &Net) -> Result<()> {
     Ok(())
 }
 
-/// The irpush node that carries our events, if any.
+/// The irpush node that carries our events, if any: ours, or the phone's
+/// shared one when it runs in our process.
 pub fn lane(dir: &Path) -> Option<Arc<irpush::Node>> {
-    lock(&LANES).get(dir).cloned()
+    lock(&LANES).get(dir).cloned().or_else(irpush::shared)
 }
 
 /// Ours, as members get it (`irch:ev:ID@RELAY`), while on a relay.
