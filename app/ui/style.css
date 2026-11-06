@@ -868,6 +868,7 @@ table.keys kbd {
 .member.on { color: var(--text); }
 .member.off { opacity: 0.4; }
 .member.off:hover { opacity: 1; }
+.member small { color: var(--dim); font-size: 11px; }
 .member.banned .name { text-decoration: line-through; }
 .member .name {
   flex: 1;
@@ -1470,10 +1471,12 @@ video.scan {
   outline: 2px solid var(--brand);
   outline-offset: -2px;
 }
-.pending-note { color: var(--dim); font-size: 12px; font-style: italic; }
-.ticks { margin-left: 6px; color: var(--dim); font-size: 11px;
-  letter-spacing: -2px; white-space: nowrap; }
+.ticks { margin-left: 6px; color: var(--dim); white-space: nowrap;
+  cursor: help; display: inline-flex; gap: 2px; vertical-align: -2px; }
+.ticks svg { width: 13px; height: 13px; }
+.ticks b { font-size: 11px; line-height: 1; }
 .ticks.read { color: var(--cyan); }
+.ticks.offline { color: var(--red, #c44); }
 .url {
   font-family: var(--mono, monospace);
   word-break: break-all;

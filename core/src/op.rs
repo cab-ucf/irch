@@ -68,6 +68,9 @@ pub enum Op {
     // A call to us in `channel`, declined (live): its caller hangs up,
     // our other devices stop ringing.
     Declined { channel: Ch },
+    // Open but untouched 10 min (live): reachable, inactive. `Here` again
+    // at the next touch; `Gone` on quitting.
+    Idle,
 }
 
 /// A link's preview, made by its sender.
@@ -139,6 +142,7 @@ impl Op {
                 | Op::Ringing { .. }
                 | Op::Got { .. }
                 | Op::Declined { .. }
+                | Op::Idle
         )
     }
 }

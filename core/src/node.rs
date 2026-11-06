@@ -46,10 +46,13 @@ const ALONE: Duration = Duration::from_secs(64);
 const QUIET: Duration = Duration::from_secs(365 * 86400);
 /// Spaces up to this many ring for a call in any channel.
 const RINGS: usize = 10;
-/// No input this long: away (`Gone`, once). Others drop a device unheard
-/// from twice as long (its battery died), and a device in use says `Here`
-/// again at most this often.
+/// No input this long: idle (`Idle`, once), still reachable.
 pub const AWAY: Duration = Duration::from_secs(600);
+/// In use, `Here` again at most this often; unheard twice as long (and a
+/// bit), a device is taken for gone: its battery died, say. Idle, it says
+/// nothing more, so it stands six hours.
+const ALIVE: Duration = Duration::from_secs(1800);
+const DEAD_IDLE: Duration = Duration::from_secs(6 * 3600);
 // Typing, said again this often while it lasts; heard, it lasts 60 s.
 const TYPING: Duration = Duration::from_secs(50);
 // A callee says once that it rings; its caller hears ringback this long.
@@ -261,6 +264,10 @@ pub struct Space {
     // Per member, our ops up to this time are on one of their devices:
     // they synced, gossiped, or a doorbell took them.
     reach: Mutex<HashMap<Id, u64>>,
+    // The same per device: is it on the one its user used last?
+    reach_dev: Mutex<HashMap<EndpointId, u64>>,
+    // Devices open but untouched (`Idle`).
+    idle: Mutex<HashSet<(Id, EndpointId)>>,
     // Members whose device says our call is ringing there, and when.
     ringing: Mutex<HashMap<(Id, Ch), Instant>>,
     task: OnceLock<AbortOnDropHandle<()>>,
@@ -1893,6 +1900,8 @@ impl Node {
             moved: Arc::default(),
             undelivered: Mutex::default(),
             reach: Mutex::default(),
+            reach_dev: Mutex::default(),
+            idle: Mutex::default(),
             ringing: Mutex::default(),
             task: OnceLock::new(),
         });
@@ -2566,9 +2575,18 @@ impl Node {
     pub async fn active(&self) {
         *lock(&self.input) = Instant::now();
         let back = self.away.swap(false, Relaxed);
-        if back || lock(&self.said).elapsed() > AWAY {
+        if back || lock(&self.said).elapsed() > ALIVE {
             for sp in self.all() {
                 self.here(&sp).await;
+            }
+        }
+    }
+
+    /// Untouched a while: idle, once, still reachable.
+    pub async fn rest(&self) {
+        if !self.away.swap(true, Relaxed) {
+            for sp in self.all() {
+                self.signal(&sp, Op::Idle).await;
             }
         }
     }
@@ -3932,6 +3950,11 @@ impl Node {
     /// A device of someone's has our ops here up to `ts`.
     fn reach_device(&self, id: &Id, d: &EndpointId, ts: u64) {
         let Ok(sp) = self.get(id) else { return };
+        let at = *lock(&sp.reach_dev)
+            .entry(*d)
+            .and_modify(|t| *t = (*t).max(ts))
+            .or_insert(ts);
+        let _ = at;
         let proven = lock(&self.verified).get(d).map(|v| v.0);
         let Some(u) = proven.or_else(|| lock(&sp.book).st.owner_of(d)) else {
             return;
@@ -3943,6 +3966,32 @@ impl Node {
             drop(r);
             self.emit(Event::Changed { space: *id });
         }
+    }
+
+    /// The device `user` was last heard from here (presence, else what it
+    /// wrote last), and up to when it has our ops.
+    pub fn active_reach(&self, id: &Id, user: &Id) -> u64 {
+        let Ok(sp) = self.get(id) else { return 0 };
+        let heard = lock(&sp.seen);
+        let last =
+            heard.iter().filter(|(k, _)| k.0 == *user).max_by_key(|(_, s)| s.1);
+        let d = last.map(|(k, _)| k.1).or_else(|| {
+            lock(&sp.book).st.devices_of(user).first().map(|x| x.0)
+        });
+        drop(heard);
+        d.and_then(|d| lock(&sp.reach_dev).get(&d).copied()).unwrap_or(0)
+    }
+
+    /// Members open but untouched a while: reachable, inactive.
+    pub fn idle(&self, id: &Id) -> HashSet<Id> {
+        let Ok(sp) = self.get(id) else { return HashSet::new() };
+        let idle = lock(&sp.idle);
+        let seen = lock(&sp.seen);
+        // Idle only if every device of theirs here is.
+        let on = |u: &Id| {
+            seen.iter().any(|(k, s)| k.0 == *u && s.0 && !idle.contains(k))
+        };
+        idle.iter().map(|k| k.0).filter(|u| !on(u)).collect()
     }
 
     /// Up to when `user`'s devices have our ops here.
@@ -4147,6 +4196,17 @@ impl Node {
         // says so again, after).
         if matches!(s.op, Op::Gone | Op::Here) {
             self.said(sp, (s.author, s.device, s.ts), None, true);
+        }
+        // Idle, or back: one op each way (anything else said is a touch).
+        let was = {
+            let mut idle = lock(&sp.idle);
+            match s.op {
+                Op::Idle => !idle.insert((s.author, s.device)),
+                _ => idle.remove(&(s.author, s.device)),
+            }
+        };
+        if was != (s.op == Op::Idle) {
+            self.emit(Event::Presence { space: sp.id });
         }
         if s.op == Op::Gone && sp.tx().is_none() && lock(&sp.nbrs).remove(&from)
         {
@@ -4664,15 +4724,19 @@ async fn heartbeat(n: Weak<Node>) {
         if n.in_call().is_some() {
             n.active().await;
         }
-        if lock(&n.input).elapsed() > AWAY && !n.away.swap(true, Relaxed) {
-            for sp in n.all() {
-                n.signal(&sp, Op::Gone).await;
-            }
+        // Untouched a while: idle, still reachable (`Gone` is for quitting).
+        if lock(&n.input).elapsed() > AWAY {
+            n.rest().await;
         }
         for sp in n.all() {
+            let idle = lock(&sp.idle).clone();
+            let quiet = |k: &(Id, EndpointId)| match idle.contains(k) {
+                true => DEAD_IDLE,
+                false => 2 * ALIVE + Duration::from_secs(300),
+            };
             let dead: Vec<_> = lock(&sp.seen)
                 .iter_mut()
-                .filter(|s| s.1.0 && s.1.2.elapsed() > 2 * AWAY)
+                .filter(|s| s.1.0 && s.1.2.elapsed() > quiet(s.0))
                 .map(|((u, d), s)| {
                     s.0 = false;
                     (*u, *d, s.1 + 1)

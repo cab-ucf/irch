@@ -49,6 +49,11 @@ See [PLAN.md](PLAN.md). irpush's own list: irpush's TODO.md.
 - [x] Hand text to one of our own devices (Your devices › Send): one
       direct link, nothing stored or synced elsewhere; it must be awake
 - [ ] Message one device of someone else's
+- [x] Status icons, details on hover or tap: offline; ✓ with storage and
+      relay struck through until each has it; ✓✓ on their device (* not
+      yet on the one they used last); ✓✓ lit, read
+- [x] Idle after 10 min untouched (one `Idle` op, still reachable,
+      "inactive" in members), back on the next touch
 - [x] Note to self: our own space as a DM, on all our devices and kept
       by our storage nodes (posts, edits, reactions, pins, files)
 

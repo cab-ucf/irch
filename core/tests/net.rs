@@ -1487,3 +1487,19 @@ async fn a_message_says_how_far_it_went() {
     until("a storage node keeps it", || a.kept(&id) >= ts).await;
     assert!(a.connected() || a.peers(&id) > 0);
 }
+
+/// Untouched, a device says so once; touched, it is back.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_untouched_device_goes_idle() {
+    let (a, b) = (node("a").await, node("b").await);
+    let id = a.create("hub").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    until("met", || a.peers(&id) > 0 && b.peers(&id) > 0).await;
+    let ch = general(&b, &id);
+    say(&b, &id, ch, "hi").await;
+    until("a hears b", || texts(&a, &id, &ch).len() == 1).await;
+    b.rest().await;
+    until("idle", || a.idle(&id).contains(&b.id())).await;
+    b.active().await;
+    until("back", || !a.idle(&id).contains(&b.id())).await;
+}
