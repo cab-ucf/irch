@@ -96,6 +96,7 @@ const ICONS = {
   camOff: "M3 7h12v10H3zM15 10.5 21 7v10l-6-3.5M3 3l18 18",
   screen: "M3 4h18v12H3zM8 20h8M12 16v4",
   speaker: "M4 9h4l5-4v14l-5-4H4zM16 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12",
+  headset: "M4 15v-3a8 8 0 0 1 16 0v3M4 15h3v5H4zM17 15h3v5h-3z",
   play: "M8 5v14l11-7z",
   thread: "M5 4v9a4 4 0 0 0 4 4h10M15 13l4 4-4 4",
   note: "M6 3h12v18l-6-4-6 4zM9 8h6M9 11h4",
@@ -1095,6 +1096,32 @@ const mute = () => {
 const control = (ic, title, onclick, cls = "") =>
   h("button", { title, onclick, class: cls }, icon(ic));
 
+/** Where the call is heard: Standard (the earpiece on a phone), Speaker,
+ * Bluetooth; each press, the next this device has. Our own voice only. */
+const ROUTES = { standard: ["ring", "Standard"], speaker: ["speaker",
+  "Speakerphone"], bluetooth: ["headset", "Bluetooth"] };
+function routeControl() {
+  if (!av.call.native) return null;
+  // Asked once a call (a headset may have come or gone since).
+  if (S.route?.since !== av.call.since) {
+    const since = av.call.since;
+    S.route = { on: "standard", all: ["standard"], since };
+    rpc("route", { to: null }).then((r) => {
+      S.route = { ...r, since };
+      renderCall();
+    }, () => {});
+  }
+  const { on, all } = S.route;
+  const [ic, name] = ROUTES[on] ?? ROUTES.standard;
+  return all.length > 1 && control(ic, `${name} (press for the next)`,
+    async () => {
+      const to = all[(all.indexOf(on) + 1) % all.length];
+      const r = await rpc("route", { to }).catch(() => null);
+      if (r) S.route = { ...r, since: S.route.since };
+      renderCall();
+    }, on === "standard" ? "" : "on");
+}
+
 function tile(id) {
   const me = isMe(id);
   const p = av.call.peers.get(id);
@@ -1133,6 +1160,7 @@ function renderCall() {
       h("div", { class: "controls" },
         control(c.mic ? "mic" : "micOff", c.mic ? "Mute" : "Unmute", mute,
           c.mic ? "" : "off"),
+        routeControl(),
         control(c.cam ? "cam" : "camOff", "Camera", () => camera("cam"),
           c.cam ? "on" : ""),
         av.canShare() && control("screen", "Share your screen",

@@ -620,6 +620,9 @@ pub struct Node {
     served: crate::push::Served,
     /// Asked a storage node for its relay this run.
     relayed: AtomicBool,
+    // Where calls are heard.
+    #[cfg(feature = "voice")]
+    route: Mutex<crate::voice::Route>,
     // Direct links to devices, closed once quiet (`QUIET_LINK`).
     links: Links,
     // Our device joined to each of our push servers, this run.
@@ -1059,6 +1062,8 @@ impl Node {
             roamed: AtomicUsize::new(0),
             widened: AtomicBool::new(false),
             links: Links::default(),
+            #[cfg(feature = "voice")]
+            route: Mutex::default(),
             own: own_inv.id(),
             me,
             dir: cfg.dir,
@@ -2608,22 +2613,44 @@ impl Node {
         tokio::spawn(self.clone().ring(run));
         // Rung first: opening the sound devices can take a while.
         #[cfg(feature = "voice")]
-        {
-            let n = Arc::downgrade(self);
-            let send = move |f: Vec<u8>| {
-                n.upgrade().iter().for_each(|n| n.send_media(&f))
-            };
-            let media = self.media();
-            let start = move || crate::voice::Voice::start(send, media);
-            let v = tokio::task::spawn_blocking(start).await?;
-            // No devices here: the page's audio, as before.
-            let v = v.inspect_err(|e| warn!("voice: {e:#}")).ok();
-            if let Some(c) = lock(&self.call).as_mut().filter(|c| c.run == run)
-            {
-                c.voice = v;
+        self.voice(run).await;
+        Ok(())
+    }
+
+    /// The call's voice on our devices, by our route (`set_route`).
+    #[cfg(feature = "voice")]
+    async fn voice(self: &Arc<Self>, run: u64) {
+        let n = Arc::downgrade(self);
+        let send =
+            move |f: Vec<u8>| n.upgrade().iter().for_each(|n| n.send_media(&f));
+        let (media, route) = (self.media(), *lock(&self.route));
+        let start = move || crate::voice::Voice::start(send, media, route);
+        let Ok(v) = tokio::task::spawn_blocking(start).await else { return };
+        // No devices here: the page's audio, as before.
+        let v = v.inspect_err(|e| warn!("voice: {e:#}")).ok();
+        if let Some(c) = lock(&self.call).as_mut().filter(|c| c.run == run) {
+            c.voice = v;
+        }
+    }
+
+    /// Where calls are heard (kept for the next), and the routes there are.
+    #[cfg(feature = "voice")]
+    pub async fn set_route(
+        self: &Arc<Self>,
+        to: Option<crate::voice::Route>,
+    ) -> (crate::voice::Route, Vec<crate::voice::Route>) {
+        if let Some(r) = to.filter(|r| *r != *lock(&self.route)) {
+            *lock(&self.route) = r;
+            // In a call: its voice reopened there.
+            let run = lock(&self.call).as_mut().map(|c| {
+                c.voice = None;
+                c.run
+            });
+            if let Some(run) = run {
+                self.voice(run).await;
             }
         }
-        Ok(())
+        (*lock(&self.route), crate::voice::routes())
     }
 
     pub fn notes(&self) -> Option<Vec<String>> {

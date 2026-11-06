@@ -203,6 +203,10 @@ class IrchPlugin(private val activity: Activity) : Plugin(activity) {
   fun inCall(invoke: Invoke) {
     val on = invoke.parseArgs(OnArgs::class.java).on
     activity.runOnUiThread { (activity as? MainActivity)?.overLock(on) }
+    // In a call as a phone is: volume keys for the call, its routes.
+    (activity.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager)
+      .mode = if (on) android.media.AudioManager.MODE_IN_COMMUNICATION
+        else android.media.AudioManager.MODE_NORMAL
     if (on && getPermissionState("microphone") != PermissionState.GRANTED) {
       requestPermissionForAlias("microphone", invoke, "allowed")
     } else invoke.resolve()

@@ -135,6 +135,9 @@ there then; the node itself is an always-on device of yours (`--link`).
   My Account or Storage Nodes, where a storage node can also be removed
   (and stopped, if it runs here). My Account shows the version.
 - On phones, a call of two fills the screen, upright, like FaceTime.
+- In a call, where it is heard: Standard (a phone's earpiece, else the
+  system's output), Speakerphone or Bluetooth (its microphone too), each
+  press the next this device has; kept for the next call.
 - *Add to notes*: a message or thread lands in a
   [loroh](https://github.com/cab-ucf/siroh) note as a task, event or quote,
   with an `irch://` link back; on phones through loroh, which asks first.

@@ -109,6 +109,9 @@ pub enum Call {
     Doctor {
         user: Option<Id>,
     },
+    Route {
+        to: Option<String>,
+    },
     Hand {
         device: iroh::EndpointId,
         text: String,
@@ -316,6 +319,19 @@ pub async fn call(n: &Arc<Node>, c: Call) -> Result<Value> {
         Call::Contact => json!(n.contact().await?),
         Call::AddStorage { code } => json!(n.add_storage(&code).await?),
         Call::Doctor { user } => n.doctor(user).await,
+        Call::Route { to } => {
+            #[cfg(feature = "voice")]
+            {
+                let to = to.and_then(|t| serde_json::from_value(json!(t)).ok());
+                let (on, all) = n.set_route(to).await;
+                json!({ "on": on, "all": all })
+            }
+            #[cfg(not(feature = "voice"))]
+            {
+                let _ = to;
+                json!({ "on": "standard", "all": ["standard"] })
+            }
+        }
         Call::Hand { device, text } => json!(n.hand(device, &text).await?),
         Call::ForgetStorage { node } => json!(n.forget_storage(&node).await?),
         Call::Store { space, node, on } => {
