@@ -642,6 +642,8 @@ pub struct Node {
     evs: (AtomicUsize, AtomicUsize),
     // Our events address, as last told (`tell_push`).
     told_lane: Mutex<Option<String>>,
+    // Read receipts waiting to go, the latest per channel (`mark_read`).
+    reading: Mutex<HashMap<(Id, Ch), u64>>,
     // Our device joined to each of our push servers, this run.
     widened: AtomicBool,
     // Which of `order`'s relays we hold (`roam`).
@@ -1084,6 +1086,7 @@ impl Node {
             waits: Mutex::default(),
             evs: Default::default(),
             told_lane: Mutex::default(),
+            reading: Mutex::default(),
             this: OnceLock::new(),
             kept: Mutex::default(),
             #[cfg(feature = "voice")]
@@ -1849,12 +1852,21 @@ impl Node {
             lock(&self.local).read.insert((*id, *ch), latest);
             self.persist();
             let dm = self.view(id, |s| s.dm.is_some()) == Some(true);
+            // Batched: one `Read` per channel per 2 s, the latest.
+            let first =
+                || lock(&self.reading).insert((*id, *ch), latest).is_none();
             if let (true, false, Ok(sp)) = (dm, self.invisible(), self.get(id))
+                && first()
             {
                 let (n, ch) = (self.clone(), *ch);
                 tokio::spawn(async move {
-                    let _ =
-                        n.post(&sp, Op::Read { channel: ch, ts: latest }).await;
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    let ts = lock(&n.reading).remove(&(sp.id, ch));
+                    let ts = ts.unwrap_or(latest);
+                    if n.invisible() {
+                        return;
+                    }
+                    let _ = n.post(&sp, Op::Read { channel: ch, ts }).await;
                 });
             }
         }
