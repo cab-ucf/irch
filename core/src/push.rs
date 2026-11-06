@@ -35,7 +35,7 @@ enum Ask {
     Ticket,
     /// `irpush:DEVICE` (paired here) and our ring tokens.
     Register(String, Vec<[u8; 16]>),
-    /// `irpush:DEVICE` (paired here): our irpush relays, `url#token,…`,
+    /// `irpush:DEVICE` (paired here): our irpush relays, `url,…`,
     /// which its iroh relays through too.
     Relays(String),
 }
@@ -236,7 +236,7 @@ fn kek(dir: &Path) -> Result<[u8; 32]> {
 }
 
 /// Where a storage node's irpush meets phones, and so the relay its phones
-/// use for everything: "https://irpush.you.example#TOKEN", from the systemd
+/// use for everything: "https://irpush.you.example", from the systemd
 /// credential `push-relay` (kept out of the Nix store), DIR/push-relay
 /// (`irch --install --push-relay`) or `IRCH_PUSH_RELAY`; else irch's relays
 /// (n0's last unless they are your own). LAN only, none.

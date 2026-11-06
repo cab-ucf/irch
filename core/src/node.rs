@@ -846,10 +846,10 @@ fn relays_are_open_and_tried_best_first() {
     assert!(RELAYS[0].contains("irpush"), "irpush's relay first");
 }
 
-/// One relay at a time, best first (`order`; `Node::roam` moves on). iroh
-/// finds its home by timing its relays over https, every 20–26 s while
-/// running: without it, no home and no relay reaches us. No captive-portal
-/// probes, no DHT.
+/// One relay at a time, best first (`order`; `Node::roam` moves on). While
+/// running, iroh pings it every 15 s and asks it our address every 20–26 s:
+/// without that, no home and no relay reaches us. No captive-portal probes,
+/// no DHT.
 /// An open link's paths are pinged every 5 s, so irch holds links only
 /// while in sight or in a call; asleep, a phone holds irpush's socket.
 pub(crate) fn endpoint(

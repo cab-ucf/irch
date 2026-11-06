@@ -31,14 +31,15 @@ terabytes through their own relay when a direct path cannot form. A key
 goes only to its relay. A big download that is not direct says so.
 
 A device holds one relay at a time, best first: its storage node's irpush
-relay, then irpush.cxn.center (both pinged hours apart; the default for a
+relay, then irpush.cxn.center (both ping irpush devices hours apart; the default for a
 storage node's phones too), then iroh.cxn.center, then n0's. A minute
 without it, the next; every half hour, the best again if it answers.
 iroh reaches a peer on whichever relay its address names, so devices on
 different relays reach each other.
 
-While irch runs, iroh times its relay over https every 20–26 s (its
-fixed rate) and asks it our public address. That is the price of being
+While irch runs, its iroh endpoint pings its relay every 15 s and makes
+a QUIC address-discovery handshake every 20–26 s (fixed rates; measured
+idle: ~69k packets a day). That is the price of being
 found; a phone's irch does not run in the background, so it costs an idle
 phone nothing. Later: probe only on a network change (an iroh patch or
 upstream option).
@@ -47,13 +48,14 @@ upstream option).
 
 UDP is the noise: NATs forget idle UDP in ~30 s, so every open QUIC path is
 pinged every 5 s. NATs keep idle TCP 2 h+ (RFC 5382), so one TLS/TCP socket
-to a long-ping relay is nearly silent, and the relay makes a NAT'd device
+kept alive by its own client (irpush's) to a long-ping relay is nearly
+silent, and the relay makes a NAT'd device
 reachable from anywhere by its endpoint id.
 
 | state | holds | wakes by |
 |---|---|---|
 | phone, background | irpush's one TCP socket, shared by every iroh app on the phone | an irpush push, shown at once |
-| any device, irch running, idle | iroh's relay TCP socket (long-ping relay), no QUIC connections | a dial through the relay |
+| any device, irch running, idle | iroh's relay TCP socket (iroh pings it every 15 s) and address discovery (every 20–26 s), no links | a dial through the relay |
 | talking, syncing, calling | direct QUIC (UDP), closed ~30 s after use | |
 
 The irpush relay is an iroh relay with long pings, so both irch's endpoint
@@ -118,7 +120,9 @@ rings first now.
 - A device asleep is woken by an irpush push through its storage node's
   relay; storage nodes keep what it missed. Every device gets pushes.
 - So the iroh client needs no change: its own endpoint runs only while
-  irch is in use. The relay needs only to not ping (irpush's patch).
+  irch is in use. The relay needs only to not ping irpush's devices
+  (irpush's patch): an iroh endpoint pings its relay every 15 s whatever
+  the relay does, which is why none runs in the background.
 
 ## Delivery: users and their devices
 

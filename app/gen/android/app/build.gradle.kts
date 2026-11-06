@@ -19,6 +19,9 @@ android {
     namespace = "dev.irch.chat"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
+        // irpush: apps signed by irch's key share one push connection (the
+        // group names a permission only that key may hold).
+        manifestPlaceholders["irpushGroup"] = "dev.irch"
         applicationId = "dev.irch.chat"
         // AAudio, for the call's voice: Android 8.
         minSdk = 26
