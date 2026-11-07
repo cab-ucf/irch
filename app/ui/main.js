@@ -172,9 +172,18 @@ async function copy(text, done) {
   if (done) toast(done);
 }
 
+// Through irweb's page the origin is shared with every site it serves:
+// this tab only, then, and nothing left behind by older versions.
+const shared = /\/x\/[a-z0-9]+\//.test(location.pathname);
+const kept = shared ? sessionStorage : localStorage;
+try {
+  for (const k of Object.keys(shared ? localStorage : {})) {
+    if (k.startsWith("irch.")) localStorage.removeItem(k);
+  }
+} catch {}
 const store = {
-  get: (k) => { try { return localStorage.getItem("irch." + k); } catch {} },
-  set: (k, v) => { try { localStorage.setItem("irch." + k, v); } catch {} },
+  get: (k) => { try { return kept.getItem("irch." + k); } catch {} },
+  set: (k, v) => { try { kept.setItem("irch." + k, v); } catch {} },
 };
 
 const THEMES = { neon: "Neon", midnight: "Midnight", nord: "Nord",
@@ -2574,8 +2583,8 @@ async function profilesFlow() {
 function forgetPage() {
   const t = store.get("theme");
   try {
-    for (const k of Object.keys(localStorage)) {
-      if (k.startsWith("irch.")) localStorage.removeItem(k);
+    for (const k of Object.keys(kept)) {
+      if (k.startsWith("irch.")) kept.removeItem(k);
     }
   } catch {}
   theme(t);

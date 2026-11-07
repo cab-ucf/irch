@@ -18,13 +18,11 @@ use tokio::sync::{Semaphore, broadcast, broadcast::error::RecvError};
 use tokio::time::{Duration, sleep, timeout};
 
 const UI: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/ui.rs"));
-/// irp's page, and the relays it dials when a link pins none.
+/// irp's page, and the relays it dials when a link pins none (irpo-core's
+/// RELAYS): we must home on one of them, or the page never finds us.
 const LINK: &str = "https://cab-ucf.github.io/";
-const RELAYS: [&str; 3] = [
-    "https://irpush.cxn.center./",
-    "https://iroh.cxn.center./",
-    "https://use1-1.relay.n0.iroh.link./",
-];
+const RELAYS: [&str; 2] =
+    ["https://iroh.cxn.center./", "https://use1-1.relay.n0.iroh.link./"];
 const ALPN: &[u8] = b"irweb/http/2";
 const HEAD: usize = 16 << 10;
 const BODY: usize = 8 << 20;
@@ -82,6 +80,7 @@ pub async fn run(
                 // as the node's: the network's proxy, the system's roots
                 .proxy_from_env()
                 .ca_tls_config(iroh::tls::CaTlsConfig::system())
+                .crypto_provider(crypto::pq())
                 .bind()
                 .await?;
             let id = BASE32_NOPAD.encode(ep.id().as_bytes()).to_lowercase();

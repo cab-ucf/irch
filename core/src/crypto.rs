@@ -15,6 +15,12 @@ use x_wing::{KeyExport, kem::Ciphertext};
 pub type Key = [u8; 32];
 const KEM_CT: usize = 1120;
 
+/// aws-lc-rs, X25519MLKEM768 first: every handshake post-quantum, never
+/// iroh's default (ring, classical, wherever anything enables it).
+pub fn pq() -> std::sync::Arc<rustls::crypto::CryptoProvider> {
+    rustls::crypto::aws_lc_rs::default_provider().into()
+}
+
 pub fn kdf(ctx: &str, parts: &[&[u8]]) -> Key {
     let mut h = blake3::Hasher::new_derive_key(ctx);
     for p in parts {
@@ -197,4 +203,10 @@ fn streams() {
         *bent.last_mut().unwrap() ^= 1;
         assert!(open_stream(&k, &bent[..], &mut vec![]).is_err());
     }
+}
+
+#[test]
+fn handshakes_are_post_quantum() {
+    let g = pq().kx_groups[0].name();
+    assert_eq!(g, rustls::NamedGroup::X25519MLKEM768);
 }
