@@ -240,7 +240,8 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   admin's backdated bans and renames stand until undone.
 - A linked device is you: lost, it can only be retired with the whole
   identity, not alone; you then start a new one and rejoin.
-- Signatures are Ed25519; stored data is post-quantum, transport is not.
+- Signatures are Ed25519; stored data and every QUIC and TLS handshake
+  (X25519MLKEM768, aws-lc-rs) are post-quantum.
 - Peers see each other's addresses, relays see endpoint ids and traffic,
   storage nodes see sizes, times and devices.
 - A member's UnifiedPush server learns when each member writes, and from

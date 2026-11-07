@@ -82,6 +82,7 @@ pub async fn run(
                 // as the node's: the network's proxy, the system's roots
                 .proxy_from_env()
                 .ca_tls_config(iroh::tls::CaTlsConfig::system())
+                .crypto_provider(crypto::pq())
                 .bind()
                 .await?;
             let id = BASE32_NOPAD.encode(ep.id().as_bytes()).to_lowercase();
