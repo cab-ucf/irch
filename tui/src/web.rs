@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use std::{net::SocketAddr, path::Path, path::PathBuf, sync::Arc};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Semaphore, broadcast, broadcast::error::RecvError};
-use tokio::time::{Duration, sleep, timeout};
+use tokio::time::{Duration, timeout};
 
 const UI: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/ui.rs"));
 /// irp's page, and the relays it dials when a link pins none (irpo-core's
@@ -28,8 +28,6 @@ const HEAD: usize = 16 << 10;
 const BODY: usize = 8 << 20;
 const CSP: &str = "default-src 'self'; img-src 'self' data:; media-src \
     'self' blob:; style-src 'self'; frame-ancestors 'none'; base-uri 'none'";
-/// Wrong tokens, one a second, from everyone.
-static BAD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 struct Web {
     n: Arc<Node>,
@@ -157,8 +155,25 @@ impl Req {
     fn get(&self, k: &str) -> Option<&str> {
         self.head.iter().find(|h| h.0 == k).map(|h| h.1.as_str())
     }
+
+    /// `api/…`'s command, if that is what it asks.
+    fn api(&self) -> Option<&str> {
+        self.path.split('?').next().unwrap_or_default().strip_prefix("/api/")
+    }
+
+    /// Its token (and, from a browser here, our own page): only then is
+    /// its body read and its command run.
+    fn allowed(&self, token: &str, tcp: bool) -> bool {
+        // Another site's page, in this browser: token or not, no.
+        let origin =
+            self.get("origin").map(|o| o.split_once("://").map(|x| x.1));
+        let foreign = tcp && origin.is_some_and(|o| o != self.get("host"));
+        let t = self.get("irweb-access").unwrap_or_default();
+        !foreign && crypto::same(t.as_bytes(), token.as_bytes())
+    }
 }
 
+/// Its head; the body (`body`) only once it may be run.
 async fn read(r: &mut (impl AsyncRead + Unpin)) -> Result<Req> {
     let mut b = vec![];
     let end = loop {
@@ -178,8 +193,11 @@ async fn read(r: &mut (impl AsyncRead + Unpin)) -> Result<Req> {
     let head = lines.filter_map(|l| l.split_once(':'));
     let head = head.map(|(k, v)| (k.trim().to_lowercase(), v.trim().into()));
     let (method, path) = (method.into(), path.into());
-    let mut q = Req { method, path, head: head.collect(), body: vec![] };
-    q.body = b[end + 4..].to_vec();
+    let body = b[end + 4..].to_vec();
+    Ok(Req { method, path, head: head.collect(), body })
+}
+
+async fn body(r: &mut (impl AsyncRead + Unpin), q: &mut Req) -> Result<()> {
     match q.get("content-length").map(str::parse::<usize>).transpose()? {
         Some(n) => {
             ensure!(n <= BODY, "too big");
@@ -193,7 +211,7 @@ async fn read(r: &mut (impl AsyncRead + Unpin)) -> Result<Req> {
         }
         None => {}
     }
-    Ok(q)
+    Ok(())
 }
 
 async fn answer(
@@ -220,21 +238,45 @@ async fn exchange(
     tcp: bool,
 ) {
     let Ok(_held) = w.cap.try_acquire() else { return };
-    let q = timeout(Duration::from_secs(30), read(&mut r)).await;
-    if let Ok(Ok(q)) = q {
-        let _ = route(&w, q, &mut o, tcp).await;
-    }
+    let q = timeout(Duration::from_secs(30), request(&mut r, &w.token, tcp));
+    let _ = match q.await {
+        Ok(Ok(Some(q))) => route(&w, q, &mut o).await,
+        Ok(Ok(None)) => {
+            answer(&mut o, "403 Forbidden", "text/plain", Some(b""))
+                .await
+                .map_err(Into::into)
+        }
+        _ => Ok(()),
+    };
     let _ = o.shutdown().await;
+}
+
+/// A request, its body read only once it may run: none, a stranger's.
+/// With 256 bits of token, a wrong one is answered at once (no wait
+/// holds a slot).
+async fn request(
+    r: &mut (impl AsyncRead + Unpin),
+    token: &str,
+    tcp: bool,
+) -> Result<Option<Req>> {
+    let mut q = read(r).await?;
+    if q.api().is_none() {
+        return Ok(Some(q)); // the page: no body
+    }
+    if !q.allowed(token, tcp) {
+        return Ok(None);
+    }
+    body(r, &mut q).await?;
+    Ok(Some(q))
 }
 
 async fn route(
     w: &Web,
     q: Req,
     o: &mut (impl AsyncWrite + Unpin),
-    tcp: bool,
 ) -> Result<()> {
     let path = q.path.split('?').next().unwrap_or_default();
-    let Some(cmd) = path.strip_prefix("/api/") else {
+    let Some(cmd) = q.api() else {
         let f = (q.method == "GET").then(|| page(path)).flatten();
         let Some((kind, b)) = f else {
             return Ok(
@@ -243,15 +285,6 @@ async fn route(
         };
         return Ok(answer(o, "200 OK", kind, Some(&b)).await?);
     };
-    let t = q.get("irweb-access").unwrap_or_default();
-    // Another site's page, in this browser: token or not, no.
-    let origin = q.get("origin").map(|o| o.split_once("://").map(|x| x.1));
-    let foreign = tcp && origin.is_some_and(|o| o != q.get("host"));
-    if foreign || !crypto::same(t.as_bytes(), w.token.as_bytes()) {
-        let _one = BAD.lock().await;
-        sleep(Duration::from_secs(1)).await;
-        return Ok(answer(o, "403 Forbidden", "text/plain", Some(b"")).await?);
-    }
     match (q.method.as_str(), cmd) {
         ("GET", "events") => {
             let changed: Arc<str> =
@@ -378,4 +411,29 @@ async fn post(w: &Web, cmd: &str, q: &Req) -> Result<Value> {
         }
         _ => bail!("no such call"),
     }
+}
+
+#[tokio::test]
+async fn a_strangers_body_is_never_read() {
+    let head = |t: &str, origin: &str| {
+        format!(
+            "POST /api/send HTTP/1.1\r\nhost: me\r\norigin: {origin}\r\n\
+            irweb-access: {t}\r\ncontent-length: 8000000\r\n\r\n"
+        )
+    };
+    // Its 8 MB never come: refused on its head alone.
+    for (t, origin, tcp) in [
+        ("wrong", "http://me", true),
+        ("right", "http://evil", true),
+        ("wrong", "x", false),
+    ] {
+        let r = head(t, origin).into_bytes();
+        let got = request(&mut &r[..], "right", tcp).await.unwrap();
+        assert!(got.is_none(), "{t} {origin}");
+    }
+    // The owner's: read on, so the missing body is an error.
+    let r = head("right", "http://me").into_bytes();
+    assert!(request(&mut &r[..], "right", true).await.is_err());
+    let page = b"GET / HTTP/1.1\r\n\r\n";
+    assert!(request(&mut &page[..], "right", true).await.unwrap().is_some());
 }

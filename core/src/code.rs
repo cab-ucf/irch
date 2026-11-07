@@ -1,9 +1,12 @@
 //! Short codes (`k7m-x9q-p3a`) for an invite or a link code, good for a
-//! minute and one try. The code, stretched (Argon2id), is a throwaway iroh
-//! identity its giver answers as, found by its id like any other; the taker
+//! minute and one try. The code, stretched (Argon2id) and salted with the
+//! UTC minute it was given in, is a throwaway iroh identity its giver
+//! answers as, found by its id like any other; the taker (whose clock may
+//! differ, by up to a minute) tries that minute and one either side,
 //! proves the code and gets the long code sealed to a fresh X-Wing key.
 //! Whoever sees that identity must brute-force 2^45 stretched codes within
-//! the minute to learn it; one wrong proof burns it.
+//! the minute to learn it, no table made beforehand helps; one wrong proof
+//! burns it.
 
 use crate::crypto::{kem_open, kem_seal, open, rand, same, seal};
 use crate::{Net, node::endpoint, sync::rest};
@@ -19,9 +22,9 @@ pub const TTL: Duration = Duration::from_secs(60);
 const ABC: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
 const LEN: usize = 9;
 
-/// A code's identity and proof, from the code as typed (any case, any
-/// dashes or spaces; i and l read as 1, o as 0).
-fn keys(code: &str) -> Result<(SecretKey, [u8; 32])> {
+/// A code as typed (any case, any dashes or spaces; i and l read as 1, o
+/// as 0).
+fn norm(code: &str) -> Result<String> {
     let fix = |c: char| match c {
         'i' | 'l' => '1',
         'o' => '0',
@@ -37,9 +40,20 @@ fn keys(code: &str) -> Result<(SecretKey, [u8; 32])> {
         c.len() == LEN && c.bytes().all(|b| ABC.contains(&b)),
         "not a short code"
     );
+    Ok(c)
+}
+
+/// The UTC minute, now.
+fn minute() -> u64 {
+    crate::now() / 60_000
+}
+
+/// A code's identity and proof, given in minute `m`.
+fn keys(code: &str, m: u64) -> Result<(SecretKey, [u8; 32])> {
+    let salt = [&b"irch short code 2"[..], &m.to_le_bytes()].concat();
     let mut k = [0u8; 64];
     argon2::Argon2::default()
-        .hash_password_into(c.as_bytes(), b"irch short code 1", &mut k)
+        .hash_password_into(norm(code)?.as_bytes(), &salt, &mut k)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let (sk, proof) = k.split_at(32);
     Ok((SecretKey::from_bytes(sk.try_into()?), proof.try_into()?))
@@ -55,8 +69,9 @@ fn locked(password: &str, proof: &[u8; 32]) -> Result<crate::crypto::Key> {
     Ok(k)
 }
 
-async fn stretched(code: String) -> Result<(SecretKey, [u8; 32])> {
-    tokio::task::spawn_blocking(move || keys(&code)).await?
+async fn stretched(code: &str, m: u64) -> Result<(SecretKey, [u8; 32])> {
+    let code = code.to_string();
+    tokio::task::spawn_blocking(move || keys(&code, m)).await?
 }
 
 /// A short code for `long` (an invite or link code), answered for `TTL`;
@@ -71,7 +86,7 @@ pub async fn give(
     let code = [&c[..3], &c[3..6], &c[6..]]
         .map(|p| String::from_utf8_lossy(p).into_owned())
         .join("-");
-    let (sk, proof) = stretched(code.clone()).await?;
+    let (sk, proof) = stretched(&code, minute()).await?;
     // Plain, it is `irch:…`; locked, sealed bytes (never `irch:`).
     let body = match password {
         None => long.into_bytes(),
@@ -107,10 +122,10 @@ pub async fn give(
     Ok(code)
 }
 
-/// The last locked code taken, by its proof: its one try is spent, so the
-/// password, asked for after, opens it here.
-static HELD: std::sync::Mutex<Option<([u8; 32], Vec<u8>)>> =
-    std::sync::Mutex::new(None);
+/// The last locked code taken (the code, its proof): its one try is spent,
+/// so the password, asked for after, opens it here.
+type Held = (String, [u8; 32], Vec<u8>);
+static HELD: std::sync::Mutex<Option<Held>> = std::sync::Mutex::new(None);
 
 /// The long code a short one stands for, while its giver answers.
 pub async fn take(
@@ -118,13 +133,17 @@ pub async fn take(
     code: &str,
     password: Option<&str>,
 ) -> Result<String> {
-    let (sk, proof) = stretched(code.into()).await?;
-    let held = crate::node::lock(&HELD).take().filter(|h| h.0 == proof);
-    if let Some((_, body)) = held {
-        return unlock(body, proof, password).await;
+    let code = norm(code)?;
+    let held = crate::node::lock(&HELD).take().filter(|h| h.0 == code);
+    if let Some((code, proof, body)) = held {
+        return unlock(code, body, proof, password).await;
     }
+    let m = minute();
+    let tries = [m - 1, m, m + 1].map(|m| stretched(&code, m));
+    let tries = n0_future::join_all(tries).await;
+    let tries = tries.into_iter().collect::<Result<Vec<_>>>()?;
     let dk: DecapsulationKey = rand::<32>().into();
-    let hello = [&proof[..], &dk.encapsulation_key().to_bytes()].concat();
+    let ek = dk.encapsulation_key().to_bytes();
     let ep = endpoint(net, None).bind().await?;
     // The giver homes on one of the relays we would: tried there, and by
     // its id (n0's DNS) where we look ids up.
@@ -135,20 +154,29 @@ pub async fn take(
         Net::Relay(r) => r.clone(),
         _ => vec![],
     };
-    let at = iroh::EndpointAddr::from_parts(
-        sk.public(),
-        relays.into_iter().map(iroh::TransportAddr::Relay),
-    );
     let go = async {
-        // Published a moment ago: looked up again until found.
-        let c = loop {
-            match ep.connect(at.clone(), ALPN).await {
-                Ok(c) => break c,
-                Err(_) => tokio::time::sleep(Duration::from_secs(2)).await,
-            }
-        };
+        // Each minute's identity, whichever answers: published a moment
+        // ago, looked up again until found.
+        let mut dials = tokio::task::JoinSet::new();
+        for (sk, proof) in tries {
+            let ep = ep.clone();
+            let to = relays.iter().cloned().map(iroh::TransportAddr::Relay);
+            let at = iroh::EndpointAddr::from_parts(sk.public(), to);
+            dials.spawn(async move {
+                loop {
+                    match ep.connect(at.clone(), ALPN).await {
+                        Ok(c) => break (c, proof),
+                        Err(_) => {
+                            tokio::time::sleep(Duration::from_secs(2)).await
+                        }
+                    }
+                }
+            });
+        }
+        let (c, proof) = dials.join_next().await.context("no code")??;
+        drop(dials);
         let (mut tx, mut rx) = c.open_bi().await?;
-        tx.write_all(&hello).await?;
+        tx.write_all(&[&proof[..], &ek].concat()).await?;
         tx.finish()?;
         let b = rest(&mut rx, 1 << 16).await?;
         let body = kem_open(&dk, ALPN, &b)
@@ -156,7 +184,7 @@ pub async fn take(
         if body.starts_with(b"irch:") {
             return anyhow::Ok(String::from_utf8(body)?);
         }
-        unlock(body, proof, password).await
+        unlock(code, body, proof, password).await
     };
     let r = timeout(Duration::from_secs(30), go).await;
     ep.close().await;
@@ -203,8 +231,15 @@ async fn one_wrong_proof_burns_a_code() {
     let url: iroh::RelayUrl =
         format!("http://{}/", relay.http_addr().unwrap()).parse().unwrap();
     let net = Net::Relay(vec![url.clone()]);
-    let code = give(&net, "irch:invite:abc".into(), None).await.unwrap();
-    let (sk, _) = keys(&code).unwrap();
+    // Given within one minute, so its identity is that minute's.
+    let (code, m) = loop {
+        let m = minute();
+        let code = give(&net, "irch:invite:abc".into(), None).await.unwrap();
+        if minute() == m {
+            break (code, m);
+        }
+    };
+    let (sk, _) = keys(&code, m).unwrap();
     let ep = endpoint(&net, None).bind().await.unwrap();
     let at = iroh::EndpointAddr::from_parts(
         sk.public(),
@@ -223,11 +258,12 @@ async fn one_wrong_proof_burns_a_code() {
 /// A locked code's long one; without its password (or a wrong one), kept
 /// to try again.
 async fn unlock(
+    code: String,
     body: Vec<u8>,
     proof: [u8; 32],
     password: Option<&str>,
 ) -> Result<String> {
-    let keep = |body| *crate::node::lock(&HELD) = Some((proof, body));
+    let keep = |body| *crate::node::lock(&HELD) = Some((code, proof, body));
     let Some(p) = password.map(str::to_string) else {
         keep(body);
         bail!("that code has a password");
@@ -244,8 +280,17 @@ async fn unlock(
 
 #[test]
 fn codes_read_as_typed() {
-    let a = keys("k7m-x9q-p3a").unwrap();
-    assert_eq!(a.0.public(), keys("K7M X9Q P3A").unwrap().0.public());
-    assert_eq!(keys("o1l-000-111").unwrap().1, keys("011-000-111").unwrap().1);
-    assert!(keys("k7m-x9q").is_err() && keys("k7m-x9q-p3u").is_err());
+    let a = keys("k7m-x9q-p3a", 1).unwrap();
+    assert_eq!(a.0.public(), keys("K7M X9Q P3A", 1).unwrap().0.public());
+    assert_eq!(norm("o1l-000-111").unwrap(), "011000111");
+    assert!(norm("k7m-x9q").is_err() && norm("k7m-x9q-p3u").is_err());
+}
+
+/// No table of all codes, made once, serves every minute: each minute's
+/// identity and proof are another's.
+#[test]
+fn a_codes_identity_is_its_minutes() {
+    let (a, b) =
+        (keys("k7m-x9q-p3a", 1).unwrap(), keys("k7m-x9q-p3a", 2).unwrap());
+    assert!(a.0.public() != b.0.public() && a.1 != b.1);
 }

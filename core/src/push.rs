@@ -76,7 +76,9 @@ pub fn set_relay(dir: &Path, l: &str) -> Result<()> {
 
 /// A ticket to pair our irpush device with `to`.
 pub async fn ticket(ep: &Endpoint, to: EndpointAddr) -> Result<String> {
-    Ok(String::from_utf8(ask(ep, to, &Ask::Ticket).await?)?)
+    let t = String::from_utf8(ask(ep, to, &Ask::Ticket).await?)?;
+    ensure!(!t.is_empty(), "not a storage node we sync with");
+    Ok(t)
 }
 
 /// The irpush relays of `to`, where `route` is paired.
@@ -113,6 +115,11 @@ struct Phones {
 }
 
 impl Phones {
+    /// A route another device registered first.
+    fn taken(&self, d: &EndpointId, to: &str) -> bool {
+        self.by.iter().any(|(x, p)| x != d && p.0 == to)
+    }
+
     fn set(&mut self, d: EndpointId, p: Option<Phone>) {
         for t in self.by.remove(&d).into_iter().flat_map(|p| p.1) {
             if let Some(s) = self.rings.get_mut(&t)
@@ -158,20 +165,28 @@ impl Server {
             let d = to.strip_prefix("irpush:").unwrap_or_default();
             irpush.peers().iter().any(|p| p.0.to_string() == d)
         };
-        let ours = lock(served).contains(&c.remote_id());
+        let d = c.remote_id();
+        let ours = lock(served).contains(&d);
         let reply = match postcard::from_bytes(&b)? {
-            Ask::Ticket => irpush.ticket(irpush::Role::Device)?.into_bytes(),
-            // Paired, or a member's device we sync with: whatever its push.
-            Ask::Relays(to) => match ours || paired(&to) {
-                true => irpush::Relay::show(&irpush.relays()).into_bytes(),
-                false => vec![],
-            },
+            // Members' devices only: a stranger pairs nothing, rings nobody.
+            Ask::Ticket if ours => {
+                irpush.ticket(irpush::Role::Device)?.into_bytes()
+            }
+            Ask::Ticket => vec![],
+            // A member's device we sync with, whatever its push (a paired
+            // route proves nothing: any member sees it).
+            Ask::Relays(_) if ours => {
+                irpush::Relay::show(&irpush.relays()).into_bytes()
+            }
+            Ask::Relays(_) => vec![],
             Ask::Register(to, rings) => {
                 ensure!(to.len() <= 128 && rings.len() <= MOST, "too big");
-                let ok = paired(&to);
+                // A route is the device's that registered it first: no
+                // member rings another's phone with tokens of their own.
+                let ok = ours && paired(&to) && !lock(phones).taken(&d, &to);
                 if ok {
                     // A second apart each, so none rewrites the file flat out.
-                    let (d, second) = (c.remote_id(), Duration::from_secs(1));
+                    let second = Duration::from_secs(1);
                     let last = lock(phones).at.get(&d).copied();
                     let wait = last.map(|t| second.saturating_sub(t.elapsed()));
                     tokio::time::sleep(wait.unwrap_or_default()).await;
@@ -553,4 +568,39 @@ fn a_storage_nodes_relay_is_checked_kept_and_told() {
         .unwrap();
     assert_eq!(relay(&d), ("https://irpush.example./".into(), true));
     let _ = std::fs::remove_dir_all(d);
+}
+
+/// A stranger gets no ticket, relays or registration; a device we sync
+/// with does, and only the route it registered first is its.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_served_devices_pair_here() {
+    let n = u64::from_le_bytes(crate::crypto::rand());
+    let dir = std::env::temp_dir().join(format!("irch-served-{n}"));
+    set_relay(&dir, "https://irpush.invalid./").unwrap();
+    let served = Served::default();
+    let s = Server::open(&dir, &Net::Direct, served.clone()).unwrap().unwrap();
+    let ep = || crate::node::endpoint(&Net::Direct, None);
+    let host = ep().alpns(vec![ALPN.to_vec()]).bind().await.unwrap();
+    let at = host.addr();
+    tokio::spawn(async move {
+        while let Some(i) = host.accept().await {
+            let s = s.clone();
+            tokio::spawn(async move {
+                if let Ok(c) = i.await {
+                    let _ = s.asked(&c).await;
+                }
+            });
+        }
+    });
+    let (x, y) = (ep().bind().await.unwrap(), ep().bind().await.unwrap());
+    lock(&served).insert(x.id());
+    assert!(ticket(&y, at.clone()).await.is_err(), "a stranger");
+    assert!(relays_of(&y, at.clone(), "").await.is_err());
+    assert!(register(&y, at.clone(), "irpush:x", &[]).await.is_err());
+    assert!(ticket(&x, at.clone()).await.is_ok_and(|t| !t.is_empty()));
+    assert!(relays_of(&x, at, "").await.is_ok());
+    let mut p = Phones::default();
+    p.set(x.id(), Some(("irpush:x".into(), vec![])));
+    assert!(!p.taken(&x.id(), "irpush:x") && p.taken(&y.id(), "irpush:x"));
+    let _ = std::fs::remove_dir_all(dir);
 }
