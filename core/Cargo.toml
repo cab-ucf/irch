@@ -18,7 +18,7 @@ data-encoding = "2"
 getrandom = "0.4"
 dirs = "7"
 iroh = { version = "1.4", default-features = false, features = [
-  "tls-ring", "metrics",
+  "tls-aws-lc-rs", "metrics",
 ] }
 iroh-gossip = { version = "0.101", default-features = false, features = ["net"] }
 noq-proto = { version = "1.4", default-features = false }
@@ -29,6 +29,10 @@ iroh-mdns-address-lookup = "0.6"
 minisign-verify = "0.3"
 n0-future = "0.3"
 postcard = { version = "1", features = ["use-std"] }
+# Every TLS and QUIC handshake: aws-lc-rs, X25519MLKEM768 first.
+rustls = { version = "0.23", default-features = false, features = [
+  "aws_lc_rs", "prefer-post-quantum",
+] }
 # Storage nodes wake phones; already built for iroh, TLS as iroh sets it.
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 x-wing = { version = "0.1", features = ["getrandom"] }
@@ -49,5 +53,7 @@ voice = ["dep:cpal", "dep:sonora", "dep:unsafe-libopus"]
 iroh = { version = "1.4", default-features = false, features = ["platform-verifier"] }
 
 [dev-dependencies]
-iroh-relay = { version = "1.4", default-features = false, features = ["server"] }
+iroh-relay = { version = "1.4", default-features = false, features = [
+  "server", "tls-aws-lc-rs",
+] }
 tracing-subscriber.workspace = true

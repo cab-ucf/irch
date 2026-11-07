@@ -884,7 +884,7 @@ pub(crate) fn endpoint(
     // with segmentation offload on (iroh #4647).
     #[cfg(target_os = "android")]
     let q = q.enable_segmentation_offload(false);
-    let b = b.transport_config(q.build());
+    let b = b.transport_config(q.build()).crypto_provider(crate::crypto::pq());
     let mut probes = iroh::endpoint::NetReportConfig::default();
     probes.captive_portal_check = false;
     let b = b.net_report_config(probes);
@@ -4821,7 +4821,7 @@ pub(crate) fn client() -> reqwest::ClientBuilder {
     let ca = iroh::tls::CaTlsConfig::system();
     #[cfg(target_os = "android")]
     let ca = iroh::tls::CaTlsConfig::embedded();
-    let tls = ca.client_config(iroh::tls::default_provider()).expect("TLS");
+    let tls = ca.client_config(crate::crypto::pq()).expect("TLS");
     let b = reqwest::Client::builder().tls_backend_preconfigured(tls);
     // Stalls end a request, not its length: an update can be large.
     let b = b.connect_timeout(Duration::from_secs(20));

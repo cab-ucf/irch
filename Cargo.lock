@@ -3937,6 +3937,7 @@ dependencies = [
  "noq-proto",
  "postcard",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sonora",
