@@ -46,9 +46,6 @@ object Wake {
 
   /** A ring irpush brought: `{show, catch}`, as `rung` says them. */
   @JvmStatic external fun ring(ctx: Context, dir: String, data: ByteArray): String
-
-  /** A UnifiedPush message (a sealed frame): `{show, catch}` likewise. */
-  @JvmStatic external fun frame(ctx: Context, dir: String, data: ByteArray): String
 }
 
 /** The phone's one irpush device, shared with every irpush app (irpush's
@@ -78,19 +75,13 @@ class IrchApp : android.app.Application() {
   }
 }
 
-/** UnifiedPush: each message a sealed frame, shown with no node started;
- *  irch catches up only when it must. */
+/** UnifiedPush: the ping carries nothing; irch fetches from peers. */
 class IrchPush : PushService() {
   override fun onNewEndpoint(endpoint: PushEndpoint, instance: String) =
     wake(this, endpoint.url)
 
-  override fun onMessage(message: PushMessage, instance: String) {
-    val d = message.content
-    Thread {
-      val dir = dataDir.absolutePath
-      if (show(this, Wake.frame(applicationContext, dir, d))) wake(this, null)
-    }.start()
-  }
+  override fun onMessage(message: PushMessage, instance: String) =
+    wake(this, null)
 
   override fun onUnregistered(instance: String) = wake(this, "")
 

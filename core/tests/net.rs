@@ -706,33 +706,26 @@ async fn calls_carry_frames_between_members_only() {
 /// space (a ping with nothing in it), and b then notifies once.
 #[tokio::test(flavor = "multi_thread")]
 async fn writing_wakes_a_sleeping_device() {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-    // A push server (ntfy, say) that keeps what it is asked to deliver.
-    let pushes = Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::new()));
+    use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // A push server (ntfy, say) that counts what it is asked to deliver.
+    let pushes = Arc::new(AtomicUsize::new(0));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/up", l.local_addr().unwrap());
     let p = pushes.clone();
     tokio::spawn(async move {
-        while let Ok((c, _)) = l.accept().await {
-            let mut c = tokio::io::BufReader::new(c);
-            let (mut line, mut len) = (String::new(), 0);
-            while c.read_line(&mut line).await.unwrap_or(0) > 2 {
-                let h = line.to_lowercase();
-                if let Some(n) = h.strip_prefix("content-length:") {
-                    len = n.trim().parse().unwrap_or(0);
-                }
-                line.clear();
+        while let Ok((mut c, _)) = l.accept().await {
+            let mut b = [0; 4096];
+            let n = c.read(&mut b).await.unwrap_or(0);
+            if b[..n].starts_with(b"POST /up") && b[..n].ends_with(b"\r\n\r\n1")
+            {
+                p.fetch_add(1, Relaxed);
             }
-            let mut body = vec![0; len];
-            let _ = c.read_exact(&mut body).await;
-            p.lock().unwrap().push(body);
-            let ok = b"HTTP/1.1 201 Created\r\ncontent-length: 0\r\n\
-                connection: close\r\n\r\n";
+            let ok = b"HTTP/1.1 201 Created\r\ncontent-length: 0\r\n\r\n";
             let _ = c.write_all(ok).await;
         }
     });
-    let db = dir("b");
-    let (a, b) = (node("a").await, start(&db, "b", None, false).await);
+    let (a, b) = (node("a").await, node("b").await);
     let id = a.create("lab").await.unwrap();
     let ch = general(&a, &id);
     b.join(&a.invite(&id).await.unwrap()).await.unwrap();
@@ -745,22 +738,18 @@ async fn writing_wakes_a_sleeping_device() {
     // Later than that first ask, not in its very millisecond.
     tokio::time::sleep(Duration::from_millis(2)).await;
 
-    let n = || pushes.lock().unwrap().len();
     say(&a, &id, ch, "@b the samples are in").await;
-    until("a woke b", || n() == 1).await;
+    until("a woke b", || pushes.load(Relaxed) == 1).await;
     until("b has it", || !texts(&b, &id, &ch).is_empty()).await;
-    let got = b.notices();
-    assert_eq!(got.len(), 1);
-    assert_eq!((got[0].room, &*got[0].body), (ch, "@b the samples are in"));
-    assert!(got[0].title.starts_with("a in #general"));
+    let n = b.notices();
+    assert_eq!(n.len(), 1);
+    assert_eq!((n[0].room, &*n[0].body), (ch, "@b the samples are in"));
+    assert!(n[0].title.starts_with("a in #general"));
     assert!(b.notices().is_empty(), "once");
-    // The push is the op, sealed: a phone with no node opens it.
-    let f = pushes.lock().unwrap()[0].clone();
-    assert_eq!(f.len(), irch_core::ntfy::SIZE, "one size");
-    assert_eq!(Node::opened(&db, &f).map(|x| x.0), Some(id));
 
     say(&a, &id, ch, "and the scope is free").await;
-    until("each message its own push", || n() == 2).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(pushes.load(Relaxed), 1, "held back for 30 s, not dropped");
     b.set_level(&id, irch_core::Level::Mentions);
     until("b has it", || texts(&b, &id, &ch).len() == 2).await;
     assert!(b.notices().is_empty(), "mentions only");
@@ -1526,33 +1515,18 @@ async fn an_untouched_device_goes_idle() {
     until("back", || !a.idle(&id).contains(&b.id())).await;
 }
 
-/// Small ops go as ntfy frames (one POST each, acked the same way), with
-/// no link dialed for them. Needs `ntfy` (or `NTFY`), as a release has.
+/// On one relay, small ops go as irpush events (one datagram each, acked
+/// the same way), with no link dialed for them.
 #[tokio::test(flavor = "multi_thread")]
 async fn small_ops_go_as_events() {
-    let bin = std::env::var("NTFY").unwrap_or("ntfy".into());
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let at = port.local_addr().unwrap();
-    drop(port);
-    let Ok(mut ntfy) = std::process::Command::new(bin)
-        .args(["serve", "--listen-http", &at.to_string()])
-        .args(["--base-url", &format!("http://{at}")])
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    else {
-        return eprintln!("no ntfy: skipped");
-    };
-    let server = format!("http://{at}");
-    until("ntfy is up", || std::net::TcpStream::connect(at).is_ok()).await;
-    let with = |name: &str| {
-        let d = dir(name);
-        std::fs::create_dir_all(&d).unwrap();
-        std::fs::write(d.join("ntfy-server"), &server).unwrap();
-        d
-    };
-    let (da, db) = (with("a"), with("b"));
-    let a = start(&da, "a", None, false).await;
-    let b = start(&db, "b", None, false).await;
+    use iroh_relay::server::{RelayConfig, Server, ServerConfig};
+    let mut cfg = ServerConfig::default();
+    cfg.relay = Some(RelayConfig::new(([127, 0, 0, 1], 0)));
+    let relay = Server::spawn(cfg).await.unwrap();
+    let url = format!("http://{}/", relay.http_addr().unwrap());
+    let net = || Net::Relay(vec![url.parse().unwrap()]);
+    let a = on(&dir("a"), "a", None, false, net()).await;
+    let b = on(&dir("b"), "b", None, false, net()).await;
     let id = a.create("hub").await.unwrap();
     b.join(&a.invite(&id).await.unwrap()).await.unwrap();
     let ch = general(&a, &id);
@@ -1566,12 +1540,10 @@ async fn small_ops_go_as_events() {
         assert!(i < 60, "no events");
     }
     let n = texts(&a, &id, &ch).len();
-    let dialed = a.events().1;
     let m = say(&a, &id, ch, "by event").await;
     until("b has it", || texts(&b, &id, &ch).len() > n).await;
     let ts = a.view(&id, |s| s.messages(&ch, None, 99)).unwrap();
     let ts = ts.iter().find(|x| x.id == m).unwrap().ts;
     until("acked", || a.reach(&id, &b.id()).is_some_and(|r| r >= ts)).await;
-    assert_eq!(a.events().1, dialed, "none dialed after all");
-    let _ = ntfy.kill();
+    assert_eq!(a.events().1, 0, "none dialed after all");
 }
