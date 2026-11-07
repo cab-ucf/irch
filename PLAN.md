@@ -77,9 +77,17 @@ relay, it is dialed over iroh (QUIC). Calls and files: iroh, direct
 UDP, at full speed. Each device's address (`irch:ev:ID@RELAY`) rides in
 its push op, beside its ring codes, told again when it moves relays.
 
-Next: phones on Android's shared irpush node send and hear events too
-(the library's JNI); then irch's iroh endpoint starts only when QUIC is
-needed, so an idle device holds the one socket and nothing else.
+Built: one app id per app (irch's package name), so the phone's irpush
+owner, whichever app it is, hands irch its frames or wakes it for them;
+frames are `kind ‖ space ‖ rest`: an op (rings from push servers too),
+its ack, or a dial. A desktop keeps its lane while its node sleeps, and
+the app shows what comes from the phonebook, starting the node for a
+call or a catch-up. irch's iroh endpoint runs only while needed: it
+binds on first use (same key, same port), a device about to dial knocks
+the other's lane first so its iroh wakes, and it closes once no
+connection, call or gossip has been open a minute (never a storage
+node's, nor one no lane can wake). iroh 1.4.1 cannot drop its home relay
+at runtime, so sleeping is closing the endpoint, waking is binding again.
 
 ## Waking and ringing
 

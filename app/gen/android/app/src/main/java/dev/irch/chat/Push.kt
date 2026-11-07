@@ -44,8 +44,9 @@ object Wake {
 
   @JvmStatic external fun joined(ok: Boolean)
 
-  /** A ring irpush brought: `{show, catch}`, as `rung` says them. */
-  @JvmStatic external fun ring(ctx: Context, dir: String, data: ByteArray): String
+  /** What irpush brought from `from` (its hex id): `{show, catch}`, as
+   *  `rung` says them, or to irch's node if it runs. */
+  @JvmStatic external fun ring(ctx: Context, dir: String, from: String, data: ByteArray): String
 }
 
 /** The phone's one irpush device, shared with every irpush app (irpush's
@@ -63,10 +64,10 @@ class IrchApp : android.app.Application() {
         seen.edit().putString("id", id).apply()
         if (UnifiedPush.getAckDistributor(this) == null) live(this)
       }
-    }) { _, d ->
+    }) { from, d ->
       Thread {
         val dir = dataDir.absolutePath
-        if (show(this, Wake.ring(applicationContext, dir, d))) wake(this, null)
+        if (show(this, Wake.ring(applicationContext, dir, from, d))) wake(this, null)
       }.start()
     }
     thread(isDaemon = true, name = "irpush-join") {

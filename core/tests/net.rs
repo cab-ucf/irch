@@ -65,6 +65,29 @@ async fn node(name: &str) -> Arc<Node> {
     start(&dir(name), name, None, false).await
 }
 
+/// A phone with no node: what irpush brings its lane, as ops' news
+/// (acks and dials passed over), read from its phonebook.
+struct Phone(
+    std::path::PathBuf,
+    tokio::sync::mpsc::UnboundedReceiver<irch_core::push::Heard>,
+);
+
+impl Phone {
+    fn new(d: &std::path::Path) -> Self {
+        irch_core::push::device(d, None).unwrap().expect("paired");
+        Self(d.into(), irch_core::push::listen(d))
+    }
+
+    async fn next(&mut self) -> Option<irch_core::wake::News> {
+        loop {
+            let (_, f) = self.1.recv().await?;
+            if let Some(Some(n)) = Node::news(&self.0, &f) {
+                return Some(n);
+            }
+        }
+    }
+}
+
 async fn until(what: &str, f: impl Fn() -> bool) {
     // Forty seconds: a busy machine runs every test at once.
     for _ in 0..800 {
@@ -929,7 +952,7 @@ async fn a_storage_node_rings_a_phone_through_irpush() {
     b.shutdown().await;
     drop(b);
 
-    let phone = irch_core::push::device(&db, None).unwrap().unwrap();
+    let mut phone = Phone::new(&db);
     say(&a, &id, ch, "hi").await;
     let news = tokio::time::timeout(Duration::from_secs(10), phone.next());
     let news = news.await.expect("pushed within seconds").unwrap();
@@ -1262,7 +1285,7 @@ async fn ring_paths() {
     until("a knows b's push server", || told() == Some(true)).await;
     let on = |x: &Node, u: &Node| x.online(&id).contains(&u.id());
     until("each sees the other", || on(&a, &b) && on(&b, &a)).await;
-    let phone = irch_core::push::device(&db, None).unwrap().unwrap();
+    let mut phone = Phone::new(&db);
 
     let doc = a.doctor(Some(b.id())).await;
     let dial = doc["devices"][0]["ms"].as_u64().expect("b's device reached");
@@ -1281,7 +1304,7 @@ async fn ring_paths() {
         let _: Event = e.await.expect("b hears the call").unwrap();
     }
     let gossip = t.elapsed();
-    let (push, news, phone) = pushed.await.unwrap();
+    let (push, news, mut phone) = pushed.await.unwrap();
     assert!(news.is_some(), "pushed too");
     a.call(None).await.unwrap();
     until("b hears it end", || b.calls(&id).is_empty()).await;
@@ -1345,7 +1368,7 @@ async fn a_ring_gets_through_while_any_push_server_is_up() {
     drop(b);
     s1.shutdown().await;
     drop(s1);
-    let phone = irch_core::push::device(&db, None).unwrap().unwrap();
+    let mut phone = Phone::new(&db);
     say(&a, &id, ch, "still here?").await;
     let news = tokio::time::timeout(Duration::from_secs(20), phone.next());
     let news = news.await.expect("pushed through s2").unwrap();
@@ -1513,6 +1536,40 @@ async fn an_untouched_device_goes_idle() {
     until("idle", || a.idle(&id).contains(&b.id())).await;
     b.active().await;
     until("back", || !a.idle(&id).contains(&b.id())).await;
+}
+
+/// Nothing open, a device's iroh sleeps, its lane still up; a member
+/// dialing it knocks there first, and it wakes for the link.
+#[tokio::test(flavor = "multi_thread")]
+async fn iroh_sleeps_and_a_dial_wakes_it() {
+    use iroh_relay::server::{RelayConfig, Server, ServerConfig};
+    let mut cfg = ServerConfig::default();
+    cfg.relay = Some(RelayConfig::new(([127, 0, 0, 1], 0)));
+    let relay = Server::spawn(cfg).await.unwrap();
+    let url = format!("http://{}/", relay.http_addr().unwrap());
+    let net = || Net::Relay(vec![url.parse().unwrap()]);
+    let a = on(&dir("a"), "a", None, false, net()).await;
+    let b = on(&dir("b"), "b", None, false, net()).await;
+    let id = a.create("hub").await.unwrap();
+    b.join(&a.invite(&id).await.unwrap()).await.unwrap();
+    let ch = general(&a, &id);
+    for i in 0.. {
+        say(&b, &id, ch, &format!("{i}")).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if b.events().0 > 0 && a.events().0 > 0 && b.quiet().await {
+            break;
+        }
+        say(&a, &id, ch, &format!("{i}")).await;
+        assert!(i < 120, "b's iroh never slept");
+    }
+    assert!(!b.iroh_up(), "asleep");
+    let n = texts(&a, &id, &ch).len();
+    say(&b, &id, ch, "by lane, iroh asleep").await;
+    until("a hears b", || texts(&a, &id, &ch).len() > n).await;
+    let d = a.doctor(Some(b.id())).await;
+    let ms = d["devices"][0]["ms"].clone();
+    assert!(ms.is_u64(), "a dial knocked b awake: {d}");
+    assert!(b.iroh_up(), "awake");
 }
 
 /// On one relay, small ops go as irpush events (one datagram each, acked

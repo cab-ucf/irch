@@ -62,14 +62,15 @@ async fn doze(app: AppHandle) {
     }
 }
 
-/// Asleep, out of sight and out of calls (desktops: only if irpush wakes
-/// them; else they stay up in the tray). True if it stopped.
+/// Asleep, out of sight and out of calls (desktops: only while their
+/// irpush lane is on a relay; else they stay up in the tray). True if it
+/// stopped.
 #[cfg(any(desktop, target_os = "android"))]
 async fn nap() -> bool {
     use std::sync::atomic::Ordering::SeqCst;
     let n = running().filter(|n| n.in_call().is_none() && !FG.load(SeqCst));
     #[cfg(desktop)]
-    let n = n.filter(|n| n.pushing());
+    let n = n.filter(|n| n.wakes());
     let Some(n) = n else { return false };
     *NODE.lock().unwrap_or_else(|e| e.into_inner()) = None;
     n.shutdown().await;
@@ -87,23 +88,43 @@ fn sight(app: &AppHandle) {
     tauri::async_runtime::spawn(async move { seen(&app, fg).await });
 }
 
-/// Desktop: paired with a storage node (ours first), irch sleeps
-/// out of sight and irpush wakes it; its rings shown from the phonebook,
-/// a call starting the node at once, so it connects as it is answered.
+/// Desktop: irch sleeps out of sight, its irpush lane up (a storage
+/// node's mesh if one takes it, ours first; else its own on our relay).
+/// What comes asleep is shown from the phonebook; a call or a catch-up
+/// starts the node, which connects as it is answered. One per profile.
 #[cfg(desktop)]
-async fn pair(app: AppHandle, n: Arc<Node>) {
-    let Some(url) = n.irpush().await else { return };
-    n.set_push(Some(url)).await;
-    let (Ok(dir), true) = (home(&app), n.pushing()) else { return };
+fn pair(
+    app: AppHandle,
+    n: Arc<Node>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(hear(app, n)) // named: `start` spawns it, and it starts nodes
+}
+
+#[cfg(desktop)]
+async fn hear(app: AppHandle, n: Arc<Node>) {
+    static HEARD: std::sync::Mutex<Option<std::path::PathBuf>> =
+        std::sync::Mutex::new(None);
+    let Ok(dir) = home(&app) else { return };
+    {
+        let mut h = HEARD.lock().unwrap_or_else(|e| e.into_inner());
+        if h.as_ref() == Some(&dir) {
+            return;
+        }
+        *h = Some(dir.clone());
+    }
+    let mut rx = irch_core::push::listen(&dir);
+    if let Some(url) = n.irpush().await {
+        n.set_push(Some(url)).await;
+    }
     drop(n); // asleep, a node goes
-    let Ok(Some(d)) = irch_core::push::device(&dir, None) else { return };
     tauri::async_runtime::spawn(doze(app.clone()));
-    while let Some(news) = d.next().await {
+    while let Some((from, f)) = rx.recv().await {
         if let Some(n) = running() {
-            n.deliver(news);
+            n.hear(from, &f);
             continue;
         }
-        let (x, catch) = Node::woken(&dir, &news);
+        let Some(news) = Node::news(&dir, &f) else { continue };
+        let (x, catch) = news.map_or((None, true), |w| Node::woken(&dir, &w));
         if let Some(x) = &x {
             notify(&app, x).await;
         }
@@ -111,7 +132,7 @@ async fn pair(app: AppHandle, n: Arc<Node>) {
             if start(&app, None).await.is_ok()
                 && let Some(n) = running()
             {
-                n.deliver(news);
+                n.hear(from, &f);
             }
             tauri::async_runtime::spawn(doze(app.clone()));
         }
@@ -851,12 +872,7 @@ pub fn run() {
                 use tauri_plugin_notification::NotificationExt;
                 let _ = h.notification().request_permission();
             }
-            let r = start(&h, None).await;
-            #[cfg(desktop)]
-            if let Some(n) = running() {
-                pair(h, n).await;
-            }
-            r
+            start(&h, None).await
         });
         Ok(())
     });
@@ -940,6 +956,8 @@ async fn start(app: &AppHandle, link: Option<String>) -> Result<(), String> {
     let r = r.await.map_err(err);
     if let Ok(n) = &r {
         forward(app.clone(), n.clone());
+        #[cfg(desktop)]
+        tauri::async_runtime::spawn(pair(app.clone(), n.clone()));
     }
     let done = r.as_ref().map(drop).map_err(Clone::clone);
     app.state::<App>().0.send_replace(Some(r));

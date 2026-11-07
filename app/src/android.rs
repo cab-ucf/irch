@@ -443,22 +443,31 @@ pub extern "system" fn Java_dev_irch_chat_Wake_joined(
     push::joined(ok != 0);
 }
 
-/// A ring irpush brought (space, then the doorbell's frame): its notices,
-/// and whether to catch up, as `Wake.rung` says them.
+/// What irpush brought for irch (`push::parse`): to its node if one runs,
+/// else its notices and whether to catch up, as `Wake.rung` says them.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_irch_chat_Wake_ring<'l>(
     mut env: JNIEnv<'l>,
     _: JClass<'l>,
     ctx: JObject<'l>,
     dir: JString<'l>,
+    from: JString<'l>,
     data: JByteArray<'l>,
 ) -> jstring {
     let dir = text(&mut env, &dir).unwrap_or_default();
     let dir = irch_core::profile(std::path::Path::new(&dir));
+    let from = text(&mut env, &from).and_then(|f| f.parse().ok());
     let b = env.convert_byte_array(&data).unwrap_or_default();
     reply(env, ctx, async move {
-        let (sp, raw) = b.split_first_chunk::<32>().context("short ring")?;
-        Ok(shown(&dir, (irch_core::Id(*sp), raw.to_vec())))
+        if let (Some(n), Some(from)) = (crate::running(), from) {
+            n.hear(from, &b);
+            return Ok(Shown::default());
+        }
+        Ok(match Node::news(&dir, &b) {
+            Some(Some(news)) => shown(&dir, news),
+            Some(None) => Shown { catch: true, ..Shown::default() },
+            None => Shown::default(),
+        })
     })
 }
 

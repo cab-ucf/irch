@@ -52,11 +52,15 @@ See [PLAN.md](PLAN.md). irpush's own list: irpush's TODO.md.
       back; dialed over QUIC when unacked in 3 s or on another relay
 - [x] Events on phones through Android's shared irpush node, when irch's
       process runs it (irpush's `shared`, `tap`)
-- [ ] ...and when another irpush app owns it (its Binder broker)
+- [x] Hearing them when another irpush app owns it: one app id per app,
+      so its broker hands them over or wakes irch
+- [ ] Sending them then too (the broker takes only pushes in)
 - [x] Read receipts batched: one per DM channel per 2 s, the latest
-- [ ] irch's iroh endpoint only while QUIC is needed (calls, files, syncs):
-      iroh 1.4.1 keeps its home relay even with the relay map emptied, so
-      this needs an iroh patch (or #4589/#4590)
+- [x] irch's iroh endpoint only while needed: bound on first use, a
+      knock on the other's lane before a dial, closed a minute after
+      nothing is open (storage nodes stay up)
+- [x] Desktops sleep with any lane (their own on our relay, or a storage
+      node's mesh) and wake through it
 - [ ] Message one device of someone else's
 - [x] Status icons, details on hover or tap: offline; ✓ with storage and
       relay struck through until each has it; ✓✓ on their device (* not
@@ -66,14 +70,20 @@ See [PLAN.md](PLAN.md). irpush's own list: irpush's TODO.md.
 - [x] Note to self: our own space as a DM, on all our devices and kept
       by our storage nodes (posts, edits, reactions, pins, files)
 
-## 5. Push servers that form themselves
+## 5. Your own always-on servers
+- [ ] Push-button VPS: a provider's API token in, an irpush relay and a
+      storage node out (free or cheap tiers), told to your devices
+- [ ] A personal desktop as that server, reachable from anywhere through
+      iroh: no router settings, no open ports
+
+## 6. Push servers that form themselves
 - [x] A phone's device joins each of its owner's storage nodes' meshes
       (not others': they could wake every irpush app on it) and registers
       with all; members ring every one at once (`a_ring_gets_through_…`)
 - [ ] The storage nodes themselves share one mesh (a ring queued on one
       reaches the phone through another)
 
-## 6. Short invite and link codes
+## 7. Short invite and link codes
 - [x] Short codes (`k7m-x9q-p3a`): Argon2id → a throwaway iroh identity,
       60 s, one try; the invite or link code sealed to the taker's fresh
       X-Wing key (analysis in PLAN.md; three tests)
@@ -82,11 +92,7 @@ See [PLAN.md](PLAN.md). irpush's own list: irpush's TODO.md.
 - [x] Optional password: an Argon2id-keyed layer around the payload
       (salted by the code's proof); asked for after the one try, if need be
 
-## 8. Relays without the cloud
-- [ ] A storage node with a public address serves a relay
-- [ ] One button: a VPS provider's API token in, a relay out
-
-## 7. UI
+## 8. UI
 - [x] Storage Nodes: the switch toggles (not Rename)
 - [x] Storage Nodes: Remove, optionally shut down our own
 - [x] Settings icon: a cog

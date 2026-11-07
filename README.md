@@ -187,8 +187,13 @@ space = a grow-only set of envs;   state = a deterministic fold of it
 - **Voice messages are Opus in Ogg**, played by decoding them in the app:
   the same in every web view, seekable, the right length.
 - **Sync** compares per-day fingerprints, then sends only missing envs.
-- **Phones and desktops sleep, holding nothing open.** Out of sight a
-  minute (a desktop: with a storage node pushing to it), the node stops. Whoever writes or calls rings each member's phone with the
+- **One socket per device; iroh only for a link.** Each device holds its
+  one irpush socket (its lane) to a relay. Small ops come there, one
+  datagram each, under irch's one app id; a device about to dial knocks
+  there first, so iroh starts only for a link (a sync, a file, a call) and
+  sleeps once nothing has been open a minute. Storage nodes keep theirs up.
+- **Phones and desktops sleep, holding nothing but that socket.** Out of
+  sight a minute, the node stops. Whoever writes or calls rings each member's phone with the
   sealed op itself, and the phone shows it from a phonebook its node left
   (each space's key, names, levels) and keeps it for the node to fold
   later: a wake starts no node and opens no connection. Android phones
@@ -206,6 +211,9 @@ space = a grow-only set of envs;   state = a deterministic fold of it
   its relay learns when and nothing else, and the phone shows it as it
   lands. The push server keeps a ring for a phone that is off a day;
   storage nodes and members keep everything, synced when irch opens.
+- **A ring is decrypted on the device**: a call rings and starts iroh at
+  once, but no media flows until it is answered (call links are dropped
+  until then).
 - **Traffic is one op per state change.** A device says `Here` as it
   joins a space's mesh and `Gone` as it leaves or idles 10 minutes; each
   device already there answers once with its call (none, mostly); in use,

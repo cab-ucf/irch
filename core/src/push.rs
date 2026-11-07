@@ -6,7 +6,7 @@
 //! end to end (post-quantum), always the same size. The push server learns
 //! when, and for which space, nothing else. No Google: no Firebase.
 
-use crate::wake::{HEAD, MAX, News};
+use crate::wake::{HEAD, MAX};
 use crate::{Id, Net, node::lock, store};
 use anyhow::{Result, ensure};
 use iroh::endpoint::Connection;
@@ -207,9 +207,9 @@ impl Server {
             let to = p.rings.get(&t).into_iter().flatten();
             to.filter_map(|d| Some(p.by.get(d)?.0.clone())).collect()
         };
-        let ring = [&head[16..48], &raw[..]].concat();
+        let ring = [&[OP][..], &head[16..48], &raw[..]].concat();
         let r =
-            if ring.len() <= irpush::BODY { &ring[..] } else { &ring[..32] };
+            if ring.len() <= irpush::BODY { &ring[..] } else { &ring[..33] };
         let mut ok = false;
         for d in to.iter().filter_map(|t| t.strip_prefix("irpush:")) {
             let sent = d.parse().map_err(Into::into);
@@ -266,79 +266,110 @@ fn host(dir: &Path, net: &Net) -> Result<Option<Arc<irpush::Node>>> {
     if n.relays() != relays {
         n.set_relays(relays)?;
     }
-    let n = Arc::new(n);
-    let run = n.clone();
-    let on = ear(dir);
-    tokio::spawn(async move { run.run(on).await });
-    lock(&LANES).insert(dir.into(), n.clone());
-    Ok(Some(n))
+    Ok(Some(run(dir, n)))
 }
 
-// ── Events: small ops as one datagram each on the socket irpush holds ──
+// ── Lanes: every device's one irpush node, and what reaches irch on it ──
 //
-// Every device's irpush node (a storage node's host, a phone's device, a
-// desktop's own) is reachable by its id on its relay, so an op goes there
-// as one datagram: no QUIC link, no handshake, no 5 s pings. Its ack comes
-// back the same way; unacked, it is dialed (`Node::dial`).
+// Each device holds one irpush node (a storage node's host, a phone's
+// device, a desktop's device or its own lone host), reachable by its id
+// on its relay. irch sends and hears there under its one app id, as
+// `kind ‖ space ‖ rest`: an op (a message, a ring: one datagram, sealed
+// and signed as ever), its ack, or a dial (start iroh, a link is coming).
+// Pushes from a storage node come the same way, queued for a sleeper.
 
-/// irch's events, apart from rings.
-const EV: &str = "dev.irch.chat#ev";
-/// An event that came: the sender's irpush id and what it said.
+/// What a frame carries: an op (empty: catch up), an ack (its ts), a dial.
+pub const OP: u8 = 0;
+pub const ACK: u8 = 1;
+pub const DIAL: u8 = 2;
+/// What came: the sender's irpush id and its frame.
 pub type Heard = (EndpointId, Vec<u8>);
 type Ear = tokio::sync::mpsc::UnboundedSender<Heard>;
 static EARS: Mutex<BTreeMap<PathBuf, Ear>> = Mutex::new(BTreeMap::new());
-static LANES: Mutex<BTreeMap<PathBuf, Arc<irpush::Node>>> =
-    Mutex::new(BTreeMap::new());
+
+struct Lane(Arc<irpush::Node>, tokio::task::AbortHandle);
+
+impl Drop for Lane {
+    fn drop(&mut self) {
+        self.1.abort();
+    }
+}
+
+static LANES: Mutex<BTreeMap<PathBuf, Lane>> = Mutex::new(BTreeMap::new());
+
+/// `n` running as the lane of `dir`, in place of any before.
+fn run(dir: &Path, n: irpush::Node) -> Arc<irpush::Node> {
+    let (n, on) = (Arc::new(n), ear(dir));
+    let r = n.clone();
+    let task = tokio::spawn(async move { r.run(on).await }).abort_handle();
+    lock(&LANES).insert(dir.into(), Lane(n.clone(), task));
+    n
+}
 
 fn ear(dir: &Path) -> impl Fn(EndpointId, irpush::App, &[u8]) + use<> {
-    let (dir, ev) = (dir.to_path_buf(), irpush::app(EV));
+    let (dir, me) = (dir.to_path_buf(), irpush::app(APP));
     move |from, app, d| {
-        if let Some(e) = lock(&EARS).get(&dir).filter(|_| app == ev) {
-            let _ = e.send((from, d.to_vec()));
+        let mut e = lock(&EARS);
+        let gone = app == me
+            && e.get(&dir).is_some_and(|e| e.send((from, d.to_vec())).is_err());
+        if gone {
+            e.remove(&dir);
         }
     }
 }
 
-/// Events for the node at `dir`, from now on; a desktop with no irpush node
-/// gets its own, a lone host on our relay (pinged half-hourly).
-pub fn hear(
-    dir: &Path,
-    net: &Net,
-) -> tokio::sync::mpsc::UnboundedReceiver<Heard> {
+/// `kind ‖ space ‖ rest`, or an older ring's `space ‖ op`, for a space
+/// `ours` knows.
+pub fn parse(b: &[u8], ours: impl Fn(&Id) -> bool) -> Option<(u8, Id, &[u8])> {
+    let new =
+        b.split_first().filter(|(k, _)| **k <= DIAL).and_then(|(k, r)| {
+            let (s, rest) = r.split_first_chunk::<32>()?;
+            ours(&Id(*s)).then_some((*k, Id(*s), rest))
+        });
+    new.or_else(|| {
+        let (s, rest) = b.split_first_chunk::<32>()?;
+        ours(&Id(*s)).then_some((OP, Id(*s), rest))
+    })
+}
+
+/// What reaches `dir`'s lane from now on, here alone: the node's, or the
+/// app's while the node sleeps.
+pub fn listen(dir: &Path) -> tokio::sync::mpsc::UnboundedReceiver<Heard> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     lock(&EARS).insert(dir.into(), tx);
-    // Android's shared node, when it runs in our process.
-    let on = ear(dir);
-    irpush::tap(irpush::app(EV), move |from, d| on(from, irpush::app(EV), d));
-    let phone = cfg!(any(target_os = "android", target_os = "ios"));
-    if !phone && lane(dir).is_none() {
-        let _ = lone(dir, net).inspect_err(|e| tracing::warn!("lane: {e:#}"));
-    }
     rx
 }
 
-fn lone(dir: &Path, net: &Net) -> Result<()> {
+/// Whether someone hears `dir`'s lane.
+pub fn heard(dir: &Path) -> bool {
+    lock(&EARS).get(dir).is_some_and(|e| !e.is_closed())
+}
+
+/// A desktop's lane, if it has none: its device, else a lone host on our
+/// relay (pinged half-hourly) until a storage node's mesh takes it.
+pub fn ours(dir: &Path, net: &Net) -> Result<()> {
     let url = match net {
         Net::Default => relay(dir).0,
         Net::Relay(u) => u[0].to_string(),
         _ => return Ok(()),
     };
+    if lane(dir).is_some() || device(dir, None)?.is_some() {
+        return Ok(());
+    }
     let (f, kek) = (dir.join("lane"), kek(dir)?);
     let n = match f.exists() {
         true => irpush::Node::open(&f, kek, vec![])?,
         false => irpush::Node::create(&f, kek, irpush::Relay::list(&url)?)?,
     };
-    let (n, on) = (Arc::new(n), ear(dir));
-    let run = n.clone();
-    tokio::spawn(async move { run.run(on).await });
-    lock(&LANES).insert(dir.into(), n);
+    run(dir, n);
     Ok(())
 }
 
-/// The irpush node that carries our events, if any: ours, or the phone's
+/// The irpush node that carries our frames, if any: ours, or the phone's
 /// shared one when it runs in our process.
 pub fn lane(dir: &Path) -> Option<Arc<irpush::Node>> {
-    lock(&LANES).get(dir).cloned().or_else(irpush::shared)
+    let ours = lock(&LANES).get(dir).map(|l| l.0.clone());
+    ours.or_else(irpush::shared)
 }
 
 /// Ours, as members get it (`irch:ev:ID@RELAY`), while on a relay.
@@ -355,71 +386,34 @@ pub fn lane_of(push: &str) -> Option<(EndpointId, String)> {
     })
 }
 
-/// One event to `to` on `relay`; whether it left.
+/// One frame to `to` on `relay`; whether it left.
 pub fn event(dir: &Path, to: EndpointId, relay: &str, b: &[u8]) -> bool {
-    lane(dir).is_some_and(|l| l.event(to, relay, &irpush::app(EV), b))
+    lane(dir).is_some_and(|l| l.event(to, relay, &irpush::app(APP), b))
 }
 
-/// A phone's irpush device: one per profile, its pushes as rings.
-pub struct Device {
-    pub node: Arc<irpush::Node>,
-    rx: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<News>>,
-    run: tokio::task::AbortHandle,
-}
-
-impl Drop for Device {
-    fn drop(&mut self) {
-        self.run.abort();
+/// Our irpush device (a storage node's mesh took it), running: kept from
+/// before, or joined now with `ticket`. It replaces a lone lane.
+pub fn device(
+    dir: &Path,
+    ticket: Option<&str>,
+) -> Result<Option<Arc<irpush::Node>>> {
+    let f = dir.join("irpush");
+    let dev = |l: &Arc<irpush::Node>| l.role() == irpush::Role::Device;
+    if let Some(l) = lane(dir).filter(dev) {
+        return Ok(Some(l));
     }
-}
-
-impl Device {
-    /// What a phone gives its push server.
-    pub fn url(&self) -> String {
-        format!("irpush:{}", self.node.id())
-    }
-
-    pub fn paired(&self) -> bool {
-        !self.node.peers().is_empty()
-    }
-
-    /// The next ring that came as a push.
-    pub async fn next(&self) -> Option<News> {
-        self.rx.lock().await.recv().await
-    }
-}
-
-static DEVICES: Mutex<BTreeMap<PathBuf, Arc<Device>>> =
-    Mutex::new(BTreeMap::new());
-
-/// Ours, running: kept from before, or joined now with `ticket`.
-pub fn device(dir: &Path, ticket: Option<&str>) -> Result<Option<Arc<Device>>> {
-    let mut all = lock(&DEVICES);
-    if let Some(d) = all.get(dir) {
-        return Ok(Some(d.clone()));
-    }
-    let (f, kek) = (dir.join("irpush"), kek(dir)?);
-    let node = match (f.exists(), ticket) {
+    let kek = kek(dir)?;
+    let n = match (f.exists(), ticket) {
         (true, _) => irpush::Node::open(&f, kek, vec![])?,
         (false, Some(t)) => irpush::Node::join(&f, kek, t, vec![])?,
         (false, None) => return Ok(None),
     };
-    let (node, (tx, rx)) =
-        (Arc::new(node), tokio::sync::mpsc::unbounded_channel());
-    let (run, me, ev) = (node.clone(), irpush::app(APP), ear(dir));
-    let on = move |from, app, b: &[u8]| {
-        ev(from, app, b);
-        if let Some((sp, raw)) =
-            b.split_first_chunk::<32>().filter(|_| app == me)
-        {
-            let _ = tx.send((Id(*sp), raw.to_vec()));
-        }
-    };
-    let run = tokio::spawn(async move { run.run(on).await }).abort_handle();
-    lock(&LANES).insert(dir.into(), node.clone());
-    let d = Arc::new(Device { node, rx: rx.into(), run });
-    all.insert(dir.into(), d.clone());
-    Ok(Some(d))
+    Ok(Some(run(dir, n)))
+}
+
+/// What a phone gives its push server.
+pub fn url(d: &irpush::Node) -> String {
+    format!("irpush:{}", d.id())
 }
 
 /// Our device into one more push server's mesh: rings get through while
@@ -429,12 +423,12 @@ pub async fn also(dir: &Path, ticket: &str) -> bool {
         return join_shared(dir, ticket).await.is_some();
     }
     let Ok(Some(d)) = device(dir, None) else { return false };
-    let had = d.node.peers().len();
-    if d.node.add(ticket).is_err() {
+    let had = d.peers().len();
+    if d.add(ticket).is_err() {
         return false;
     }
     for _ in 0..80 {
-        if d.node.peers().len() > had {
+        if d.peers().len() > had {
             return true;
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -444,20 +438,19 @@ pub async fn also(dir: &Path, ticket: &str) -> bool {
 
 /// Ours, never paired (its ticket ran out): gone, for a new one.
 pub fn forget(dir: &Path) {
-    lock(&DEVICES).remove(dir);
     lock(&LANES).remove(dir);
     let _ = std::fs::remove_file(dir.join("irpush"));
 }
 
-/// Heartbeat now (an alarm rang): seconds to the next, 0 with no device.
+/// Heartbeat now (an alarm rang): seconds to the next, 0 with no lane.
 pub fn kick() -> u64 {
-    let all = lock(&DEVICES);
-    all.values().map(|d| d.node.kick().as_secs()).min().unwrap_or(0)
+    let all = lock(&LANES);
+    all.values().map(|l| l.0.kick().as_secs()).min().unwrap_or(0)
 }
 
 /// Another network (a stable id for each), or none (`irpush::OFFLINE`).
 pub fn network(id: u64) {
-    lock(&DEVICES).values().for_each(|d| d.node.network(id));
+    lock(&LANES).values().for_each(|l| l.0.network(id));
 }
 
 // ── Android: one device per phone, run by irpush's library for every app ──
