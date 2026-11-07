@@ -11,6 +11,8 @@ use std::mem::take;
 
 /// Author clock, then id; also the paging cursor.
 pub type Pos = (u64, Id);
+/// After every op: a key judged as held now.
+pub const END: Pos = (u64::MAX, Id([255; 32]));
 pub const DM: Ch = Ch([0; 8]);
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -363,7 +365,7 @@ impl State {
         // Told under a key a later epoch left them out of: none, however dated.
         let cut = self.profiled.iter().filter(|(a, at)| {
             let tags = self.sealed.get(&at.1).map_or(&[][..], |t| t);
-            tags.iter().all(|t| self.left_out(t, a))
+            tags.iter().all(|t| self.stale(t, &END, a))
         });
         let cut: Vec<Id> = cut.map(|(a, _)| *a).collect();
         for a in cut {
@@ -372,20 +374,19 @@ impl State {
         twice
     }
 
-    fn left_out(&self, epoch: &[u8; 8], a: &Id) -> bool {
-        let from = self.epochs.iter().find(|e| e.tag == *epoch).map(|e| e.at);
-        self.live().any(|e| Some(e.at) > from && !e.to.contains(a))
-    }
-
     /// Sealed after a newer epoch, set by an admin still, left `a` out: an
     /// old invite, a banned member renamed. One given the new key, writing
-    /// offline, stays.
+    /// offline, stays. A key no epoch set (one an admin passed by hand, a
+    /// rekey that left the owner out) is older than all: no ban outlives it.
     pub fn stale(&self, epoch: &[u8; 8], at: &Pos, a: &Id) -> bool {
-        let Some(from) = self.epochs.iter().find(|e| e.tag == *epoch) else {
-            return false;
-        };
-        let since = |e: &&Epoch| e.at > from.at && e.at < *at;
+        let from = self.epochs.iter().find(|e| e.tag == *epoch).map(|e| e.at);
+        let since = |e: &&Epoch| Some(e.at) > from && e.at < *at;
         self.live().filter(since).any(|e| !e.to.contains(a))
+    }
+
+    /// An epoch a rekey here set.
+    pub fn known(&self, epoch: &[u8; 8]) -> bool {
+        self.epochs.iter().any(|e| e.tag == *epoch)
     }
 
     fn stale_at(&self, at: &Pos, a: &Id) -> bool {
@@ -1205,26 +1206,29 @@ mod tests {
             boxes: to.iter().map(|u| (*u, vec![])).collect(),
         };
         let role = |user, role| Op::Role { user, role };
+        // Each sealed under the key it was written with.
+        let op =
+            |n, author, x: Op, t| Signed { epoch: [t; 8], ..op(n, author, x) };
         st.extend([
-            op(1, o, rekey(1, &[])),
-            op(2, o, role(a, Role::Admin)),
-            op(3, a, rekey(2, &[o, a])),
-            op(4, o, role(a, Role::Member)),
+            op(1, o, rekey(1, &[]), 1),
+            op(2, o, role(a, Role::Admin), 1),
+            op(3, a, rekey(2, &[o, a]), 1),
+            op(4, o, role(a, Role::Member), 1),
         ]);
         assert_eq!(st.epochs().len(), 2);
         assert_eq!(st.epoch().unwrap().tag, [1; 8], "a, demoted, is out");
         // b, banned, got a far-ahead epoch: only a later rekey ends the leak.
         st.extend([
-            op(5, o, role(a, Role::Admin)),
-            op(200, a, rekey(3, &[o, b])),
+            op(5, o, role(a, Role::Admin), 1),
+            op(200, a, rekey(3, &[o, b]), 2),
         ]);
-        st.extend([op(6, o, role(b, Role::Banned))]);
+        st.extend([op(6, o, role(b, Role::Banned), 1)]);
         assert!(st.leaks() && st.horizon() == 200);
-        st.extend([op(201, o, rekey(4, &[a]))]);
+        st.extend([op(201, o, rekey(4, &[a]), 3)]);
         assert!(!st.leaks() && st.epoch().unwrap().tag == [4; 8]);
-        st.extend([op(240, o, role(a, Role::Banned))]);
+        st.extend([op(240, o, role(a, Role::Banned), 4)]);
         assert!(st.leaks() && st.horizon() == 240);
-        st.extend([op(241, o, rekey(5, &[]))]);
+        st.extend([op(241, o, rekey(5, &[]), 4)]);
         assert!(!st.leaks());
     }
 

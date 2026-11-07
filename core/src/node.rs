@@ -433,10 +433,11 @@ impl Book {
                     && s.author != my;
                 let knock = matches!(s.op, Op::Knock { .. });
                 // Banned, cut off or retired: dropped, or it fills every
-                // member's disk.
+                // member's disk. A key no rekey here set yet passes: its
+                // rekey may come later (shown or not, `State` decides).
                 let at = (s.ts, s.id);
                 if st.role(&s.author) == Role::Banned
-                    || st.stale(&e.epoch, &at, &s.author)
+                    || st.known(&e.epoch) && st.stale(&e.epoch, &at, &s.author)
                     || st.burned_after(&at, &s.author)
                     || alien && (my != st.owner || !knock)
                 {
@@ -501,7 +502,8 @@ impl Book {
             let st = &self.st;
             let good =
                 |(a, at, ep, ..): &(Id, (u64, Id), [u8; 8], Key, bool)| {
-                    st.role(a) == Role::Admin && !st.stale(ep, at, a)
+                    st.role(a) == Role::Admin
+                        && !(st.known(ep) && st.stale(ep, at, a))
                 };
             let good: Vec<_> =
                 self.offered.extract_if(.., |o| good(o)).collect();
@@ -545,7 +547,7 @@ impl Book {
     /// A key from an invite: one an admin set, or any while rekeys have
     /// left us out (its own `Rekey` may be sealed under a key we lack).
     fn learn(&mut self, sp: &Id, me: &Me, k: Key) -> bool {
-        let set = self.st.epochs().iter().any(|e| e.tag == tag(&k));
+        let set = self.st.known(&tag(&k));
         let out =
             self.st.epoch().is_some_and(|e| !self.keys.contains_key(&e.tag));
         let new = (set || out) && self.keys.insert(tag(&k), k).is_none();
@@ -559,13 +561,23 @@ impl Book {
     /// Seal key, and if a newer epoch left us out; never older than our invite.
     fn key(&self, inv: &Invite) -> (Key, bool) {
         let st = &self.st;
-        if !st.epochs().iter().any(|e| e.tag == tag(&inv.key)) {
+        if !st.known(&tag(&inv.key)) {
             return (inv.key, false);
         }
         let newest = st.epoch().map(|e| e.tag);
         let held =
             st.live().find_map(|e| Some((e.tag, *self.keys.get(&e.tag)?)));
         held.map_or((inv.key, true), |(t, k)| (k, Some(t) != newest))
+    }
+
+    /// Opened under a key held, by someone neither out nor cut off by a
+    /// newer epoch (a key no rekey set counts as older than all).
+    fn check(&self, sp: &Id, e: &Env) -> Option<Signed> {
+        let s = op::open(sp, self.keys.get(&e.epoch)?, e, None)?.0;
+        let at = (s.ts, s.id);
+        let out =
+            self.st.out(&s.author) || self.st.stale(&s.epoch, &at, &s.author);
+        (!out).then_some(s)
     }
 
     /// Valid epochs' keys `Back` misses: lost rekey races, demoted admins'.
@@ -636,9 +648,10 @@ pub struct Node {
     route: Mutex<crate::voice::Route>,
     // Direct links to devices, closed once quiet (`QUIET_LINK`).
     links: Links,
-    // Ops sent as events (`push::event`), each awaiting its ack (live?),
-    // and how many left that way and how many were dialed after all.
-    waits: Mutex<HashMap<(Id, u64, EndpointId), bool>>,
+    // Ops sent as events (`push::event`), by the ack each awaits (space,
+    // time, device, live?), and how many left that way and how many were
+    // dialed after all.
+    waits: Mutex<HashMap<Key, (Id, u64, EndpointId, bool)>>,
     evs: (AtomicUsize, AtomicUsize),
     // Our events address, as last told (`tell_push`).
     told_lane: Mutex<Option<String>>,
@@ -1076,9 +1089,12 @@ impl Node {
         for (id, d) in std::mem::take(&mut local.hosted) {
             hosts.entry(id).or_default().users.insert(Id::default(), d);
         }
+        // Owners' devices are served across restarts: they pair, register.
+        let users = hosts.values().flat_map(|h| h.users.values().flatten());
+        let served = Arc::new(Mutex::new(users.copied().collect()));
         let n = Arc::new(Self {
             up: Instant::now(),
-            served: Default::default(),
+            served,
             relayed: AtomicBool::new(false),
             roamed: AtomicUsize::new(0),
             widened: AtomicBool::new(false),
@@ -1530,6 +1546,7 @@ impl Node {
                 return Some(r);
             }
             for a in self.keepers() {
+                self.met(&a).await;
                 let Ok(t) = crate::push::ticket(&self.ep, a).await else {
                     continue;
                 };
@@ -1546,6 +1563,7 @@ impl Node {
             None => {}
         }
         for a in self.keepers() {
+            self.met(&a).await;
             let Ok(t) = crate::push::ticket(&self.ep, a).await else {
                 continue;
             };
@@ -1561,6 +1579,31 @@ impl Node {
             crate::push::forget(&self.dir);
         }
         None
+    }
+
+    /// Synced with storage node `a` this run, as it pairs, registers and
+    /// tells its relays to those alone: at once, or after a sync (10 s).
+    async fn met(self: &Arc<Self>, a: &EndpointAddr) {
+        let done = || lock(&self.synced).contains_key(&a.id);
+        if done() {
+            return;
+        }
+        let holds = |id: &Id| self.view(id, |s| s.holds()).unwrap_or_default();
+        let keeps = |sp: &Arc<Space>| {
+            let ours = sp.id == self.own
+                && self.stores(&sp.id).iter().any(|s| s.0.id == a.id);
+            ours || holds(&sp.id).iter().any(|h| h.0.id == a.id)
+        };
+        self.all()
+            .iter()
+            .filter(|s| keeps(s))
+            .for_each(|s| self.sync(s, a.clone()));
+        for _ in 0..100 {
+            if done() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// Our irpush device and every space's ring token, to the storage
@@ -1582,9 +1625,13 @@ impl Node {
         // theirs could then wake every irpush app on this phone.
         for _ in 0..2 {
             let tries = self.keepers().into_iter().map(|a| {
-                let go =
-                    crate::push::register(&self.ep, a.clone(), &push, &rings);
-                async move { go.await.map(|_| a) }
+                let (push, rings) = (&push, &rings);
+                async move {
+                    self.met(&a).await;
+                    let r =
+                        crate::push::register(&self.ep, a.clone(), push, rings);
+                    r.await.map(|_| a)
+                }
             });
             took = n0_future::join_all(tries)
                 .await
@@ -1600,6 +1647,7 @@ impl Node {
             }
             let mut grew = false;
             for a in more {
+                self.met(&a).await;
                 if let Ok(t) = crate::push::ticket(&self.ep, a).await {
                     grew |= crate::push::also(&self.dir, &t).await;
                 }
@@ -1726,8 +1774,9 @@ impl Node {
                 let c = local.as_ref().unwrap_or(n.push.get_or_init(push_http));
                 let r = c.post(&url).header("TTL", "86400");
                 let r = r.header("Urgency", "high").body("1").send().await;
+                // Not its URL: whoever has it may push to them.
                 if let Err(e) = r {
-                    warn!("push: {e}");
+                    warn!("push: {}", e.without_url());
                 }
             });
         }
@@ -2096,9 +2145,14 @@ impl Node {
         for inv in knocks {
             let known =
                 self.view(&self.own, |s| s.spaces().contains_key(&inv.id()));
-            // One DM per person: once both are in one, knocks open no more.
-            // Before that (two made at once, or one lost), take theirs.
-            if known != Some(false) || self.dm_of(&inv.owner).is_some() {
+            // One DM per person: once both are in one, or one of theirs
+            // waits for them, knocks open no more. Before that (two made at
+            // once, or one lost), take theirs. A few waiting in all: anyone
+            // holding our card may knock, under any name.
+            let by = |sp: &Arc<Space>| sp.inv.as_ref().map(|i| i.owner);
+            let dms = self.dms_with(&inv.owner);
+            let had = dms.iter().any(|x| x.1 || by(&x.0) == Some(inv.owner));
+            if known != Some(false) || had || self.waiting() >= 64 {
                 continue;
             }
             // All news: its first message came before we were in it.
@@ -2501,6 +2555,17 @@ impl Node {
         // Their sleeping phones: woken to take it, and what follows.
         self.wake_who(via, Some(user), Some(knock.1));
         Ok(id)
+    }
+
+    /// DMs others made for us that they never came to: knocks taken.
+    fn waiting(&self) -> usize {
+        let me = self.id();
+        let theirs = |sp: &Arc<Space>| {
+            let i =
+                sp.inv.as_ref().filter(|i| i.dm == Some(me) && !i.card())?;
+            self.view(&sp.id, |s| s.profile(&i.owner).is_none())
+        };
+        self.all().iter().filter(|sp| theirs(sp) == Some(true)).count()
     }
 
     /// Our DMs with `user`, each with whether they are in it.
@@ -2930,8 +2995,13 @@ impl Node {
         to: Vec<EndpointId>,
     ) -> Vec<EndpointId> {
         let Some(e) = postcard::from_bytes::<Env>(raw).ok() else { return to };
+        let k = self
+            .get(&id)
+            .ok()
+            .and_then(|sp| lock(&sp.book).keys.get(&e.epoch).copied());
+        let Some(k) = k else { return to };
         let at = self.lanes(&id);
-        let ev = [&[0u8][..], &id.0, raw].concat();
+        let ev = [&[0u8][..], &ev_label(&id, &k), raw].concat();
         let (dir, this) = (&self.dir, self.this.get().cloned());
         let gone = |d: &EndpointId| {
             let Some((i, r)) = at.get(d) else { return false };
@@ -2940,12 +3010,13 @@ impl Node {
         let (sent, rest): (Vec<_>, Vec<_>) = to.into_iter().partition(gone);
         self.evs.0.fetch_add(sent.len(), Relaxed);
         for d in sent {
-            lock(&self.waits).insert((id, e.ts, d), e.live);
+            let a = ev_ack(&id, &k, e.ts, &d);
+            lock(&self.waits).insert(a, (id, e.ts, d, e.live));
             let (n, raw) = (this.clone().unwrap_or_default(), raw.to_vec());
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 let Some(n) = n.upgrade() else { return };
-                if lock(&n.waits).remove(&(id, e.ts, d)).is_some() {
+                if lock(&n.waits).remove(&a).is_some() {
                     n.evs.1.fetch_add(1, Relaxed);
                     n.link(id, &raw, vec![d]);
                 }
@@ -2970,38 +3041,58 @@ impl Node {
         (self.evs.0.load(Relaxed), self.evs.1.load(Relaxed))
     }
 
-    /// Each device of space `id` that told its events address.
+    /// Each device of space `id` that told its events address; one two
+    /// members claim is neither's (dialed, never sent events).
     fn lanes(&self, id: &Id) -> HashMap<EndpointId, (EndpointId, String)> {
         let p = self.view(id, |s| s.pushes_of(None)).unwrap_or_default();
-        let at =
-            |(d, u): (EndpointId, String)| Some((d, crate::push::lane_of(&u)?));
+        let mut claims: HashMap<EndpointId, usize> = HashMap::new();
+        p.iter().for_each(|x| *claims.entry(x.0).or_default() += 1);
+        let at = |(d, u): (EndpointId, String)| {
+            (claims[&d] == 1).then_some((d, crate::push::lane_of(&u)?))
+        };
         p.into_iter().filter_map(at).collect()
     }
 
     /// An event: an op (taken as if dialed; acked the same way), or an ack.
     fn heard(self: &Arc<Self>, from: EndpointId, b: &[u8]) {
-        let Some((k, b)) = b.split_first() else { return };
-        let Some((id, rest)) = b.split_first_chunk::<32>() else { return };
-        let (id, Ok(sp)) = (Id(*id), self.get(&Id(*id))) else { return };
-        let lanes = self.lanes(&id);
-        let Some((d, (_, at))) = lanes.into_iter().find(|l| l.1.0 == from)
-        else {
-            return;
-        };
-        match k {
-            0 => {
-                let Some(e) = self.take(&sp, d, rest) else { return };
-                let ack = [&[1u8][..], &id.0, &e.ts.to_le_bytes()].concat();
-                crate::push::event(&self.dir, from, &at, &ack);
-            }
-            _ => {
-                let Ok(ts) = rest.try_into().map(u64::from_le_bytes) else {
+        match b.split_first() {
+            Some((0, b)) => {
+                let Some((l, raw)) = b.split_first_chunk::<32>() else {
                     return;
                 };
-                if lock(&self.waits).remove(&(id, ts, d)) == Some(false) {
+                let Ok(e) = postcard::from_bytes::<Env>(raw) else { return };
+                // Its space: the one whose key for it makes its label.
+                let ours = |sp: Arc<Space>| {
+                    let k = *lock(&sp.book).keys.get(&e.epoch)?;
+                    (ev_label(&sp.id, &k) == *l).then_some((sp, k))
+                };
+                let Some((sp, k)) = self.all().into_iter().find_map(ours)
+                else {
+                    return;
+                };
+                let lanes = self.lanes(&sp.id);
+                let Some((d, (_, at))) =
+                    lanes.into_iter().find(|l| l.1.0 == from)
+                else {
+                    return;
+                };
+                let Some(e) = self.take(&sp, d, raw) else { return };
+                let a = ev_ack(&sp.id, &k, e.ts, &self.ep.id());
+                crate::push::event(
+                    &self.dir,
+                    from,
+                    &at,
+                    &[&[1u8][..], &a].concat(),
+                );
+            }
+            Some((1, a)) => {
+                let Ok(a) = Key::try_from(a) else { return };
+                let w = lock(&self.waits).remove(&a);
+                if let Some((id, ts, d, false)) = w {
                     self.acked(id, d, ts);
                 }
             }
+            _ => {}
         }
     }
 
@@ -3092,26 +3183,31 @@ impl Node {
         Ok(())
     }
 
-    /// An op `from` a device of the space (or one it takes), as if
-    /// gossiped; its envelope, if taken.
+    /// An op `from` a device of the space, as if gossiped; its envelope,
+    /// if taken. A member opens it first: signed on `from`, by someone
+    /// it may hear. Who knows only the space's id is neither met nor
+    /// synced with, so never told where its members meet. A storage node
+    /// can't open it: vouched devices only.
     fn take(
         self: &Arc<Self>,
         sp: &Arc<Space>,
         from: EndpointId,
         raw: &[u8],
     ) -> Option<Env> {
-        let known = {
-            let b = lock(&sp.book);
-            b.st.owner_of(&from).is_some()
-                || b.st.hosts().iter().any(|a| a.id == from)
+        let e = postcard::from_bytes::<Env>(raw).ok()?;
+        let ok = match sp.inv {
+            Some(_) => lock(&sp.book)
+                .check(&sp.id, &e)
+                .is_some_and(|s| s.device == from),
+            None => self.takes(sp, &from),
         };
-        if !known && !self.takes(sp, &from) {
+        if !ok {
             return None;
         }
         // Reached, directly: a neighbor (caught up with once).
         self.neighbor(sp, from);
         self.signaled(sp, raw, from);
-        postcard::from_bytes::<Env>(raw).ok()
+        Some(e)
     }
 
     /// Hand `text` to one of our own devices: one link straight to it (no
@@ -3902,9 +3998,6 @@ impl Node {
         from: EndpointId,
     ) -> (Option<Arc<Space>>, Admit) {
         let who = sync::who(h, &self.ep.id());
-        if let Some(u) = who {
-            self.bind(from, u);
-        }
         let sp = self.get(&h.space).ok();
         let owner = h.token.zip(self.serve).is_some_and(|(a, b)| same(&a, &b));
         let (sp, a) = if owner {
@@ -3917,6 +4010,10 @@ impl Node {
             let a = self.admits(&sp, h, from, who);
             (Some(sp), a)
         };
+        // Bound once admitted: strangers push out no member's binding.
+        if let (Some(u), Admit::Yes) = (who, &a) {
+            self.bind(from, u);
+        }
         // A storage node: whom it syncs with may have its irpush relay.
         if self.serve.is_some() && matches!(a, Admit::Yes) {
             let mut s = lock(&self.served);
@@ -3957,10 +4054,9 @@ impl Node {
             return Admit::Yes;
         }
         let Some(u) = who.filter(|u| !b.st.out(u)) else { return Admit::No };
-        let end = (u64::MAX, Id([255; 32]));
         let k = b.keys.iter().find(|(_, k)| sync::room(&sp.id, k) == h.room);
         match k {
-            Some((t, _)) if b.st.stale(t, &end, &u) => Admit::Out,
+            Some((t, _)) if b.st.stale(t, &crate::state::END, &u) => Admit::Out,
             Some(_) => Admit::Yes,
             None => Admit::No,
         }
@@ -4237,9 +4333,12 @@ impl Node {
     }
 
     fn neighbor(self: &Arc<Self>, sp: &Arc<Space>, peer: EndpointId) {
-        if !lock(&sp.nbrs).insert(peer) {
+        // Twice a small space's devices, at most: each is synced with.
+        let mut nb = lock(&sp.nbrs);
+        if nb.len() >= 2 * FANOUT || !nb.insert(peer) {
             return;
         }
+        drop(nb);
         self.emit(Event::Changed { space: sp.id });
         let (n, sp) = (self.clone(), sp.clone());
         tokio::spawn(async move {
@@ -4290,17 +4389,9 @@ impl Node {
             self.ingest(sp, vec![raw.to_vec()], false);
             return;
         }
-        let s = {
-            let b = lock(&sp.book);
-            let s = b.keys.get(&e.epoch);
-            let s = s.and_then(|k| op::open(&sp.id, k, &e, None)).map(|s| s.0);
-            // Presence, typing and calls only from who holds the key now,
-            // unbanned (a ban's rekey may wait for an admin).
-            s.filter(|s| {
-                !b.st.out(&s.author)
-                    && !b.st.stale(&s.epoch, &(s.ts, s.id), &s.author)
-            })
-        };
+        // Presence, typing and calls only from who holds the key now,
+        // unbanned (a ban's rekey may wait for an admin).
+        let s = lock(&sp.book).check(&sp.id, &e);
         let Some(s) = s else { return };
         // Recent, and once: an old ring passed on again rings nothing.
         let mut heard = lock(&sp.heard);
@@ -4671,7 +4762,21 @@ async fn quiet(links: Links, d: EndpointId, c: Connection) {
     }
 }
 
-/// Acks a device sends back on a direct link we opened: `space ‖ ts`.
+/// An event's label, for space `id` under key `k`: a relay sees no space.
+fn ev_label(id: &Id, k: &Key) -> Key {
+    crate::crypto::kdf("irch event", &[&id.0, k])
+}
+
+/// The ack device `d` owes for an event at `ts`: none but a member makes
+/// it, so no relay drops an op and acks it.
+fn ev_ack(id: &Id, k: &Key, ts: u64, d: &EndpointId) -> Key {
+    crate::crypto::kdf(
+        "irch event ack",
+        &[&id.0, k, &ts.to_le_bytes(), d.as_bytes()],
+    )
+}
+
+/// Events as they come (`heard`): ops and their acks.
 async fn hear(
     n: Weak<Node>,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<crate::push::Heard>,
@@ -4692,6 +4797,7 @@ async fn hear(
     }
 }
 
+/// Acks a device sends back on a direct link we opened: `space ‖ ts`.
 async fn acks(c: Connection, n: Weak<Node>) {
     let d = c.remote_id();
     while let Ok(mut s) = c.accept_uni().await {
@@ -4989,63 +5095,200 @@ mod tests {
         assert!(c.expect("in time").is_ok(), "b reached a");
     }
 
+    async fn start(net: &Net, name: &str) -> Arc<Node> {
+        let dir =
+            std::env::temp_dir().join(format!("irch-test-{name}-{}", now()));
+        let (name, net) = (name.into(), net.clone());
+        let cfg = Config {
+            dir,
+            name,
+            net,
+            link: None,
+            serve: false,
+            notes: None,
+            big: None,
+        };
+        Node::start(cfg).await.unwrap()
+    }
+
+    async fn until(f: impl Fn() -> bool) -> bool {
+        for _ in 0..400 {
+            if f() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    async fn stop(n: Arc<Node>) {
+        n.shutdown().await;
+        let _ = std::fs::remove_dir_all(&n.dir);
+    }
+
+    fn post(ch: Ch, text: &str) -> Op {
+        Op::Post { channel: ch, text: text.into(), reply: None, files: vec![] }
+    }
+
     /// Our own relays (`--relay`), no DNS, no address given: a member is
     /// found on them, and a post and a call's ring reach it.
     #[tokio::test(flavor = "multi_thread")]
     async fn our_own_relays_find_each_device() {
         let (_r, url) = relay().await;
         let net = Net::Relay(vec![url.parse().unwrap()]);
-        let start = async |name: &str| {
-            let dir = std::env::temp_dir()
-                .join(format!("irch-own-relay-{name}-{}", now()));
-            let cfg = Config {
-                dir,
-                name: name.into(),
-                net: net.clone(),
-                link: None,
-                serve: false,
-                notes: None,
-                big: None,
-            };
-            Node::start(cfg).await.unwrap()
-        };
-        let (a, b) = (start("a").await, start("b").await);
+        let (a, b) = (start(&net, "a").await, start(&net, "b").await);
         let id = a.create("duo").await.unwrap();
         let ch = a.view(&id, |s| s.channels()[0].0).unwrap();
         b.join(&a.invite(&id).await.unwrap()).await.unwrap();
-        let until = async |f: &dyn Fn() -> bool| {
-            for _ in 0..400 {
-                if f() {
-                    return true;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            false
-        };
         let knows =
             || a.view(&id, |s| s.owner_of(&b.device()).is_some()) == Some(true);
-        assert!(until(&knows).await, "a knows b's device");
+        assert!(until(knows).await, "a knows b's device");
         // c comes through a alone, and has never reached b.
-        let c = start("c").await;
+        let c = start(&net, "c").await;
         c.join(&a.invite(&id).await.unwrap()).await.unwrap();
         let c_knows =
             || c.view(&id, |s| s.owner_of(&b.device()).is_some()) == Some(true);
-        assert!(until(&c_knows).await, "c knows b's device");
-        let post = Op::Post {
-            channel: ch,
-            text: "found you".into(),
-            reply: None,
-            files: vec![],
-        };
-        c.publish(&id, post).await.unwrap();
+        assert!(until(c_knows).await, "c knows b's device");
+        c.publish(&id, post(ch, "found you")).await.unwrap();
         let got = || {
             let m =
                 b.view(&id, |s| s.messages(&ch, None, 10)).unwrap_or_default();
             m.iter().any(|m| m.text == "found you")
         };
-        assert!(until(&got).await, "b has it, from c");
+        assert!(until(got).await, "b has it, from c");
         c.call(Some((id, ch))).await.unwrap();
-        assert!(until(&|| !b.calls(&id).is_empty()).await, "b hears the call");
+        assert!(until(|| !b.calls(&id).is_empty()).await, "b hears the call");
+        for n in [a, b, c] {
+            stop(n).await;
+        }
+    }
+
+    /// Who knows only a space's id is neither heard nor met, so never
+    /// synced with and never told its room: only an op that opens, signed
+    /// on the device that sends it, by someone not cut off, is.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn only_a_checked_op_makes_a_neighbor() {
+        let net = Net::Direct;
+        let a = start(&net, "gate").await;
+        let id = a.create("s").await.unwrap();
+        let ch = a.view(&id, |s| s.channels()[0].0).unwrap();
+        let key =
+            async || Invite::decode(&a.invite(&id).await.unwrap()).unwrap().key;
+        let (sp, to, k) = (a.get(&id).unwrap(), a.addr().await, key().await);
+        // From a fresh device, `raw(its id)`; whether we met it.
+        let from = async |raw: &dyn Fn(EndpointId) -> Vec<u8>| {
+            let x = endpoint(&net, None).bind().await.unwrap();
+            let c = x.connect(to.clone(), DIRECT).await.unwrap();
+            let mut s = c.open_uni().await.unwrap();
+            s.write_all(&[&id.0[..], &raw(x.id())].concat()).await.unwrap();
+            s.finish().unwrap();
+            (x, c) // open till read
+        };
+        let met = |x: &(Endpoint, Connection)| sp.nbrs().contains(&x.0.id());
+        let (u, other) =
+            (Me::new(rand()), SecretKey::from_bytes(&rand()).public());
+        let by =
+            |k: Key, d| op::seal(&id, &k, &u.user, d, now(), post(ch, "hi")).1;
+        let junk =
+            Env { epoch: tag(&k), ts: now(), live: false, ct: vec![7; 64] };
+        let bad = [
+            from(&|_| postcard::to_allocvec(&junk).unwrap()).await,
+            from(&|_| by(k, other)).await, // signed for another device
+            from(&|d| by(rand(), d)).await, // a key nobody here holds
+        ];
+        let good = from(&|d| by(k, d)).await;
+        assert!(until(|| met(&good)).await, "a newcomer's op, checked");
+        // Rekeyed: an old invite's holder is cut off.
+        a.rekey(&id).await.unwrap();
+        let old = from(&|d| by(k, d)).await;
+        let k2 = key().await;
+        let fresh = from(&|d| by(k2, d)).await;
+        assert!(until(|| met(&fresh)).await, "under the new key");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!bad.iter().chain([&old]).any(met), "none of these");
+        // Refused a sync, it binds no user to its device either.
+        let (x, room) = (SecretKey::from_bytes(&rand()).public(), [9; 32]);
+        let who = Some(sync::sign(&u.user, &id, &room, &a.ep.id()));
+        let (token, root, devices, tags) = (None, [0; 32], vec![], vec![]);
+        let h = Hello { space: id, root, room, who, token, devices, tags };
+        assert!(matches!(a.find(&h, x).1, Admit::No));
+        assert!(!lock(&a.verified).contains_key(&x));
+        stop(a).await;
+    }
+
+    /// Events name no space; a relay can neither ack them nor (with a
+    /// device two members claim) take them in its place.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn events_name_no_space_and_only_members_ack() {
+        let a = start(&Net::Direct, "events").await;
+        let id = a.create("s").await.unwrap();
+        let ch = a.view(&id, |s| s.channels()[0].0).unwrap();
+        let sp = a.get(&id).unwrap();
+        let k = lock(&sp.book).key(sp.inv.as_ref().unwrap()).0;
+        let dev = |n: u8| SecretKey::from_bytes(&[n; 32]).public();
+        let (u, v) = (Me::new(rand()), Me::new(rand()));
+        let push = |who: &Me, d, lane: EndpointId| {
+            let url = Some(format!("irch:ev:{lane}@https://relay.invalid./"));
+            op::seal(&id, &k, &who.user, d, now(), Op::Push { url }).1
+        };
+        let claims = vec![
+            push(&u, dev(1), dev(11)),
+            push(&v, dev(1), dev(12)),
+            push(&u, dev(2), dev(13)),
+        ];
+        a.ingest(&sp, claims, false);
+        let lanes = a.lanes(&id);
+        assert!(!lanes.contains_key(&dev(1)), "claimed twice: neither's");
+        assert_eq!(lanes[&dev(2)].0, dev(13));
+        // u's op from device 2's lane: under its label, not the space's id.
+        let raw = op::seal(&id, &k, &u.user, dev(2), now(), post(ch, "ev")).1;
+        a.heard(dev(13), &[&[0u8][..], &id.0, &raw].concat());
+        assert!(!sp.nbrs().contains(&dev(2)), "the old, open form");
+        a.heard(dev(13), &[&[0u8][..], &ev_label(&id, &k), &raw].concat());
+        assert!(sp.nbrs().contains(&dev(2)));
+        // Acked only with what a member alone can make.
+        let want = ev_ack(&id, &k, 7, &dev(2));
+        lock(&a.waits).insert(want, (id, 7, dev(2), false));
+        a.heard(dev(13), &[&[1u8][..], &id.0, &7u64.to_le_bytes()].concat());
+        a.heard(
+            dev(13),
+            &[&[1u8][..], &ev_ack(&id, &rand(), 7, &dev(2))].concat(),
+        );
+        assert!(lock(&a.waits).contains_key(&want), "forged");
+        a.heard(dev(13), &[&[1u8][..], &want].concat());
+        assert!(lock(&a.waits).is_empty());
+        stop(a).await;
+    }
+
+    /// While a DM someone knocked with waits for them, knocks of theirs
+    /// open no more: a card's holder fills no disk with DMs.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn knocks_open_one_waiting_dm_each() {
+        let a = start(&Net::Direct, "knocks").await;
+        let id = a.create("s").await.unwrap();
+        let sp = a.get(&id).unwrap();
+        let k = lock(&sp.book).key(sp.inv.as_ref().unwrap()).0;
+        let d = SecretKey::from_bytes(&rand()).public();
+        let knock = |who: &Me| {
+            let dm =
+                postcard::to_allocvec(&Invite::new(who.id(), "", Some(a.id())));
+            let sealed = kem_seal(&a.me.pk(), &id.0, &dm.unwrap()).unwrap();
+            op::seal(&id, &k, &who.user, d, now(), Op::Knock { sealed }).1
+        };
+        let (x, y) = (Me::new(rand()), Me::new(rand()));
+        a.ingest(&sp, vec![knock(&x), knock(&x), knock(&y)], false);
+        let by = |u: Id| {
+            let theirs =
+                |s: &Arc<Space>| s.inv.as_ref().is_some_and(|i| i.owner == u);
+            a.all().iter().filter(|s| theirs(s)).count()
+        };
+        assert!(until(|| by(x.id()) + by(y.id()) == 2).await);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!((by(x.id()), by(y.id()), a.waiting()), (1, 1, 2));
+        a.ingest(&sp, vec![knock(&x)], false);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(by(x.id()), 1, "still one");
+        stop(a).await;
     }
 
     fn book(name: &str, owner: Id) -> (Book, PathBuf) {
@@ -5172,6 +5415,61 @@ mod tests {
         std::fs::remove_file(p).unwrap();
     }
 
+    /// A key an admin handed out by itself (no rekey set it) is older than
+    /// every epoch: still learned, so `Back` chains resolve, but once the
+    /// admin is banned and rekeyed away, its sock puppets' writing under
+    /// it shows nowhere, and admits them to no sync.
+    #[test]
+    fn a_key_an_admin_passed_outlives_no_ban() {
+        let (o, x, p) = (Me::new(rand()), Me::new(rand()), Me::new(rand()));
+        let inv = Invite::new(o.id(), "", None);
+        let (sp, k0, dev) =
+            (inv.id(), inv.key, SecretKey::from_bytes(&rand()).public());
+        let path = std::env::temp_dir().join(format!("irch-planted-{}", now()));
+        let mut b = Book::new(
+            Log::open(&path, |_, _, _| {}).unwrap(),
+            State::new(&inv),
+        );
+        b.keys.insert(tag(&k0), k0);
+        let (kb, k2, ch): (Key, Key, _) = (rand(), rand(), Ch([3; 8]));
+        let boxed = kem_seal(&o.pk(), &rekey_aad(&sp, &tag(&k2)), &k2).unwrap();
+        let mut fold = |ops: Vec<(&Me, Key, u64, Op)>| {
+            let work = ops.into_iter().map(|(who, k, ts, op)| {
+                let (s, raw) = op::seal(&sp, &k, &who.user, dev, ts, op);
+                (s.id, postcard::from_bytes(&raw).unwrap(), Src::Log(0))
+            });
+            b.fold(&sp, &o, work.collect());
+        };
+        let g = Some("g".to_string());
+        fold(vec![
+            (&o, k0, 1, Op::Rekey { epoch: tag(&k0), boxes: vec![] }),
+            (&o, k0, 2, Op::Channel { id: ch, name: g }),
+            (&o, k0, 3, Op::Role { user: x.id(), role: Role::Admin }),
+            (&x, k0, 4, Op::Back { key: kb }),
+        ]);
+        fold(vec![
+            (&o, k0, 5, Op::Role { user: x.id(), role: Role::Banned }),
+            (
+                &o,
+                k0,
+                6,
+                Op::Rekey { epoch: tag(&k2), boxes: vec![(o.id(), boxed)] },
+            ),
+            (&p, kb, 7, post(ch, "p, x's sock puppet")),
+            (&o, k2, 8, post(ch, "o")),
+        ]);
+        assert!(b.keys.contains_key(&tag(&kb)), "learned while x was an admin");
+        let texts: Vec<_> =
+            b.st.messages(&ch, None, 9).into_iter().map(|m| m.text).collect();
+        assert_eq!(texts, ["o"]);
+        let end = &crate::state::END;
+        assert!(
+            b.st.stale(&tag(&kb), end, &p.id())
+                && !b.st.stale(&tag(&k2), end, &o.id())
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn keys_a_rekey_race_cut_off_are_handed_on() {
         let o = Id([1; 32]);
@@ -5183,8 +5481,8 @@ mod tests {
             author: o,
             device,
             ts: n as u64,
-            op: Op::Rekey { epoch: tag(&k[n]), boxes: vec![] },
-            epoch: [0; 8],
+            op: Op::Rekey { epoch: tag(&k[n]), boxes: vec![(o, vec![])] },
+            epoch: tag(&k[0]),
         }));
         b.keys.extend(k.map(|k| (tag(&k), k)));
         // Both rekeys replaced the first key; the second lost the race.

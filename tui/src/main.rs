@@ -199,14 +199,17 @@ async fn main() -> Result<()> {
         // Which one it is, as the app lists it: not secret, unlike its code.
         let (name, id) = (irch_core::storage_name(), n.device());
         println!("Storage node {name}, device {}", id.fmt_short());
-        std::fs::write(code_file, &code)?;
+        std::fs::write(&code_file, &code)?;
         // For nixos.nix; unprinted, so no wider-read journal holds it.
+        // Shown on a terminal only: a service's stdout is its journal.
+        let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
         match std::env::var_os("IRCH_CODE_FILE") {
             Some(p) => std::fs::write(p, &code)?,
-            None => {
+            None if tty => {
                 println!("Storage code (give it to the people you store for):");
                 println!("{code}");
             }
+            None => println!("Storage code: in {}", code_file.display()),
         }
     }
     if let Some(who) = c.doctor {
